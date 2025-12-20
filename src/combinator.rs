@@ -1,25 +1,122 @@
-//! Layer 1: Typed Module Combinators
+//! # Layer 1: Typed Module Combinators
 //!
-//! This module provides Arrow-style combinators for composing signal processing modules
-//! with compile-time type checking. These combinators enable functional composition
-//! of DSP chains that compile down to tight, inlinable loops.
+//! This module provides **Arrow-style combinators** for composing signal processing
+//! modules with compile-time type checking. These combinators enable functional
+//! composition of DSP chains that compile down to tight, inlinable loops with
+//! zero runtime overhead.
+//!
+//! ## Category Theory Background
+//!
+//! In category theory, an **Arrow** is a generalization of functions that allows
+//! for composition while carrying additional structure (like state). The combinators
+//! here implement the Arrow interface:
+//!
+//! ```text
+//! arr:     (a -> b) -> Arrow a b           // Lift pure function
+//! (>>>):   Arrow a b -> Arrow b c -> Arrow a c   // Sequential composition
+//! first:   Arrow a b -> Arrow (a,c) (b,c)  // Apply to first element
+//! (***):   Arrow a b -> Arrow c d -> Arrow (a,c) (b,d)  // Parallel
+//! (&&&):   Arrow a b -> Arrow a c -> Arrow a (b,c)       // Fanout
+//! ```
+//!
+//! ## Arrow Laws
+//!
+//! These combinators satisfy the Arrow laws, ensuring predictable behavior:
+//!
+//! - **Identity**: `id >>> f = f = f >>> id`
+//! - **Associativity**: `(f >>> g) >>> h = f >>> (g >>> h)`
+//! - **First distributes**: `first (f >>> g) = first f >>> first g`
+//!
+//! ## Zero-Cost Abstraction
+//!
+//! Due to Rust's monomorphization, combinator chains compile to the same code as
+//! hand-written loops:
+//!
+//! ```text
+//! // This combinator chain...
+//! let synth = vco.then(vcf).then(vca);
+//!
+//! // ...compiles to essentially:
+//! fn tick(&mut self) -> f64 {
+//!     self.vca.tick(self.vcf.tick(self.vco.tick(())))
+//! }
+//! ```
+//!
+//! ## Example: Building a Synth Voice
+//!
+//! ```rust,ignore
+//! use quiver::combinator::*;
+//!
+//! // Compose modules sequentially
+//! let voice = vco
+//!     .then(filter)
+//!     .then(amplifier);
+//!
+//! // Process in parallel
+//! let stereo = left_processor.parallel(right_processor);
+//!
+//! // Split signal to multiple processors
+//! let effects = signal.fanout(reverb, delay);
+//! ```
 
 use std::marker::PhantomData;
 
 /// A signal processing module with typed input and output.
 ///
-/// This is the fundamental abstraction for DSP processing in quiver.
-/// Modules are stateful processors that transform input samples to output samples.
+/// This is the fundamental abstraction for DSP processing in Quiver. Modules are
+/// **stateful processors** that transform input samples to output samples. The
+/// associated types `In` and `Out` enable compile-time verification of signal flow.
+///
+/// # Mathematical Model
+///
+/// A module represents a morphism in the category of signals:
+///
+/// ```text
+/// M : In → Out
+/// ```
+///
+/// The `tick` method computes one step of this transformation, potentially updating
+/// internal state (like oscillator phase or filter memory).
+///
+/// # Implementing Module
+///
+/// ```rust,ignore
+/// struct Amplifier { gain: f64 }
+///
+/// impl Module for Amplifier {
+///     type In = f64;
+///     type Out = f64;
+///
+///     fn tick(&mut self, input: f64) -> f64 {
+///         input * self.gain
+///     }
+///
+///     fn reset(&mut self) {
+///         // Amplifier is stateless, nothing to reset
+///     }
+/// }
+/// ```
+///
+/// # Thread Safety
+///
+/// All modules must be `Send` to allow audio processing on dedicated threads.
 pub trait Module: Send {
-    /// Input signal type
+    /// Input signal type (e.g., `f64` for mono, `(f64, f64)` for stereo)
     type In;
     /// Output signal type
     type Out;
 
-    /// Process a single sample
+    /// Process a single sample, advancing internal state by one time step.
+    ///
+    /// This is the core DSP function. For a VCO, this updates phase and outputs
+    /// a waveform sample. For a filter, this processes through the filter stages.
     fn tick(&mut self, input: Self::In) -> Self::Out;
 
-    /// Process a block of samples (override for optimization)
+    /// Process a block of samples for efficiency.
+    ///
+    /// Override this method for SIMD optimization or when block processing is
+    /// more efficient than sample-by-sample. The default implementation simply
+    /// calls `tick` in a loop.
     fn process(&mut self, input: &[Self::In], output: &mut [Self::Out])
     where
         Self::In: Clone,
@@ -29,10 +126,16 @@ pub trait Module: Send {
         }
     }
 
-    /// Reset internal state to initial conditions
+    /// Reset internal state to initial conditions.
+    ///
+    /// Called when starting a new note, reinitializing the synth, etc.
+    /// For oscillators, this typically resets phase. For filters, clears memory.
     fn reset(&mut self);
 
-    /// Notify module of sample rate changes
+    /// Notify module of sample rate changes.
+    ///
+    /// Modules with time-dependent behavior (filters, delays, envelopes) should
+    /// recalculate coefficients here.
     fn set_sample_rate(&mut self, _sample_rate: f64) {}
 }
 

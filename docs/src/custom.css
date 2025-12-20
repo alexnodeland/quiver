@@ -1,0 +1,125 @@
+/* Quiver Documentation Custom Styles */
+
+/* Math rendering improvements */
+.katex {
+    font-size: 1.1em;
+}
+
+.katex-display {
+    margin: 1.5em 0;
+    padding: 1em;
+    background: var(--quote-bg);
+    border-radius: 4px;
+    overflow-x: auto;
+}
+
+/* Mermaid diagram styling */
+.mermaid {
+    text-align: center;
+    margin: 2em 0;
+    padding: 1em;
+    background: var(--quote-bg);
+    border-radius: 8px;
+}
+
+/* Signal type badges */
+.signal-audio { color: #4a9eff; font-weight: bold; }
+.signal-cv { color: #f9a826; font-weight: bold; }
+.signal-gate { color: #50c878; font-weight: bold; }
+.signal-voct { color: #e74c3c; font-weight: bold; }
+
+/* Module reference cards */
+.module-card {
+    border: 1px solid var(--quote-border);
+    border-radius: 8px;
+    padding: 1em;
+    margin: 1em 0;
+    background: var(--quote-bg);
+}
+
+.module-card h4 {
+    margin-top: 0;
+    color: var(--links);
+}
+
+.port-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.5em;
+}
+
+.port-in::before {
+    content: "→ ";
+    color: #4a9eff;
+}
+
+.port-out::before {
+    content: "← ";
+    color: #50c878;
+}
+
+/* Voltage reference styling */
+.voltage {
+    font-family: monospace;
+    background: var(--inline-code-color);
+    padding: 0.1em 0.3em;
+    border-radius: 3px;
+}
+
+/* Blockquote styling for callouts */
+blockquote {
+    border-left: 4px solid var(--links);
+    padding-left: 1em;
+    margin-left: 0;
+    font-style: italic;
+}
+
+/* Table improvements */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+}
+
+th {
+    background: var(--quote-bg);
+    text-align: left;
+    padding: 0.5em;
+}
+
+td {
+    padding: 0.5em;
+    border-bottom: 1px solid var(--quote-border);
+}
+
+/* Code block improvements */
+pre {
+    border-radius: 6px;
+    padding: 1em;
+}
+
+/* Architecture layer colors */
+.layer-1 { border-left: 4px solid #4a9eff; }
+.layer-2 { border-left: 4px solid #f9a826; }
+.layer-3 { border-left: 4px solid #50c878; }
+
+/* Navigation improvements */
+.chapter li.chapter-item {
+    margin-top: 0.5em;
+}
+
+/* Syntax highlighting enhancements */
+code .hljs-comment {
+    font-style: italic;
+}
+
+/* Responsive improvements */
+@media (max-width: 768px) {
+    .mermaid {
+        font-size: 0.9em;
+    }
+
+    .port-list {
+        grid-template-columns: 1fr;
+    }
+}
