@@ -286,9 +286,10 @@ impl OscBinding {
 pub struct OscReceiver {
     /// Registered bindings
     bindings: Vec<OscBinding>,
-    /// Message queue counter (reserved for async message handling)
-    #[allow(dead_code)]
-    pending_count: AtomicU32,
+    /// Counter for total messages received
+    message_count: AtomicU32,
+    /// Counter for messages that matched at least one binding
+    matched_count: AtomicU32,
 }
 
 impl OscReceiver {
@@ -296,7 +297,8 @@ impl OscReceiver {
     pub fn new() -> Self {
         Self {
             bindings: Vec::new(),
-            pending_count: AtomicU32::new(0),
+            message_count: AtomicU32::new(0),
+            matched_count: AtomicU32::new(0),
         }
     }
 
@@ -320,12 +322,17 @@ impl OscReceiver {
     }
 
     /// Process an OSC message
+    /// Returns true if at least one binding matched
     pub fn handle_message(&self, msg: &OscMessage) -> bool {
+        self.message_count.fetch_add(1, Ordering::Relaxed);
         let mut handled = false;
         for binding in &self.bindings {
             if binding.apply(msg) {
                 handled = true;
             }
+        }
+        if handled {
+            self.matched_count.fetch_add(1, Ordering::Relaxed);
         }
         handled
     }
@@ -333,6 +340,22 @@ impl OscReceiver {
     /// Get the number of bindings
     pub fn binding_count(&self) -> usize {
         self.bindings.len()
+    }
+
+    /// Get the total number of messages received
+    pub fn message_count(&self) -> u32 {
+        self.message_count.load(Ordering::Relaxed)
+    }
+
+    /// Get the number of messages that matched at least one binding
+    pub fn matched_count(&self) -> u32 {
+        self.matched_count.load(Ordering::Relaxed)
+    }
+
+    /// Reset the message counters
+    pub fn reset_counters(&self) {
+        self.message_count.store(0, Ordering::Relaxed);
+        self.matched_count.store(0, Ordering::Relaxed);
     }
 }
 

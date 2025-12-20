@@ -153,12 +153,9 @@ pub struct VoiceAllocator {
     num_voices: usize,
     /// Allocation mode
     mode: AllocationMode,
-    /// Round-robin index (reserved for alternative allocation strategies)
-    #[allow(dead_code)]
-    next_voice: usize,
     /// Voice states
     voices: Vec<Voice>,
-    /// Recently used voices (for round-robin)
+    /// LRU queue for round-robin voice allocation
     lru_queue: VecDeque<usize>,
 }
 
@@ -178,7 +175,6 @@ impl VoiceAllocator {
         Self {
             num_voices,
             mode: AllocationMode::RoundRobin,
-            next_voice: 0,
             voices,
             lru_queue,
         }
@@ -468,10 +464,11 @@ pub struct PolyPatch {
     allocator: VoiceAllocator,
     /// Per-voice patches
     voice_patches: Vec<Patch>,
+    /// Per-voice input modules for injecting CV signals
+    voice_inputs: Vec<VoiceInput>,
     /// Unison configuration
     unison: UnisonConfig,
-    /// Sample rate (stored for future per-voice sample rate updates)
-    #[allow(dead_code)]
+    /// Sample rate
     sample_rate: f64,
     /// Output buffers (left, right)
     output_left: f64,
@@ -483,15 +480,39 @@ impl PolyPatch {
     pub fn new(num_voices: usize, sample_rate: f64) -> Self {
         let allocator = VoiceAllocator::new(num_voices);
         let voice_patches = (0..num_voices).map(|_| Patch::new(sample_rate)).collect();
+        let voice_inputs = (0..num_voices).map(|_| VoiceInput::new()).collect();
 
         Self {
             allocator,
             voice_patches,
+            voice_inputs,
             unison: UnisonConfig::default(),
             sample_rate,
             output_left: 0.0,
             output_right: 0.0,
         }
+    }
+
+    /// Get the sample rate
+    pub fn sample_rate(&self) -> f64 {
+        self.sample_rate
+    }
+
+    /// Set the sample rate for all voice patches
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+        // Note: Individual patches would need to be recompiled after this
+        // This is typically done by recreating the patches
+    }
+
+    /// Get a voice input module for configuration
+    pub fn voice_input(&self, index: usize) -> Option<&VoiceInput> {
+        self.voice_inputs.get(index)
+    }
+
+    /// Get a mutable voice input module
+    pub fn voice_input_mut(&mut self, index: usize) -> Option<&mut VoiceInput> {
+        self.voice_inputs.get_mut(index)
     }
 
     /// Get the voice allocator
@@ -570,6 +591,14 @@ impl PolyPatch {
         let mut left = 0.0;
         let mut right = 0.0;
 
+        // First, update voice inputs from allocator state
+        for (i, voice) in self.allocator.voices().iter().enumerate() {
+            if let Some(input) = self.voice_inputs.get_mut(i) {
+                input.set_from_voice(voice);
+            }
+        }
+
+        // Process each active voice
         for (i, voice) in self.allocator.voices().iter().enumerate() {
             if voice.state == VoiceState::Free {
                 continue;
@@ -578,13 +607,18 @@ impl PolyPatch {
             // Process unison voices
             let unison_gain = self.unison.voice_gain();
             for u in 0..self.unison.voices {
-                // Detune offset would be applied to voice VCO in full implementation
-                let _detune = self.unison.detune_offset(u);
+                // Calculate detune offset in V/Oct
+                let detune = self.unison.detune_offset(u);
                 let pan = self.unison.pan_position(u);
 
-                // Get the voice patch
+                // Apply detune to voice input V/Oct
+                if let Some(input) = self.voice_inputs.get_mut(i) {
+                    let base_voct = voice.voct;
+                    input.set_voct(base_voct + detune);
+                }
+
+                // Get the voice patch and process
                 if let Some(patch) = self.voice_patches.get_mut(i) {
-                    // Process the patch (simplified - in practice you'd inject voice CV here)
                     let (l, r) = patch.tick();
 
                     // Apply pan law (constant power)

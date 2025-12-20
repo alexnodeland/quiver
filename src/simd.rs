@@ -674,11 +674,7 @@ mod tests {
 
     #[test]
     fn test_lazy_signal() {
-        let mut compute_count = 0;
-        let mut lazy = LazySignal::new(|| {
-            // This won't increment because the closure is called later
-            42.0
-        });
+        let mut lazy = LazySignal::new(|| 42.0);
 
         // First get should compute
         assert_eq!(lazy.get(), 42.0);
