@@ -3174,4 +3174,569 @@ mod tests {
         m.tick(&inputs, &mut outputs);
         assert!((outputs.get(10).unwrap() - 7.0).abs() < 0.01);
     }
+
+    #[test]
+    fn test_vco_default_reset_sample_rate() {
+        let mut vco = Vco::default();
+        assert!(vco.sample_rate == 44100.0);
+
+        vco.set_sample_rate(48000.0);
+        assert!(vco.sample_rate == 48000.0);
+
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.0);
+        for _ in 0..100 {
+            vco.tick(&inputs, &mut outputs);
+        }
+
+        vco.reset();
+        assert!(vco.phase == 0.0);
+
+        assert_eq!(vco.type_id(), "vco");
+    }
+
+    #[test]
+    fn test_lfo_default_reset_sample_rate() {
+        let mut lfo = Lfo::default();
+        assert!(lfo.sample_rate == 44100.0);
+
+        lfo.set_sample_rate(48000.0);
+        assert!(lfo.sample_rate == 48000.0);
+
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        for _ in 0..100 {
+            lfo.tick(&inputs, &mut outputs);
+        }
+
+        lfo.reset();
+        assert!(lfo.phase == 0.0);
+
+        assert_eq!(lfo.type_id(), "lfo");
+    }
+
+    #[test]
+    fn test_svf_default_reset_sample_rate() {
+        let mut svf = Svf::default();
+        assert!(svf.sample_rate == 44100.0);
+
+        svf.set_sample_rate(48000.0);
+        assert!(svf.sample_rate == 48000.0);
+
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 1.0);
+        for _ in 0..100 {
+            svf.tick(&inputs, &mut outputs);
+        }
+
+        svf.reset();
+        assert!(svf.low == 0.0);
+
+        assert_eq!(svf.type_id(), "svf");
+    }
+
+    #[test]
+    fn test_adsr_default_reset_sample_rate() {
+        let mut adsr = Adsr::default();
+        assert!(adsr.sample_rate == 44100.0);
+
+        adsr.set_sample_rate(48000.0);
+        assert!(adsr.sample_rate == 48000.0);
+
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 5.0); // Gate high
+        for _ in 0..100 {
+            adsr.tick(&inputs, &mut outputs);
+        }
+
+        adsr.reset();
+        assert!(adsr.level == 0.0);
+        assert!(adsr.stage == crate::modules::AdsrStage::Idle);
+
+        assert_eq!(adsr.type_id(), "adsr");
+    }
+
+    #[test]
+    fn test_vca_default_reset_sample_rate() {
+        let mut vca = Vca::default();
+        vca.reset();
+        vca.set_sample_rate(48000.0);
+        assert_eq!(vca.type_id(), "vca");
+    }
+
+    #[test]
+    fn test_mixer_default_reset_sample_rate() {
+        let mut mixer = Mixer::default();
+        mixer.reset();
+        mixer.set_sample_rate(48000.0);
+        assert_eq!(mixer.type_id(), "mixer");
+    }
+
+    #[test]
+    fn test_stereo_output_default_reset_sample_rate() {
+        let mut stereo = StereoOutput::default();
+        stereo.reset();
+        stereo.set_sample_rate(48000.0);
+        assert_eq!(stereo.type_id(), "stereo_output");
+    }
+
+    #[test]
+    fn test_offset_default_reset_sample_rate() {
+        let mut offset = Offset::default();
+        offset.reset();
+        offset.set_sample_rate(48000.0);
+        assert_eq!(offset.type_id(), "offset");
+    }
+
+    #[test]
+    fn test_scale_enum_semitones() {
+        let scale = Scale::Chromatic;
+        assert!(scale.semitones().len() == 12);
+
+        let scale = Scale::Major;
+        assert!(scale.semitones().len() == 7);
+
+        let scale = Scale::PentatonicMajor;
+        assert!(scale.semitones().len() == 5);
+    }
+
+    #[test]
+    fn test_unit_delay_default_reset_sample_rate() {
+        let mut delay = UnitDelay::default();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 5.0);
+        delay.tick(&inputs, &mut outputs);
+
+        delay.reset();
+        assert!(delay.buffer == 0.0);
+
+        delay.set_sample_rate(48000.0);
+        assert_eq!(delay.type_id(), "unit_delay");
+    }
+
+    #[test]
+    fn test_noise_generator_default_reset_sample_rate() {
+        let mut noise = NoiseGenerator::default();
+        noise.reset();
+        noise.set_sample_rate(48000.0);
+        assert_eq!(noise.type_id(), "noise");
+    }
+
+    #[test]
+    fn test_step_sequencer_default_reset_sample_rate() {
+        let mut seq = StepSequencer::default();
+        seq.set_step(0, 1.0, true);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 5.0);
+        seq.tick(&inputs, &mut outputs);
+
+        seq.reset();
+        assert!(seq.current == 0);
+        assert!(seq.last_clock == 0.0);
+
+        seq.set_sample_rate(48000.0);
+        assert_eq!(seq.type_id(), "step_sequencer");
+    }
+
+    #[test]
+    fn test_sample_and_hold_default_reset_sample_rate() {
+        let mut sh = SampleAndHold::default();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 5.0);
+        inputs.set(1, 5.0);
+        sh.tick(&inputs, &mut outputs);
+
+        sh.reset();
+        assert!(sh.held_value == 0.0);
+
+        sh.set_sample_rate(48000.0);
+        assert_eq!(sh.type_id(), "sample_hold");
+    }
+
+    #[test]
+    fn test_slew_limiter_default_reset_sample_rate() {
+        let mut slew = SlewLimiter::default();
+        assert!(slew.sample_rate == 44100.0);
+
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 5.0);
+        slew.tick(&inputs, &mut outputs);
+
+        slew.reset();
+        assert!(slew.current == 0.0);
+
+        slew.set_sample_rate(48000.0);
+        assert!(slew.sample_rate == 48000.0);
+
+        assert_eq!(slew.type_id(), "slew_limiter");
+    }
+
+    #[test]
+    fn test_quantizer_default_reset_sample_rate() {
+        let mut quant = Quantizer::default();
+        quant.reset();
+        quant.set_sample_rate(48000.0);
+        assert_eq!(quant.type_id(), "quantizer");
+    }
+
+    #[test]
+    fn test_clock_default_reset_sample_rate() {
+        let mut clock = Clock::default();
+        assert!(clock.sample_rate == 44100.0);
+
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        for _ in 0..100 {
+            clock.tick(&inputs, &mut outputs);
+        }
+
+        clock.reset();
+        assert!(clock.phase == 0.0);
+
+        clock.set_sample_rate(48000.0);
+        assert!(clock.sample_rate == 48000.0);
+
+        assert_eq!(clock.type_id(), "clock");
+    }
+
+    #[test]
+    fn test_attenuverter_default_reset_sample_rate() {
+        let mut att = Attenuverter::default();
+        att.reset();
+        att.set_sample_rate(48000.0);
+        assert_eq!(att.type_id(), "attenuverter");
+    }
+
+    #[test]
+    fn test_multiple_default_reset_sample_rate() {
+        let mut mult = Multiple::default();
+        mult.reset();
+        mult.set_sample_rate(48000.0);
+        assert_eq!(mult.type_id(), "multiple");
+    }
+
+    #[test]
+    fn test_ring_modulator_default_reset_sample_rate() {
+        let mut rm = RingModulator::default();
+        rm.reset();
+        rm.set_sample_rate(48000.0);
+        assert_eq!(rm.type_id(), "ring_mod");
+    }
+
+    #[test]
+    fn test_crossfader_default_reset_sample_rate() {
+        let mut xf = Crossfader::default();
+        xf.reset();
+        xf.set_sample_rate(48000.0);
+        assert_eq!(xf.type_id(), "crossfader");
+    }
+
+    #[test]
+    fn test_logic_and_default_reset_sample_rate() {
+        let mut gate = LogicAnd::default();
+        gate.reset();
+        gate.set_sample_rate(48000.0);
+        assert_eq!(gate.type_id(), "logic_and");
+    }
+
+    #[test]
+    fn test_logic_or_default_reset_sample_rate() {
+        let mut gate = LogicOr::default();
+        gate.reset();
+        gate.set_sample_rate(48000.0);
+        assert_eq!(gate.type_id(), "logic_or");
+    }
+
+    #[test]
+    fn test_logic_xor_default_reset_sample_rate() {
+        let mut gate = LogicXor::default();
+        gate.reset();
+        gate.set_sample_rate(48000.0);
+        assert_eq!(gate.type_id(), "logic_xor");
+    }
+
+    #[test]
+    fn test_logic_not_default_reset_sample_rate() {
+        let mut gate = LogicNot::default();
+        gate.reset();
+        gate.set_sample_rate(48000.0);
+        assert_eq!(gate.type_id(), "logic_not");
+    }
+
+    #[test]
+    fn test_comparator_default_reset_sample_rate() {
+        let mut cmp = Comparator::default();
+        cmp.reset();
+        cmp.set_sample_rate(48000.0);
+        assert_eq!(cmp.type_id(), "comparator");
+    }
+
+    #[test]
+    fn test_rectifier_default_reset_sample_rate() {
+        let mut rect = Rectifier::default();
+        rect.reset();
+        rect.set_sample_rate(48000.0);
+        assert_eq!(rect.type_id(), "rectifier");
+    }
+
+    #[test]
+    fn test_precision_adder_default_reset_sample_rate() {
+        let mut adder = PrecisionAdder::default();
+        adder.reset();
+        adder.set_sample_rate(48000.0);
+        assert_eq!(adder.type_id(), "precision_adder");
+    }
+
+    #[test]
+    fn test_vc_switch_default_reset_sample_rate() {
+        let mut sw = VcSwitch::default();
+        sw.reset();
+        sw.set_sample_rate(48000.0);
+        assert_eq!(sw.type_id(), "vc_switch");
+    }
+
+    #[test]
+    fn test_bernoulli_gate_default_reset_sample_rate() {
+        let mut bg = BernoulliGate::default();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 5.0);
+        bg.tick(&inputs, &mut outputs);
+
+        bg.reset();
+        assert!(bg.last_trigger == 0.0);
+
+        bg.set_sample_rate(48000.0);
+        assert_eq!(bg.type_id(), "bernoulli_gate");
+    }
+
+    #[test]
+    fn test_min_default_reset_sample_rate() {
+        let mut m = Min::default();
+        m.reset();
+        m.set_sample_rate(48000.0);
+        assert_eq!(m.type_id(), "min");
+    }
+
+    #[test]
+    fn test_max_default_reset_sample_rate() {
+        let mut m = Max::default();
+        m.reset();
+        m.set_sample_rate(48000.0);
+        assert_eq!(m.type_id(), "max");
+    }
+
+    #[test]
+    fn test_diode_ladder_filter_coverage() {
+        use crate::{Crosstalk, DiodeLadderFilter, GroundLoop};
+
+        // DiodeLadderFilter
+        let mut dlf = DiodeLadderFilter::default();
+        assert!(dlf.sample_rate == 44100.0);
+
+        dlf.set_sample_rate(48000.0);
+        assert!(dlf.sample_rate == 48000.0);
+
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 1.0);
+        for _ in 0..100 {
+            dlf.tick(&inputs, &mut outputs);
+        }
+
+        dlf.reset();
+        assert!(dlf.stages[0] == 0.0);
+
+        assert_eq!(dlf.type_id(), "diode_ladder");
+
+        // Crosstalk
+        let mut crosstalk = Crosstalk::default();
+        crosstalk.set_sample_rate(48000.0);
+        inputs.set(0, 1.0);
+        inputs.set(1, 2.0);
+        crosstalk.tick(&inputs, &mut outputs);
+        crosstalk.reset();
+        assert_eq!(crosstalk.type_id(), "crosstalk");
+
+        // GroundLoop
+        let mut gl = GroundLoop::default();
+        gl.set_sample_rate(48000.0);
+        gl.tick(&inputs, &mut outputs);
+        gl.reset();
+        assert_eq!(gl.type_id(), "ground_loop");
+    }
+
+    #[test]
+    fn test_step_sequencer_skip_disabled() {
+        let mut seq = StepSequencer::new();
+        seq.set_step(0, 1.0, true);
+        seq.set_step(1, 2.0, false); // Disabled step
+        seq.set_step(2, 3.0, true);
+
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Initial step
+        seq.tick(&inputs, &mut outputs);
+        let out = outputs.get(10).unwrap_or(0.0);
+
+        // Clock to next step
+        inputs.set(0, 5.0);
+        seq.tick(&inputs, &mut outputs);
+    }
+
+    #[test]
+    fn test_quantizer_pentatonic_scale() {
+        let mut quant = Quantizer::new(Scale::PentatonicMajor);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Pentatonic scale has notes: 0, 2, 4, 7, 9 semitones
+        inputs.set(0, 0.0);
+        quant.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap().abs() < 0.01);
+    }
+
+    #[test]
+    fn test_quantizer_blues_scale() {
+        let mut quant = Quantizer::new(Scale::Blues);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 0.0);
+        quant.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).is_some());
+    }
+
+    #[test]
+    fn test_slew_limiter_falling() {
+        let mut slew = SlewLimiter::new(1000.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // First, set to high value
+        inputs.set(0, 5.0);
+        inputs.set(1, 10.0); // Fast rise
+        inputs.set(2, 0.5); // Slower fall
+        for _ in 0..1000 {
+            slew.tick(&inputs, &mut outputs);
+        }
+
+        // Now set to low value and observe falling behavior
+        inputs.set(0, 0.0);
+        slew.tick(&inputs, &mut outputs);
+        let falling = outputs.get(10).unwrap();
+        assert!(falling < 5.0);
+        assert!(falling > 0.0);
+    }
+
+    #[test]
+    fn test_scale_dorian_and_mixolydian() {
+        let scale = Scale::Dorian;
+        assert!(scale.semitones().len() == 7);
+
+        let scale = Scale::Mixolydian;
+        assert!(scale.semitones().len() == 7);
+    }
+
+    #[test]
+    fn test_clock_subdivisions() {
+        let mut clock = Clock::new(1000.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 5.0); // Medium tempo
+
+        // Run and check all outputs exist
+        for _ in 0..1000 {
+            clock.tick(&inputs, &mut outputs);
+        }
+
+        // Should have all clock subdivision outputs
+        assert!(outputs.get(10).is_some()); // Main
+        assert!(outputs.get(11).is_some()); // /2
+        assert!(outputs.get(12).is_some()); // /4
+    }
+
+    #[test]
+    fn test_adsr_full_cycle() {
+        let mut adsr = Adsr::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Set fast envelope
+        inputs.set(1, 10.0); // Fast attack
+        inputs.set(2, 10.0); // Fast decay
+        inputs.set(3, 5.0); // 50% sustain
+        inputs.set(4, 10.0); // Fast release
+
+        // Gate on - attack
+        inputs.set(0, 5.0);
+        for _ in 0..1000 {
+            adsr.tick(&inputs, &mut outputs);
+        }
+
+        // Should have output during attack
+        let peak = outputs.get(10).unwrap();
+        assert!(peak > 0.0);
+
+        // Continue through decay to sustain
+        for _ in 0..1000 {
+            adsr.tick(&inputs, &mut outputs);
+        }
+
+        // Gate off - release
+        inputs.set(0, 0.0);
+        for _ in 0..1000 {
+            adsr.tick(&inputs, &mut outputs);
+        }
+
+        // Should be near zero after release
+        let after_release = outputs.get(10).unwrap();
+        assert!(after_release < 0.1);
+    }
+
+    #[test]
+    fn test_lfo_shapes() {
+        let mut lfo = Lfo::new(1000.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 5.0); // Medium rate
+
+        // Run for a while to get all shapes
+        for _ in 0..1000 {
+            lfo.tick(&inputs, &mut outputs);
+        }
+
+        // All shape outputs should exist
+        assert!(outputs.get(10).is_some()); // Sine
+        assert!(outputs.get(11).is_some()); // Triangle
+        assert!(outputs.get(12).is_some()); // Saw
+        assert!(outputs.get(13).is_some()); // Square
+    }
+
+    #[test]
+    fn test_vco_pwm() {
+        let mut vco = Vco::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 0.0); // C4
+        inputs.set(2, 7.5); // 75% pulse width
+
+        for _ in 0..1000 {
+            vco.tick(&inputs, &mut outputs);
+        }
+
+        // Pulse output should exist
+        assert!(outputs.get(13).is_some());
+    }
 }

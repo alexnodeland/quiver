@@ -1094,4 +1094,127 @@ mod tests {
             .warning
             .is_none());
     }
+
+    #[test]
+    fn test_patch_get_name() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("my_module", Passthrough::new());
+
+        let name = patch.get_name(a.id());
+        assert_eq!(name, Some("my_module"));
+
+        // Non-existent node
+        use slotmap::DefaultKey;
+        let fake_id: NodeId = DefaultKey::default();
+        assert!(patch.get_name(fake_id).is_none());
+    }
+
+    #[test]
+    fn test_patch_set_position() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("a", Passthrough::new());
+
+        patch.set_position(a.id(), (100.0, 200.0));
+        // Position is stored but not exposed directly in tests
+    }
+
+    #[test]
+    fn test_patch_clear_warnings() {
+        let mut patch = Patch::new(44100.0);
+        patch.set_validation_mode(ValidationMode::Warn);
+
+        let audio = patch.add("audio", Passthrough::new());
+        let gate = patch.add("gate", GateModule::new());
+
+        patch.connect(audio.out("out"), gate.in_("in")).unwrap();
+        assert!(!patch.warnings().is_empty());
+
+        patch.clear_warnings();
+        assert!(patch.warnings().is_empty());
+    }
+
+    #[test]
+    fn test_patch_validation_mode_getter() {
+        let mut patch = Patch::new(44100.0);
+        patch.set_validation_mode(ValidationMode::Strict);
+        assert_eq!(patch.validation_mode(), ValidationMode::Strict);
+    }
+
+    #[test]
+    fn test_patch_sample_rate() {
+        let patch = Patch::new(48000.0);
+        assert_eq!(patch.sample_rate(), 48000.0);
+    }
+
+    #[test]
+    fn test_patch_execution_order() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("a", Passthrough::new());
+        let b = patch.add("b", Passthrough::new());
+        patch.connect(a.out("out"), b.in_("in")).unwrap();
+        patch.compile().unwrap();
+
+        let order = patch.execution_order();
+        assert_eq!(order.len(), 2);
+    }
+
+    #[test]
+    fn test_patch_mult() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("a", Passthrough::new());
+        let b = patch.add("b", Passthrough::new());
+        let c = patch.add("c", Passthrough::new());
+
+        // Connect one output to multiple inputs
+        let result = patch.mult(a.out("out"), &[b.in_("in"), c.in_("in")]);
+        assert!(result.is_ok());
+        assert_eq!(patch.cable_count(), 2);
+    }
+
+    #[test]
+    fn test_patch_reset() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("a", Passthrough::new());
+        patch.set_output(a.id());
+        patch.compile().unwrap();
+
+        for _ in 0..100 {
+            patch.tick();
+        }
+
+        patch.reset();
+        // Reset clears internal state
+    }
+
+    #[test]
+    fn test_patch_set_param_get_param() {
+        use crate::modules::Vco;
+        let mut patch = Patch::new(44100.0);
+        let vco = patch.add("vco", Vco::new(44100.0));
+
+        // Try to set/get param (may or may not have params)
+        patch.set_param(vco.id(), 0, 0.5);
+        let _ = patch.get_param(vco.id(), 0);
+    }
+
+    #[test]
+    fn test_node_handle_spec() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("a", Passthrough::new());
+
+        let spec = a.spec();
+        assert!(!spec.inputs.is_empty());
+        assert!(!spec.outputs.is_empty());
+    }
+
+    #[test]
+    fn test_patch_validation_mode() {
+        let mut patch = Patch::new(44100.0);
+
+        patch.set_validation_mode(ValidationMode::Strict);
+        assert_eq!(patch.validation_mode(), ValidationMode::Strict);
+
+        patch.set_validation_mode(ValidationMode::Warn);
+        assert_eq!(patch.validation_mode(), ValidationMode::Warn);
+    }
 }

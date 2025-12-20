@@ -584,4 +584,236 @@ mod tests {
         let mut swap = Swap::<i32, f64>::new();
         assert_eq!(swap.tick((1, 2.0)), (2.0, 1));
     }
+
+    // Additional tests for 100% coverage
+
+    // Test module with sample_rate awareness
+    struct SampleRateAware {
+        sample_rate: f64,
+        count: u32,
+    }
+
+    impl SampleRateAware {
+        fn new() -> Self {
+            Self {
+                sample_rate: 44100.0,
+                count: 0,
+            }
+        }
+    }
+
+    impl Module for SampleRateAware {
+        type In = f64;
+        type Out = f64;
+
+        fn tick(&mut self, input: Self::In) -> Self::Out {
+            self.count += 1;
+            input * self.sample_rate / 44100.0
+        }
+
+        fn reset(&mut self) {
+            self.count = 0;
+        }
+
+        fn set_sample_rate(&mut self, sample_rate: f64) {
+            self.sample_rate = sample_rate;
+        }
+    }
+
+    #[test]
+    fn test_chain_reset_and_sample_rate() {
+        let mut chain = SampleRateAware::new().then(SampleRateAware::new());
+
+        chain.tick(1.0);
+        chain.tick(1.0);
+
+        // Reset should reset both modules
+        chain.reset();
+        assert_eq!(chain.first.count, 0);
+        assert_eq!(chain.second.count, 0);
+
+        // Set sample rate should propagate
+        chain.set_sample_rate(48000.0);
+        assert_eq!(chain.first.sample_rate, 48000.0);
+        assert_eq!(chain.second.sample_rate, 48000.0);
+    }
+
+    #[test]
+    fn test_parallel_reset_and_sample_rate() {
+        let mut par = SampleRateAware::new().parallel(SampleRateAware::new());
+
+        par.tick((1.0, 1.0));
+        par.tick((1.0, 1.0));
+
+        par.reset();
+        par.set_sample_rate(48000.0);
+
+        let result = par.tick((1.0, 1.0));
+        assert!(result.0.abs() < 10.0);
+    }
+
+    #[test]
+    fn test_fanout_reset_and_sample_rate() {
+        let mut fan = SampleRateAware::new().fanout(SampleRateAware::new());
+
+        fan.tick(1.0);
+        fan.tick(1.0);
+
+        fan.reset();
+        fan.set_sample_rate(48000.0);
+
+        let result = fan.tick(1.0);
+        assert!(result.0.abs() < 10.0);
+    }
+
+    #[test]
+    fn test_feedback_reset_and_sample_rate() {
+        let feedback_fn = |x: f64, prev: f64| x + prev * 0.5;
+        let mut fb = SampleRateAware::new().feedback(feedback_fn);
+
+        for _ in 0..10 {
+            fb.tick(1.0);
+        }
+
+        fb.reset();
+        fb.set_sample_rate(48000.0);
+    }
+
+    #[test]
+    fn test_map_reset_and_sample_rate() {
+        let mut mapped = SampleRateAware::new().map(|x| x + 1.0);
+
+        mapped.tick(1.0);
+        mapped.tick(1.0);
+
+        mapped.reset();
+        mapped.set_sample_rate(48000.0);
+
+        let result = mapped.tick(1.0);
+        assert!(result.abs() < 10.0);
+    }
+
+    #[test]
+    fn test_contramap() {
+        let mut contra = Gain { factor: 2.0 }.contramap(|x: f64| x + 1.0);
+        assert!((contra.tick(1.0) - 4.0).abs() < 1e-10); // (1+1) * 2 = 4
+
+        // Test reset and sample_rate
+        contra.reset();
+        contra.set_sample_rate(48000.0);
+    }
+
+    #[test]
+    fn test_contramap_reset_and_sample_rate() {
+        let mut contra = SampleRateAware::new().contramap(|x: f64| x * 2.0);
+
+        contra.tick(1.0);
+        contra.reset();
+        contra.set_sample_rate(48000.0);
+
+        let result = contra.tick(1.0);
+        assert!(result.abs() < 10.0);
+    }
+
+    #[test]
+    fn test_first() {
+        let mut first = Gain { factor: 2.0 }.first::<i32>();
+        let (a, b) = first.tick((3.0, 42));
+        assert!((a - 6.0).abs() < 1e-10);
+        assert_eq!(b, 42);
+    }
+
+    #[test]
+    fn test_first_reset_and_sample_rate() {
+        let mut first = SampleRateAware::new().first::<i32>();
+
+        first.tick((1.0, 0));
+        first.reset();
+        first.set_sample_rate(48000.0);
+
+        let (result, _) = first.tick((1.0, 0));
+        assert!(result.abs() < 10.0);
+    }
+
+    #[test]
+    fn test_second() {
+        let mut second = Gain { factor: 2.0 }.second::<i32>();
+        let (a, b) = second.tick((42, 3.0));
+        assert_eq!(a, 42);
+        assert!((b - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_second_reset_and_sample_rate() {
+        let mut second = SampleRateAware::new().second::<i32>();
+
+        second.tick((0, 1.0));
+        second.reset();
+        second.set_sample_rate(48000.0);
+
+        let (_, result) = second.tick((0, 1.0));
+        assert!(result.abs() < 10.0);
+    }
+
+    #[test]
+    fn test_identity_reset() {
+        let mut id = Identity::<f64>::new();
+        id.reset(); // Should not panic
+        assert!((id.tick(42.0) - 42.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_identity_default() {
+        let id: Identity<f64> = Identity::default();
+        assert!(std::mem::size_of_val(&id) == 0);
+    }
+
+    #[test]
+    fn test_constant_reset() {
+        let mut c = Constant::new(42.0_f64);
+        c.reset(); // Should not panic
+        assert!((c.tick(()) - 42.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_split_reset() {
+        let mut split = Split::<f64>::new();
+        split.reset(); // Should not panic
+    }
+
+    #[test]
+    fn test_split_default() {
+        let split: Split<f64> = Split::default();
+        let (a, b) = Split::<f64>::new().tick(1.0);
+        assert!((a - 1.0).abs() < 1e-10);
+        assert!((b - 1.0).abs() < 1e-10);
+        let _ = split;
+    }
+
+    #[test]
+    fn test_merge_reset() {
+        let mut merge = Merge::new(|a: f64, b: f64| a + b);
+        merge.reset(); // Should not panic
+    }
+
+    #[test]
+    fn test_swap_reset() {
+        let mut swap = Swap::<i32, f64>::new();
+        swap.reset(); // Should not panic
+    }
+
+    #[test]
+    fn test_swap_default() {
+        let swap: Swap<i32, f64> = Swap::default();
+        let _ = swap;
+    }
+
+    #[test]
+    fn test_process_block() {
+        let mut gain = Gain { factor: 2.0 };
+        let input = vec![1.0, 2.0, 3.0, 4.0];
+        let mut output = vec![0.0; 4];
+        gain.process(&input, &mut output);
+        assert_eq!(output, vec![2.0, 4.0, 6.0, 8.0]);
+    }
 }

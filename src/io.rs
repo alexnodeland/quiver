@@ -473,4 +473,145 @@ mod tests {
         output.tick(&inputs, &mut PortValues::new());
         assert!((value.get() - 7.5).abs() < 0.001);
     }
+
+    #[test]
+    fn test_atomic_f64_load_store() {
+        use std::sync::atomic::Ordering;
+        let a = AtomicF64::new(1.0);
+        assert!((a.load(Ordering::SeqCst) - 1.0).abs() < 0.001);
+
+        a.store(99.0, Ordering::SeqCst);
+        assert!((a.load(Ordering::SeqCst) - 99.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_external_input_constructors() {
+        let value = Arc::new(AtomicF64::new(0.0));
+
+        let gate = ExternalInput::gate(value.clone());
+        assert!(gate.spec.outputs[0].kind == SignalKind::Gate);
+
+        let cv = ExternalInput::cv(value.clone());
+        assert!(cv.spec.outputs[0].kind == SignalKind::CvUnipolar);
+
+        let cv_bi = ExternalInput::cv_bipolar(value.clone());
+        assert!(cv_bi.spec.outputs[0].kind == SignalKind::CvBipolar);
+
+        let trigger = ExternalInput::trigger(value.clone());
+        assert!(trigger.spec.outputs[0].kind == SignalKind::Trigger);
+
+        let audio = ExternalInput::audio(value.clone());
+        assert!(audio.spec.outputs[0].kind == SignalKind::Audio);
+    }
+
+    #[test]
+    fn test_external_input_value_ref() {
+        let value = Arc::new(AtomicF64::new(42.0));
+        let input = ExternalInput::voct(value.clone());
+        assert!((input.value_ref().get() - 42.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_external_input_reset_set_sample_rate() {
+        let value = Arc::new(AtomicF64::new(5.0));
+        let mut input = ExternalInput::voct(value.clone());
+
+        input.reset();
+        input.set_sample_rate(48000.0);
+        assert_eq!(input.type_id(), "external_input");
+    }
+
+    #[test]
+    fn test_external_output_reset_type_id() {
+        let value = Arc::new(AtomicF64::new(5.0));
+        let mut output = ExternalOutput::new(value.clone(), SignalKind::Audio);
+
+        output.reset();
+        assert!((value.get() - 0.0).abs() < 0.001);
+
+        output.set_sample_rate(48000.0);
+        assert_eq!(output.type_id(), "external_output");
+        assert!(output.value_ref().get().abs() < 0.001);
+    }
+
+    #[test]
+    fn test_midi_state_default() {
+        let midi = MidiState::default();
+        assert!(midi.pitch.get().abs() < 0.001);
+    }
+
+    #[test]
+    fn test_midi_state_clone() {
+        let mut midi = MidiState::new();
+        midi.handle_message(&[0x90, 60, 100]);
+
+        let cloned = midi.clone();
+        assert!((cloned.pitch.get() - midi.pitch.get()).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_midi_state_reset() {
+        let mut midi = MidiState::new();
+        midi.handle_message(&[0x90, 60, 100]);
+        midi.handle_message(&[0xB0, 1, 127]);
+
+        midi.reset();
+        assert!(midi.pitch.get().abs() < 0.001);
+        assert!(midi.gate.get().abs() < 0.001);
+        assert!(midi.held_notes.is_empty());
+    }
+
+    #[test]
+    fn test_midi_state_all_notes_off() {
+        let mut midi = MidiState::new();
+        midi.handle_message(&[0x90, 60, 100]);
+        midi.handle_message(&[0x90, 62, 100]);
+
+        assert!(midi.notes_active());
+
+        midi.all_notes_off();
+        assert!(!midi.notes_active());
+        assert!(midi.gate.get().abs() < 0.001);
+    }
+
+    #[test]
+    fn test_midi_state_held_notes() {
+        let mut midi = MidiState::new();
+        midi.handle_message(&[0x90, 60, 100]);
+        midi.handle_message(&[0x90, 62, 100]);
+
+        assert_eq!(midi.held_notes(), &[60, 62]);
+    }
+
+    #[test]
+    fn test_midi_state_channel_aftertouch() {
+        let mut midi = MidiState::new();
+        midi.handle_message(&[0xD0, 100]);
+        assert!(midi.aftertouch.get() > 0.0);
+    }
+
+    #[test]
+    fn test_midi_state_poly_aftertouch() {
+        let mut midi = MidiState::new();
+        midi.handle_message(&[0xA0, 60, 100]);
+        assert!(midi.aftertouch.get() > 0.0);
+    }
+
+    #[test]
+    fn test_midi_state_expression() {
+        let mut midi = MidiState::new();
+        midi.handle_message(&[0xB0, 11, 100]);
+        assert!(midi.expression.get() > 0.0);
+    }
+
+    #[test]
+    fn test_midi_state_note_on_with_zero_velocity() {
+        let mut midi = MidiState::new();
+        midi.handle_message(&[0x90, 60, 100]);
+        assert!(midi.gate.get() > 0.0);
+
+        // Note on with velocity 0 = note off
+        midi.handle_message(&[0x90, 60, 0]);
+        assert!(midi.gate.get().abs() < 0.001);
+    }
 }

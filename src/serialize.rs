@@ -804,4 +804,121 @@ mod tests {
         assert_eq!(cable.to, "vcf.in");
         assert_eq!(cable.attenuation, Some(0.5));
     }
+
+    #[test]
+    fn test_patch_def_default() {
+        let def = PatchDef::default();
+        assert_eq!(def.name, "Untitled");
+    }
+
+    #[test]
+    fn test_module_def_with_position() {
+        let def = ModuleDef::new("vco1", "vco").with_position(100.0, 200.0);
+        assert_eq!(def.position, Some((100.0, 200.0)));
+    }
+
+    #[test]
+    fn test_cable_def_with_offset() {
+        let cable = CableDef::new("a.out", "b.in").with_offset(2.5);
+        assert_eq!(cable.offset, Some(2.5));
+    }
+
+    #[test]
+    fn test_cable_def_with_modulation() {
+        let cable = CableDef::new("a.out", "b.in").with_modulation(0.5, 1.0);
+        assert_eq!(cable.attenuation, Some(0.5));
+        assert_eq!(cable.offset, Some(1.0));
+    }
+
+    #[test]
+    fn test_module_registry_default() {
+        let registry = ModuleRegistry::default();
+        assert!(registry.list_modules().count() > 0);
+    }
+
+    #[test]
+    fn test_module_registry_list_by_category() {
+        let registry = ModuleRegistry::new();
+        let oscillators: Vec<_> = registry.list_by_category("Oscillators").collect();
+        assert!(!oscillators.is_empty());
+    }
+
+    #[test]
+    fn test_module_registry_instantiate_all() {
+        let registry = ModuleRegistry::new();
+        for meta in registry.list_modules() {
+            let instance = registry.instantiate(&meta.type_id, 44100.0);
+            assert!(instance.is_some(), "Failed to instantiate: {}", meta.type_id);
+        }
+    }
+
+    #[test]
+    fn test_patch_from_def_unknown_module() {
+        let registry = ModuleRegistry::new();
+        let def = PatchDef {
+            version: 1,
+            name: "Test".to_string(),
+            author: None,
+            description: None,
+            tags: vec![],
+            modules: vec![ModuleDef::new("unknown", "nonexistent_module")],
+            cables: vec![],
+            parameters: HashMap::new(),
+        };
+
+        let result = Patch::from_def(&def, &registry, 44100.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_patch_from_def_with_offset_only() {
+        let registry = ModuleRegistry::new();
+        let def = PatchDef {
+            version: 1,
+            name: "Test".to_string(),
+            author: None,
+            description: None,
+            tags: vec![],
+            modules: vec![
+                ModuleDef::new("vco", "vco"),
+                ModuleDef::new("output", "stereo_output"),
+            ],
+            cables: vec![CableDef {
+                from: "vco.saw".to_string(),
+                to: "output.left".to_string(),
+                attenuation: None,
+                offset: Some(0.5),
+            }],
+            parameters: HashMap::new(),
+        };
+
+        let result = Patch::from_def(&def, &registry, 44100.0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_patch_from_def_with_attenuated_connection() {
+        let registry = ModuleRegistry::new();
+        let def = PatchDef {
+            version: 1,
+            name: "Test".to_string(),
+            author: None,
+            description: None,
+            tags: vec![],
+            modules: vec![
+                ModuleDef::new("vco", "vco"),
+                ModuleDef::new("output", "stereo_output"),
+            ],
+            cables: vec![CableDef {
+                from: "vco.saw".to_string(),
+                to: "output.left".to_string(),
+                attenuation: Some(0.5),
+                offset: None,
+            }],
+            parameters: HashMap::new(),
+        };
+
+        let result = Patch::from_def(&def, &registry, 44100.0);
+        assert!(result.is_ok());
+    }
 }

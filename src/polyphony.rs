@@ -970,4 +970,269 @@ mod tests {
         poly.panic();
         assert_eq!(poly.allocator().active_count(), 0);
     }
+
+    #[test]
+    fn test_voct_to_midi_note() {
+        assert_eq!(voct_to_midi_note(0.0), 60);
+        assert_eq!(voct_to_midi_note(1.0), 72);
+        assert_eq!(voct_to_midi_note(-1.0), 48);
+    }
+
+    #[test]
+    fn test_voice_is_free() {
+        let voice = Voice::new(0);
+        assert!(voice.is_free());
+
+        let mut playing = Voice::new(1);
+        playing.note_on(60, 1.0);
+        assert!(!playing.is_free());
+    }
+
+    #[test]
+    fn test_voice_is_playing_note() {
+        let mut voice = Voice::new(0);
+        voice.note_on(60, 1.0);
+        assert!(voice.is_playing_note(60));
+        assert!(!voice.is_playing_note(61));
+    }
+
+    #[test]
+    fn test_voice_note_off_and_free() {
+        let mut voice = Voice::new(0);
+        voice.note_on(60, 1.0);
+        voice.note_off();
+        assert!(voice.state == VoiceState::Releasing);
+
+        voice.free();
+        assert!(voice.is_free());
+    }
+
+    #[test]
+    fn test_voice_tick() {
+        let mut voice = Voice::new(0);
+        voice.note_on(60, 1.0);
+        voice.tick();
+        assert!(voice.trigger == 0.0);
+    }
+
+    #[test]
+    fn test_voice_allocator_mode() {
+        let mut allocator = VoiceAllocator::new(4);
+        allocator.set_mode(AllocationMode::QuietestSteal);
+        assert_eq!(allocator.mode(), AllocationMode::QuietestSteal);
+    }
+
+    #[test]
+    fn test_voice_allocator_num_voices() {
+        let allocator = VoiceAllocator::new(8);
+        assert_eq!(allocator.num_voices(), 8);
+    }
+
+    #[test]
+    fn test_voice_allocator_voice_access() {
+        let mut allocator = VoiceAllocator::new(4);
+
+        let voice = allocator.voice(0);
+        assert!(voice.is_some());
+
+        let voice_mut = allocator.voice_mut(0);
+        assert!(voice_mut.is_some());
+    }
+
+    #[test]
+    fn test_voice_allocator_voices() {
+        let allocator = VoiceAllocator::new(4);
+        let voices: Vec<_> = allocator.voices().iter().collect();
+        assert_eq!(voices.len(), 4);
+    }
+
+    #[test]
+    fn test_voice_allocator_voices_mut() {
+        let mut allocator = VoiceAllocator::new(4);
+        let voices: Vec<_> = allocator.voices_mut().iter_mut().collect();
+        assert_eq!(voices.len(), 4);
+    }
+
+    #[test]
+    fn test_voice_allocator_all_notes_off() {
+        let mut allocator = VoiceAllocator::new(4);
+        allocator.note_on(60, 1.0);
+        allocator.note_on(64, 1.0);
+        allocator.all_notes_off();
+        // All voices should be in releasing state
+        assert!(allocator.voices().iter().all(|v| v.state == VoiceState::Releasing || v.state == VoiceState::Free));
+    }
+
+    #[test]
+    fn test_voice_allocator_tick() {
+        let mut allocator = VoiceAllocator::new(4);
+        allocator.note_on(60, 1.0);
+        allocator.tick();
+        // After tick, trigger should be cleared
+    }
+
+    #[test]
+    fn test_voice_allocator_set_envelope_level() {
+        let mut allocator = VoiceAllocator::new(4);
+        let idx = allocator.note_on(60, 1.0);
+        if let Some(i) = idx {
+            allocator.set_envelope_level(i, 0.5);
+        }
+    }
+
+    #[test]
+    fn test_unison_config_voice_gain() {
+        let config = UnisonConfig::new(4, 10.0);
+        let gain = config.voice_gain();
+        assert!(gain > 0.0 && gain < 1.0);
+    }
+
+    #[test]
+    fn test_poly_patch_sample_rate() {
+        let poly = PolyPatch::new(4, 48000.0);
+        assert_eq!(poly.sample_rate(), 48000.0);
+    }
+
+    #[test]
+    fn test_poly_patch_set_sample_rate() {
+        let mut poly = PolyPatch::new(4, 44100.0);
+        poly.set_sample_rate(48000.0);
+        assert_eq!(poly.sample_rate(), 48000.0);
+    }
+
+    #[test]
+    fn test_poly_patch_voice_input_access() {
+        let mut poly = PolyPatch::new(4, 44100.0);
+
+        let input = poly.voice_input(0);
+        assert!(input.is_some());
+
+        let input_mut = poly.voice_input_mut(0);
+        assert!(input_mut.is_some());
+    }
+
+    #[test]
+    fn test_poly_patch_allocator_mut() {
+        let mut poly = PolyPatch::new(4, 44100.0);
+        let alloc = poly.allocator_mut();
+        alloc.set_mode(AllocationMode::OldestSteal);
+    }
+
+    #[test]
+    fn test_poly_patch_unison() {
+        let mut poly = PolyPatch::new(4, 44100.0);
+        poly.set_unison(UnisonConfig::new(2, 5.0));
+
+        let unison = poly.unison();
+        assert!(unison.voices > 0);
+    }
+
+    #[test]
+    fn test_poly_patch_voice_patches_access() {
+        let mut poly = PolyPatch::new(4, 44100.0);
+
+        let patches: Vec<_> = poly.voice_patches().iter().collect();
+        assert_eq!(patches.len(), 4);
+
+        let patches_mut: Vec<_> = poly.voice_patches_mut().iter_mut().collect();
+        assert_eq!(patches_mut.len(), 4);
+
+        let patch = poly.voice_patch(0);
+        assert!(patch.is_some());
+
+        let patch_mut = poly.voice_patch_mut(0);
+        assert!(patch_mut.is_some());
+    }
+
+    #[test]
+    fn test_poly_patch_all_notes_off() {
+        let mut poly = PolyPatch::new(4, 44100.0);
+        poly.note_on(60, 100);
+        poly.note_on(64, 100);
+        poly.all_notes_off();
+    }
+
+    #[test]
+    fn test_poly_patch_compile_tick_output() {
+        let mut poly = PolyPatch::new(2, 44100.0);
+        poly.compile().unwrap();
+        poly.note_on(60, 100);
+        poly.tick();
+        let (left, right) = poly.output();
+        let _ = (left, right);
+    }
+
+    #[test]
+    fn test_poly_patch_reset() {
+        let mut poly = PolyPatch::new(4, 44100.0);
+        poly.note_on(60, 100);
+        poly.reset();
+    }
+
+    #[test]
+    fn test_voice_input_default() {
+        let input = VoiceInput::default();
+        assert!((input.voct - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_voice_input_set_from_voice() {
+        let mut voice = Voice::new(0);
+        voice.note_on(72, 0.8);
+
+        let mut input = VoiceInput::new();
+        input.set_from_voice(&voice);
+
+        assert!((input.voct - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_voice_input_reset_type_id() {
+        let mut input = VoiceInput::new();
+        input.set_voct(1.0);
+        input.reset();
+        assert!((input.voct - 0.0).abs() < 0.001);
+        assert_eq!(input.type_id(), "voice_input");
+        input.set_sample_rate(48000.0);
+    }
+
+    #[test]
+    fn test_voice_input_set_trigger() {
+        let mut input = VoiceInput::new();
+        input.set_trigger(1.0);
+        assert!((input.trigger - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_voice_mixer() {
+        let mixer = VoiceMixer::new(4);
+        let spec = mixer.port_spec();
+        assert!(!spec.inputs.is_empty());
+        assert!(!spec.outputs.is_empty());
+    }
+
+    #[test]
+    fn test_voice_mixer_tick() {
+        let mut mixer = VoiceMixer::new(2);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 1.0);
+        inputs.set(1, 2.0);
+        inputs.set(2, 3.0);
+        inputs.set(3, 4.0);
+
+        mixer.tick(&inputs, &mut outputs);
+
+        assert!(outputs.get(100).is_some());
+        assert!(outputs.get(101).is_some());
+    }
+
+    #[test]
+    fn test_voice_mixer_reset_type_id() {
+        let mut mixer = VoiceMixer::new(2);
+        mixer.reset();
+        mixer.set_sample_rate(48000.0);
+        assert_eq!(mixer.type_id(), "voice_mixer");
+    }
 }
