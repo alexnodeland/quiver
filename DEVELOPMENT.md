@@ -4,9 +4,9 @@ This document outlines the development roadmap and current status for the Quiver
 
 ## Current Status
 
-**Version**: 0.3.0 (Phase 3 Complete)
+**Version**: 0.4.0 (Phase 4 Complete)
 
-The library now includes all Phase 1 (Core Foundation), Phase 2 (Hardware Fidelity), and Phase 3 (Analog Modeling Refinement) features:
+The library now includes all Phase 1 (Core Foundation), Phase 2 (Hardware Fidelity), Phase 3 (Analog Modeling Refinement), and Phase 4 (Advanced Features) features:
 
 ### Completed Features
 
@@ -135,26 +135,37 @@ The library now includes all Phase 1 (Core Foundation), Phase 2 (Hardware Fideli
    - [x] `Crosstalk` - Channel crosstalk simulation with HF emphasis
    - [x] `GroundLoop` - 50/60 Hz hum with harmonics and thermal modulation
 
+#### Phase 4: Advanced Features (Complete)
+
+1. **Polyphony Support**
+   - [x] `VoiceAllocator` - Voice allocation with multiple algorithms
+   - [x] `AllocationMode` - Round-robin, oldest-steal, quietest-steal, priority modes
+   - [x] `Voice` - Per-voice state management (note, velocity, gate, trigger)
+   - [x] `PolyPatch` - Polyphonic patch container
+   - [x] `VoiceInput` - Per-voice CV injection module
+   - [x] `VoiceMixer` - Multi-voice summing
+   - [x] `UnisonConfig` - Unison/spread with detune and stereo panning
+
+2. **Performance Optimization**
+   - [x] `AudioBlock` - SIMD-aligned audio buffer
+   - [x] SIMD vectorization (with `simd` feature flag)
+   - [x] `BlockProcessor` - Block-oriented processing utilities
+   - [x] `LazySignal` / `LazyBlock` - Lazy evaluation framework
+   - [x] `StereoBlock` - Stereo audio block with pan/mix operations
+   - [x] `RingBuffer` - Efficient delay line implementation
+   - [x] `ProcessContext` - Block processing context with timing info
+
+3. **Extended I/O**
+   - [x] OSC protocol support (`OscMessage`, `OscPattern`, `OscReceiver`, `OscBinding`)
+   - [x] `OscInput` - OSC to CV module
+   - [x] Plugin wrapper infrastructure (`PluginWrapper`, `PluginParameter`, `PluginInfo`)
+   - [x] `AudioBusConfig` - Plugin audio bus configuration
+   - [x] Web Audio interface (`WebAudioProcessor`, `WebAudioWorklet`, `WebAudioConfig`)
+   - [x] Stereo interleave/deinterleave utilities for Web Audio
+
 ---
 
 ## Development Roadmap
-
-### Phase 4: Advanced Features
-
-1. **Polyphony Support**
-   - Voice allocation
-   - Per-voice modules
-   - Unison/spread
-
-2. **Performance Optimization**
-   - SIMD vectorization
-   - Block processing
-   - Lazy evaluation
-
-3. **Extended I/O**
-   - OSC protocol support
-   - VST/AU plugin wrapper
-   - Web Audio backend
 
 ### Phase 5: Ecosystem
 

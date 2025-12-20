@@ -12,6 +12,12 @@
 //! - **Layer 2: Port System** - Signal conventions, port definitions, and type-erased graph interface
 //! - **Layer 3: Patch Graph** - Runtime-configurable topology with arbitrary signal routing
 //!
+//! ## Phase 4 Features
+//!
+//! - **Polyphony Support** - Voice allocation, per-voice modules, unison/spread
+//! - **Performance Optimization** - SIMD vectorization, block processing, lazy evaluation
+//! - **Extended I/O** - OSC protocol, plugin wrapper infrastructure, Web Audio interface
+//!
 //! ## Quick Start
 //!
 //! ```rust,no_run
@@ -41,11 +47,14 @@
 
 pub mod analog;
 pub mod combinator;
+pub mod extended_io;
 pub mod graph;
 pub mod io;
 pub mod modules;
+pub mod polyphony;
 pub mod port;
 pub mod serialize;
+pub mod simd;
 
 /// Prelude module for convenient imports
 pub mod prelude {
@@ -93,6 +102,25 @@ pub mod prelude {
 
     // Serialization
     pub use crate::serialize::{CableDef, ModuleDef, ModuleMetadata, ModuleRegistry, PatchDef};
+
+    // Phase 4: Polyphony Support
+    pub use crate::polyphony::{
+        AllocationMode, PolyPatch, UnisonConfig, Voice, VoiceAllocator, VoiceInput, VoiceMixer,
+        VoiceState,
+    };
+
+    // Phase 4: SIMD and Block Processing
+    pub use crate::simd::{
+        AudioBlock, BlockProcessor, LazyBlock, LazySignal, ProcessContext, RingBuffer,
+        StereoBlock, DEFAULT_BLOCK_SIZE, SIMD_BLOCK_SIZE,
+    };
+
+    // Phase 4: Extended I/O
+    pub use crate::extended_io::{
+        AudioBusConfig, OscBinding, OscInput, OscMessage, OscPattern, OscReceiver, OscValue,
+        PluginCategory, PluginInfo, PluginParameter, PluginWrapper, WebAudioConfig,
+        WebAudioProcessor, WebAudioWorklet,
+    };
 }
 
 // Re-export key types at crate root for convenience
