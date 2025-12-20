@@ -820,11 +820,11 @@ mod tests {
         // Error should be small but non-zero (within ±50 cents = ±0.042 V/Oct)
         assert!((voct_out - voct_in).abs() < 0.05);
 
-        // Error should increase with octave distance
-        let error_at_c4 = (tracking.apply(0.0, 0.0) - 0.0).abs();
-        let error_at_c6 = (tracking.apply(2.0, 0.0) - 2.0).abs();
-        // C6 is 2 octaves away, so error should be larger
-        assert!(error_at_c6 >= error_at_c4 * 0.5); // Allow some variance due to randomness
+        // Error should increase with octave distance (test signed error, not absolute)
+        let error_at_c4 = tracking.apply(0.0, 0.0) - 0.0;
+        let error_at_c6 = tracking.apply(2.0, 0.0) - 2.0;
+        // C6 is 2 octaves away, so signed error should be larger (octave_error_coef is always positive)
+        assert!(error_at_c6 >= error_at_c4);
     }
 
     #[test]
