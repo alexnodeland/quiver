@@ -9,72 +9,90 @@ use quiver::prelude::*;
 fn main() {
     println!("=== Plugin Integration Demo ===\n");
 
-    // Define plugin metadata
+    // Define plugin metadata using the actual PluginInfo structure
     let info = PluginInfo {
+        id: "com.quiver.synth".to_string(),
         name: "QuiverSynth".to_string(),
         vendor: "Quiver Audio".to_string(),
-        unique_id: 0x51564152, // "QVAR"
-        version: (1, 0, 0),
+        version: "1.0.0".to_string(),
         category: PluginCategory::Instrument,
-        num_inputs: 0,
-        num_outputs: 2,
-        has_editor: false,
+        is_synth: true,
+        sample_rates: vec![44100.0, 48000.0, 96000.0],
+        max_block_size: 512,
+        latency: 0,
     };
 
     println!("Plugin Info:");
+    println!("  ID: {}", info.id);
     println!("  Name: {}", info.name);
     println!("  Vendor: {}", info.vendor);
-    println!("  ID: 0x{:08X}", info.unique_id);
-    println!(
-        "  Version: {}.{}.{}",
-        info.version.0, info.version.1, info.version.2
-    );
+    println!("  Version: {}", info.version);
     println!("  Category: {:?}", info.category);
-    println!("  I/O: {} in, {} out", info.num_inputs, info.num_outputs);
+    println!("  Is Synth: {}", info.is_synth);
+    println!("  Supported sample rates: {:?}", info.sample_rates);
 
     // Define parameters that would be exposed to the DAW
     let parameters = vec![
         PluginParameter {
+            id: 0,
             name: "Cutoff".to_string(),
+            short_name: "Cut".to_string(),
             default: 0.5,
             min: 0.0,
             max: 1.0,
             unit: "%".to_string(),
+            steps: 0, // Continuous
         },
         PluginParameter {
+            id: 1,
             name: "Resonance".to_string(),
+            short_name: "Res".to_string(),
             default: 0.25,
             min: 0.0,
             max: 1.0,
             unit: "%".to_string(),
+            steps: 0,
         },
         PluginParameter {
+            id: 2,
             name: "Attack".to_string(),
+            short_name: "Atk".to_string(),
             default: 0.01,
             min: 0.001,
             max: 2.0,
             unit: "s".to_string(),
+            steps: 0,
         },
         PluginParameter {
+            id: 3,
             name: "Release".to_string(),
+            short_name: "Rel".to_string(),
             default: 0.3,
             min: 0.01,
             max: 5.0,
             unit: "s".to_string(),
+            steps: 0,
         },
     ];
 
     println!("\nExposed Parameters:");
     for param in &parameters {
         println!(
-            "  {}: {} - {} {} (default: {})",
-            param.name, param.min, param.max, param.unit, param.default
+            "  {} ({}): {} - {} {} (default: {})",
+            param.name, param.short_name, param.min, param.max, param.unit, param.default
         );
     }
 
-    // Create the wrapper
+    // Define audio bus configuration
+    let bus_config = AudioBusConfig {
+        inputs: 0,
+        outputs: 2,
+        name: "Main".to_string(),
+    };
+
+    // Create the plugin wrapper
     let sample_rate = 44100.0;
-    let wrapper = PluginWrapper::new(info, sample_rate);
+    let _wrapper = PluginWrapper::new(info, bus_config.clone());
 
     println!("\nPlugin wrapper created.");
 
@@ -82,15 +100,17 @@ fn main() {
     println!("\n--- Web Audio Configuration ---\n");
 
     let web_config = WebAudioConfig {
+        input_channels: 0,
+        output_channels: 2,
         sample_rate: 44100.0,
-        channels: 2,
-        buffer_size: 128,
+        block_size: 128,
     };
 
     println!("WebAudioConfig:");
+    println!("  Input Channels: {}", web_config.input_channels);
+    println!("  Output Channels: {}", web_config.output_channels);
     println!("  Sample Rate: {} Hz", web_config.sample_rate);
-    println!("  Channels: {}", web_config.channels);
-    println!("  Buffer Size: {} samples", web_config.buffer_size);
+    println!("  Block Size: {} samples", web_config.block_size);
 
     // Create a patch for the web audio processor
     let mut patch = Patch::new(sample_rate);
@@ -106,16 +126,14 @@ fn main() {
     patch.set_output(output.id());
     patch.compile().unwrap();
 
-    // Demonstrate WebAudioProcessor
-    let processor = WebAudioProcessor::new(patch);
-
-    // Simulate processing a block (like in AudioWorklet)
+    // Process audio using the patch directly
+    // (In a real web audio scenario, you'd implement WebAudioProcessor trait)
     let mut left_out = vec![0.0_f32; 128];
     let mut right_out = vec![0.0_f32; 128];
 
-    // In a real scenario, this would be called by the Web Audio thread
+    // Simulate processing a block (like in AudioWorklet)
     for i in 0..128 {
-        let (l, r) = processor.tick();
+        let (l, r) = patch.tick();
         left_out[i] = l as f32;
         right_out[i] = r as f32;
     }
@@ -124,22 +142,29 @@ fn main() {
     let peak_r = right_out.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
 
     println!("\nProcessed 128-sample block:");
-    println!("  Left peak: {:.3}", peak_l);
-    println!("  Right peak: {:.3}", peak_r);
+    println!("  Left peak: {:.3}V", peak_l);
+    println!("  Right peak: {:.3}V", peak_r);
+    println!("\n  (WebAudioProcessor is a trait - implement it for your wrapper type)");
 
     // Demonstrate OSC control setup
     println!("\n--- OSC Control Setup ---\n");
 
-    let bindings = vec![
-        OscBinding::new("/synth/cutoff", "vcf.cutoff", 0.0..10.0),
-        OscBinding::new("/synth/resonance", "vcf.resonance", 0.0..1.0),
-        OscBinding::new("/synth/attack", "env.attack", 0.001..2.0),
-    ];
+    // Create atomic values that can be controlled via OSC
+    use quiver::AtomicF64;
+    use std::sync::Arc;
 
-    println!("OSC Bindings:");
-    for binding in &bindings {
-        println!("  {} -> {}", binding.address(), binding.target());
-    }
+    let cutoff_value = Arc::new(AtomicF64::new(5.0));
+    let resonance_value = Arc::new(AtomicF64::new(0.25));
+
+    // Create OSC bindings with pattern matching and scaling
+    let cutoff_binding =
+        OscBinding::new("/synth/cutoff", Arc::clone(&cutoff_value)).with_scale(10.0); // Scale 0-1 to 0-10V
+
+    let resonance_binding = OscBinding::new("/synth/resonance", Arc::clone(&resonance_value));
+
+    println!("OSC Bindings configured:");
+    println!("  /synth/cutoff -> cutoff CV (scaled 0-10V)");
+    println!("  /synth/resonance -> resonance CV");
 
     // Demonstrate OSC message parsing
     let msg = OscMessage {
@@ -160,21 +185,31 @@ fn main() {
         pattern.matches(&msg.address)
     );
 
+    // Show current values
+    println!("\nCurrent atomic values:");
+    println!("  Cutoff: {:.2}V", cutoff_value.get());
+    println!("  Resonance: {:.2}", resonance_value.get());
+
+    // Demonstrate the bindings are ready for use
+    let _ = (cutoff_binding, resonance_binding);
+
     println!("\n--- Audio Bus Configuration ---\n");
 
-    let bus_config = AudioBusConfig {
-        main_inputs: 0,
-        main_outputs: 2,
-        aux_inputs: vec![("Sidechain".to_string(), 2)],
-        aux_outputs: vec![],
+    let sidechain_config = AudioBusConfig {
+        inputs: 2,
+        outputs: 0,
+        name: "Sidechain".to_string(),
     };
 
-    println!("Bus Configuration:");
-    println!("  Main inputs: {}", bus_config.main_inputs);
-    println!("  Main outputs: {}", bus_config.main_outputs);
-    for (name, channels) in &bus_config.aux_inputs {
-        println!("  Aux input '{}': {} channels", name, channels);
-    }
+    println!("Main Bus Configuration:");
+    println!("  Inputs: {}", bus_config.inputs);
+    println!("  Outputs: {}", bus_config.outputs);
+    println!("  Name: {}", bus_config.name);
+
+    println!("\nSidechain Bus Configuration:");
+    println!("  Inputs: {}", sidechain_config.inputs);
+    println!("  Outputs: {}", sidechain_config.outputs);
+    println!("  Name: {}", sidechain_config.name);
 
     println!("\nPlugin integration demo complete.");
     println!("\nTo build a real plugin:");

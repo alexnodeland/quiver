@@ -87,17 +87,41 @@ fn main() {
     println!("Generated 0.5s of audio, peak: {:.2}V", peak);
     println!("\nRound-trip serialization successful!");
 
-    // Show available presets
+    // Show available presets using static methods
     println!("\n--- Built-in Presets ---");
-    let library = PresetLibrary::new();
 
-    println!("\nTutorial presets:");
-    for preset in library.by_category(PresetCategory::Tutorial) {
-        println!("  {} - {}", preset.name, preset.description);
+    // Get all presets
+    let all_presets = PresetLibrary::list();
+    println!("\nTotal available presets: {}", all_presets.len());
+
+    // Filter by category using static method
+    println!("\nBass presets:");
+    for preset in PresetLibrary::by_category(PresetCategory::Bass) {
+        let desc = if preset.description.is_empty() {
+            "No description"
+        } else {
+            &preset.description
+        };
+        println!("  {} - {}", preset.name, desc);
     }
 
-    println!("\nBass presets:");
-    for preset in library.by_category(PresetCategory::Bass) {
-        println!("  {} - {}", preset.name, preset.description);
+    println!("\nPad presets:");
+    for preset in PresetLibrary::by_category(PresetCategory::Pad) {
+        let desc = if preset.description.is_empty() {
+            "No description"
+        } else {
+            &preset.description
+        };
+        println!("  {} - {}", preset.name, desc);
+    }
+
+    println!("\nLead presets:");
+    for preset in PresetLibrary::by_category(PresetCategory::Lead) {
+        let desc = if preset.description.is_empty() {
+            "No description"
+        } else {
+            &preset.description
+        };
+        println!("  {} - {}", preset.name, desc);
     }
 }

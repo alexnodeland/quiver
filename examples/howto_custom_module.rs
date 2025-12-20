@@ -12,16 +12,17 @@ use quiver::prelude::*;
 /// # Ports
 ///
 /// ## Inputs
-/// - `in`: Audio input (±5V)
-/// - `bits`: Bit depth reduction (1-16 bits via 0-10V CV)
-/// - `rate`: Sample rate reduction factor (1-64x via 0-10V CV)
+/// - 0 (`in`): Audio input (±5V)
+/// - 1 (`bits`): Bit depth reduction (1-16 bits via 0-10V CV)
+/// - 2 (`rate`): Sample rate reduction factor (1-64x via 0-10V CV)
 ///
 /// ## Outputs
-/// - `out`: Crushed audio output (±5V)
+/// - 10 (`out`): Crushed audio output (±5V)
 pub struct BitCrusher {
     sample_rate: f64,
     hold_sample: f64,
     hold_counter: f64,
+    spec: PortSpec,
 }
 
 impl BitCrusher {
@@ -30,27 +31,33 @@ impl BitCrusher {
             sample_rate,
             hold_sample: 0.0,
             hold_counter: 0.0,
+            spec: PortSpec {
+                inputs: vec![
+                    // Audio input
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    // Bit depth: 0V = 16 bits (clean), 10V = 1 bit (extreme)
+                    PortDef::new(1, "bits", SignalKind::CvUnipolar).with_default(0.0),
+                    // Rate reduction: 0V = 1x (clean), 10V = 64x reduction
+                    PortDef::new(2, "rate", SignalKind::CvUnipolar).with_default(0.0),
+                ],
+                outputs: vec![
+                    // Audio output
+                    PortDef::new(10, "out", SignalKind::Audio),
+                ],
+            },
         }
     }
 }
 
 impl GraphModule for BitCrusher {
-    fn port_spec(&self) -> PortSpec {
-        PortSpec::new()
-            // Audio input
-            .with_input("in", PortDef::audio())
-            // Bit depth: 0V = 16 bits (clean), 10V = 1 bit (extreme)
-            .with_input("bits", PortDef::cv_unipolar().with_default(0.0))
-            // Rate reduction: 0V = 1x (clean), 10V = 64x reduction
-            .with_input("rate", PortDef::cv_unipolar().with_default(0.0))
-            // Audio output
-            .with_output("out", PortDef::audio())
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get("in");
-        let bits_cv = inputs.get("bits").clamp(0.0, 10.0);
-        let rate_cv = inputs.get("rate").clamp(0.0, 10.0);
+        let input = inputs.get_or(0, 0.0);
+        let bits_cv = inputs.get_or(1, 0.0).clamp(0.0, 10.0);
+        let rate_cv = inputs.get_or(2, 0.0).clamp(0.0, 10.0);
 
         // Convert CV to parameters
         // bits_cv: 0V = 16 bits, 10V = 1 bit
@@ -73,7 +80,7 @@ impl GraphModule for BitCrusher {
         let quantized = (normalized * levels).round() / levels;
         let output = quantized * 10.0 - 5.0; // Back to ±5V
 
-        outputs.set("out", output);
+        outputs.set(10, output);
     }
 
     fn reset(&mut self) {
@@ -186,11 +193,14 @@ fn main() {
 
     println!("--- Port Specification ---");
     println!("Inputs:");
-    for (name, def) in &spec.inputs {
-        println!("  {}: {:?}, default={:.1}V", name, def.kind, def.default);
+    for def in &spec.inputs {
+        println!(
+            "  {} (id={}): {:?}, default={:.1}V",
+            def.name, def.id, def.kind, def.default
+        );
     }
     println!("Outputs:");
-    for (name, def) in &spec.outputs {
-        println!("  {}: {:?}", name, def.kind);
+    for def in &spec.outputs {
+        println!("  {} (id={}): {:?}", def.name, def.id, def.kind);
     }
 }

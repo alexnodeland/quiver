@@ -38,8 +38,8 @@ fn main() {
     println!("--- DOT Graph Output ---");
     println!("(Save this to a .dot file and render with GraphViz)\n");
 
-    let exporter = DotExporter::new(&patch);
-    let dot = exporter.to_dot();
+    let style = DotStyle::default();
+    let dot = DotExporter::export(&patch, &style);
     println!("{}", dot);
 
     // Generate audio for analysis
@@ -113,7 +113,7 @@ fn main() {
     // Using the Scope module
     println!("\n--- Scope Analysis ---\n");
 
-    let mut scope = Scope::new(sample_rate);
+    let mut scope = Scope::new(1024); // Buffer size in samples
 
     // Recreate patch for fresh samples
     patch.compile().unwrap();
@@ -121,10 +121,10 @@ fn main() {
     // Fill scope buffer
     for _ in 0..1024 {
         let (left, _) = patch.tick();
-        scope.process(&PortValues::new(), &mut PortValues::new());
+        scope.tick(left);
     }
 
-    let buffer = scope.buffer();
+    let buffer = scope.buffer_vec();
     println!("Scope buffer size: {} samples", buffer.len());
 
     // Using LevelMeter
@@ -134,14 +134,12 @@ fn main() {
 
     for _ in 0..(sample_rate * 0.1) as usize {
         let (left, _) = patch.tick();
-        let mut inputs = PortValues::new();
-        inputs.set("in", left);
-        meter.process(&inputs, &mut PortValues::new());
+        meter.tick(left);
     }
 
     println!("Level Meter:");
-    println!("  RMS Level: {:.2}V", meter.rms());
-    println!("  Peak Level: {:.2}V", meter.peak());
+    println!("  RMS Level: {:.2} dB", meter.rms());
+    println!("  Peak Level: {:.2} dB", meter.peak());
 
     // Module graph summary
     println!("\n--- Patch Summary ---\n");

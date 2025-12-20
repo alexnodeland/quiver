@@ -1,0 +1,29 @@
+/* Custom CSS for Quiver Documentation */
+
+/* Improve code block styling */
+code {
+    font-family: 'Fira Code', 'Source Code Pro', Consolas, Monaco, monospace;
+}
+
+/* Style for mathematical notation */
+.katex-display {
+    margin: 1em 0;
+}
+
+/* Mermaid diagram styling */
+.mermaid {
+    text-align: center;
+    margin: 1em 0;
+}
+
+/* Signal type colors in documentation */
+.signal-audio { color: #4a9eff; }
+.signal-cv { color: #ff6b6b; }
+.signal-gate { color: #51cf66; }
+.signal-voct { color: #ffd43b; }
+
+/* Module category styling */
+.module-oscillator { border-left: 3px solid #4a9eff; padding-left: 1em; }
+.module-filter { border-left: 3px solid #ff6b6b; padding-left: 1em; }
+.module-modulator { border-left: 3px solid #51cf66; padding-left: 1em; }
+.module-utility { border-left: 3px solid #868e96; padding-left: 1em; }

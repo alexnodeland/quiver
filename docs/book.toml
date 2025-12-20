@@ -3,7 +3,6 @@ title = "Quiver: Modular Audio Synthesis"
 authors = ["Quiver Contributors"]
 description = "A comprehensive guide to building modular audio synthesis systems with mathematical elegance"
 language = "en"
-multilingual = false
 src = "src"
 
 [build]
@@ -18,7 +17,7 @@ edit-url-template = "https://github.com/alexnodeland/quiver/edit/main/docs/{path
 site-url = "/quiver/"
 no-section-label = false
 additional-css = ["custom.css"]
-additional-js = ["mermaid-init.js"]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.fold]
 enable = true
@@ -39,7 +38,6 @@ command = "mdbook-mermaid"
 enable = true
 limit-results = 30
 teaser-word-count = 30
-use-hierarchical-names = true
 copy-js = true
 
 [rust]

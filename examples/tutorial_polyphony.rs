@@ -8,14 +8,13 @@
 use quiver::prelude::*;
 
 fn main() {
-    let sample_rate = 44100.0;
     let num_voices = 4;
 
     println!("=== Polyphony Demo ===\n");
     println!("Simulating a {}-voice polyphonic synthesizer\n", num_voices);
 
     // Create a voice allocator
-    let mut allocator = VoiceAllocator::new(num_voices, AllocationMode::RoundRobin);
+    let mut allocator = VoiceAllocator::new(num_voices);
 
     // Helper to convert MIDI note to V/Oct
     fn midi_to_voct(note: u8) -> f64 {
@@ -35,61 +34,73 @@ fn main() {
 
     println!("Playing Cmaj7 chord:");
     for &note in &chord {
-        let voice_idx = allocator.note_on(note, 0.8);
-        println!(
-            "  {} (MIDI {}) → Voice {}, V/Oct = {:.3}V",
-            note_name(note),
-            note,
-            voice_idx,
-            midi_to_voct(note)
-        );
+        if let Some(voice_idx) = allocator.note_on(note, 0.8) {
+            println!(
+                "  {} (MIDI {}) → Voice {}, V/Oct = {:.3}V",
+                note_name(note),
+                note,
+                voice_idx,
+                midi_to_voct(note)
+            );
+        } else {
+            println!(
+                "  {} (MIDI {}) → No voice available!",
+                note_name(note),
+                note
+            );
+        }
     }
 
     // Show voice states
     println!("\nVoice states after chord:");
     for i in 0..num_voices {
-        let state = allocator.voice(i);
-        match state.state {
-            VoiceState::Active => {
-                if let Some(note) = state.note {
-                    println!(
-                        "  Voice {}: Active, playing {} (V/Oct: {:.3}V)",
-                        i,
-                        note_name(note),
-                        state.voct
-                    );
+        if let Some(voice) = allocator.voice(i) {
+            match voice.state {
+                VoiceState::Active => {
+                    if let Some(note) = voice.note {
+                        println!(
+                            "  Voice {}: Active, playing {} (V/Oct: {:.3}V)",
+                            i,
+                            note_name(note),
+                            voice.voct
+                        );
+                    }
                 }
+                VoiceState::Free => println!("  Voice {}: Free", i),
+                VoiceState::Releasing => println!("  Voice {}: Releasing", i),
             }
-            VoiceState::Free => println!("  Voice {}: Free", i),
-            VoiceState::Releasing => println!("  Voice {}: Releasing", i),
         }
     }
 
     // Now try to play another note - will steal!
     println!("\nPlaying D5 (MIDI 74) - all voices busy, must steal:");
-    let stolen_voice = allocator.note_on(74, 0.9);
-    println!(
-        "  D5 assigned to Voice {} (stolen from previous note)",
-        stolen_voice
-    );
+    if let Some(stolen_voice) = allocator.note_on(74, 0.9) {
+        println!(
+            "  D5 assigned to Voice {} (stolen from previous note)",
+            stolen_voice
+        );
+    } else {
+        println!("  D5 could not be allocated (NoSteal mode)");
+    }
 
     // Show updated states
     println!("\nVoice states after steal:");
     for i in 0..num_voices {
-        let state = allocator.voice(i);
-        match state.state {
-            VoiceState::Active => {
-                if let Some(note) = state.note {
-                    println!(
-                        "  Voice {}: Active, playing {} (V/Oct: {:.3}V)",
-                        i,
-                        note_name(note),
-                        state.voct
-                    );
+        if let Some(voice) = allocator.voice(i) {
+            match voice.state {
+                VoiceState::Active => {
+                    if let Some(note) = voice.note {
+                        println!(
+                            "  Voice {}: Active, playing {} (V/Oct: {:.3}V)",
+                            i,
+                            note_name(note),
+                            voice.voct
+                        );
+                    }
                 }
+                VoiceState::Free => println!("  Voice {}: Free", i),
+                VoiceState::Releasing => println!("  Voice {}: Releasing", i),
             }
-            VoiceState::Free => println!("  Voice {}: Free", i),
-            VoiceState::Releasing => println!("  Voice {}: Releasing", i),
         }
     }
 
@@ -100,17 +111,18 @@ fn main() {
 
     println!("\nVoice states after release:");
     for i in 0..num_voices {
-        let state = allocator.voice(i);
-        match state.state {
-            VoiceState::Active => {
-                if let Some(note) = state.note {
-                    println!("  Voice {}: Active, {}", i, note_name(note));
+        if let Some(voice) = allocator.voice(i) {
+            match voice.state {
+                VoiceState::Active => {
+                    if let Some(note) = voice.note {
+                        println!("  Voice {}: Active, {}", i, note_name(note));
+                    }
                 }
-            }
-            VoiceState::Free => println!("  Voice {}: Free", i),
-            VoiceState::Releasing => {
-                if let Some(note) = state.note {
-                    println!("  Voice {}: Releasing (was {})", i, note_name(note));
+                VoiceState::Free => println!("  Voice {}: Free", i),
+                VoiceState::Releasing => {
+                    if let Some(note) = voice.note {
+                        println!("  Voice {}: Releasing (was {})", i, note_name(note));
+                    }
                 }
             }
         }
