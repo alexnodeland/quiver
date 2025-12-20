@@ -1,0 +1,27 @@
+[package]
+name = "quiver"
+version = "0.1.0"
+edition = "2021"
+authors = ["Quiver Contributors"]
+description = "A modular audio synthesis library using Arrow-style combinators and graph-based patching"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/quiver-audio/quiver"
+keywords = ["audio", "synthesis", "modular", "dsp", "music"]
+categories = ["multimedia::audio", "game-development"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+slotmap = { version = "1.0", features = ["serde"] }
+rand = "0.8"
+
+[dev-dependencies]
+approx = "0.5"
+
+[features]
+default = []
+simd = []
+
+[[example]]
+name = "simple_patch"
+path = "examples/simple_patch.rs"
