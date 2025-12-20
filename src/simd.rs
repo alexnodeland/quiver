@@ -139,7 +139,6 @@ impl AudioBlock {
     pub fn add_scalar(&mut self, value: f64) {
         // Process in SIMD blocks
         let chunks = self.size / SIMD_BLOCK_SIZE;
-        let remainder = self.size % SIMD_BLOCK_SIZE;
 
         for chunk in 0..chunks {
             let base = chunk * SIMD_BLOCK_SIZE;
