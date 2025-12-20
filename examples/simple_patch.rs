@@ -48,7 +48,8 @@ fn main() {
     patch.set_output(output.id());
     patch.compile().unwrap();
 
-    println!("Patch created with {} modules and {} cables",
+    println!(
+        "Patch created with {} modules and {} cables",
         patch.node_count(),
         patch.cable_count()
     );
@@ -56,7 +57,7 @@ fn main() {
     // Simulate playing a note
     println!("\nPlaying C4...");
     pitch_value.set(0.0); // C4
-    gate_value.set(5.0);   // Gate on
+    gate_value.set(5.0); // Gate on
 
     // Generate 0.5 seconds of audio
     let samples = (sample_rate * 0.5) as usize;
@@ -90,7 +91,8 @@ fn main() {
     println!("For patches that can be fully serialized/deserialized, use only registry modules.");
 
     // Demonstrate loading a patch without ExternalInput
-    let reload_def = PatchDef::from_json(r#"{
+    let reload_def = PatchDef::from_json(
+        r#"{
         "version": 1,
         "name": "Simple Test",
         "author": null,
@@ -106,10 +108,12 @@ fn main() {
             {"from": "vcf.lp", "to": "output.left", "attenuation": null}
         ],
         "parameters": {}
-    }"#).unwrap();
+    }"#,
+    )
+    .unwrap();
 
     let registry = ModuleRegistry::new();
-    let _reloaded = Patch::from_def(&reload_def, &registry, sample_rate)
-        .expect("Failed to reload patch");
+    let _reloaded =
+        Patch::from_def(&reload_def, &registry, sample_rate).expect("Failed to reload patch");
     println!("Registry-only patch successfully serialized and reloaded!");
 }

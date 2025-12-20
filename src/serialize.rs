@@ -3,9 +3,9 @@
 //! This module provides types and utilities for saving and loading patches,
 //! including module registry and patch definitions.
 
+use crate::analog::{AnalogVco, Saturator, Wavefolder};
 use crate::graph::{NodeHandle, Patch, PatchError};
 use crate::modules::*;
-use crate::analog::{AnalogVco, Saturator, Wavefolder};
 use crate::port::{GraphModule, PortSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -295,6 +295,55 @@ impl ModuleRegistry {
             "Wavefolder for complex harmonics",
             |_| Box::new(Wavefolder::default()),
         );
+
+        // Utility modules
+        self.register_factory(
+            "sample_and_hold",
+            "Sample & Hold",
+            "Utilities",
+            "Sample input value on trigger",
+            |_| Box::new(SampleAndHold::new()),
+        );
+
+        self.register_factory(
+            "slew_limiter",
+            "Slew Limiter",
+            "Utilities",
+            "Limits rate of change (portamento/glide)",
+            |sr| Box::new(SlewLimiter::new(sr)),
+        );
+
+        self.register_factory(
+            "quantizer",
+            "Quantizer",
+            "Utilities",
+            "Quantize V/Oct to musical scales",
+            |_| Box::new(Quantizer::new(Scale::Chromatic)),
+        );
+
+        self.register_factory(
+            "clock",
+            "Clock",
+            "Sequencing",
+            "Master clock with tempo control",
+            |sr| Box::new(Clock::new(sr)),
+        );
+
+        self.register_factory(
+            "attenuverter",
+            "Attenuverter",
+            "Utilities",
+            "Attenuate, invert, and offset signals",
+            |_| Box::new(Attenuverter::new()),
+        );
+
+        self.register_factory(
+            "multiple",
+            "Multiple",
+            "Utilities",
+            "Signal splitter (1 input to 4 outputs)",
+            |_| Box::new(Multiple::new()),
+        );
     }
 
     /// Register a module factory with metadata
@@ -328,11 +377,7 @@ impl ModuleRegistry {
     }
 
     /// Instantiate a module by type ID
-    pub fn instantiate(
-        &self,
-        type_id: &str,
-        sample_rate: f64,
-    ) -> Option<Box<dyn GraphModule>> {
+    pub fn instantiate(&self, type_id: &str, sample_rate: f64) -> Option<Box<dyn GraphModule>> {
         self.factories.get(type_id).map(|f| f(sample_rate))
     }
 
@@ -347,7 +392,10 @@ impl ModuleRegistry {
     }
 
     /// List modules in a specific category
-    pub fn list_by_category<'a>(&'a self, category: &'a str) -> impl Iterator<Item = &'a ModuleMetadata> {
+    pub fn list_by_category<'a>(
+        &'a self,
+        category: &'a str,
+    ) -> impl Iterator<Item = &'a ModuleMetadata> {
         self.metadata
             .values()
             .filter(move |m| m.category == category)
@@ -355,11 +403,7 @@ impl ModuleRegistry {
 
     /// Get all unique categories
     pub fn categories(&self) -> Vec<String> {
-        let mut cats: Vec<_> = self
-            .metadata
-            .values()
-            .map(|m| m.category.clone())
-            .collect();
+        let mut cats: Vec<_> = self.metadata.values().map(|m| m.category.clone()).collect();
         cats.sort();
         cats.dedup();
         cats

@@ -260,9 +260,7 @@ pub enum ParamRange {
 impl ParamRange {
     pub fn apply(&self, normalized: f64) -> f64 {
         match self {
-            ParamRange::Linear { min, max } => {
-                min + normalized.clamp(0.0, 1.0) * (max - min)
-            }
+            ParamRange::Linear { min, max } => min + normalized.clamp(0.0, 1.0) * (max - min),
             ParamRange::Exponential { min, max } => {
                 let clamped = normalized.clamp(0.0, 1.0);
                 if *min <= 0.0 {
@@ -272,9 +270,7 @@ impl ParamRange {
                     min * (max / min).powf(clamped)
                 }
             }
-            ParamRange::VoltPerOctave { base_freq } => {
-                base_freq * 2.0_f64.powf(normalized)
-            }
+            ParamRange::VoltPerOctave { base_freq } => base_freq * 2.0_f64.powf(normalized),
         }
     }
 }
@@ -426,7 +422,10 @@ mod tests {
 
     #[test]
     fn test_param_range_linear() {
-        let range = ParamRange::Linear { min: 0.0, max: 100.0 };
+        let range = ParamRange::Linear {
+            min: 0.0,
+            max: 100.0,
+        };
         assert!((range.apply(0.0) - 0.0).abs() < 1e-10);
         assert!((range.apply(0.5) - 50.0).abs() < 1e-10);
         assert!((range.apply(1.0) - 100.0).abs() < 1e-10);
@@ -434,7 +433,10 @@ mod tests {
 
     #[test]
     fn test_param_range_exponential() {
-        let range = ParamRange::Exponential { min: 20.0, max: 20000.0 };
+        let range = ParamRange::Exponential {
+            min: 20.0,
+            max: 20000.0,
+        };
         assert!((range.apply(0.0) - 20.0).abs() < 1e-10);
         assert!((range.apply(1.0) - 20000.0).abs() < 1e-10);
     }
@@ -450,8 +452,11 @@ mod tests {
 
     #[test]
     fn test_modulated_param() {
-        let mut param = ModulatedParam::new(ParamRange::Linear { min: 0.0, max: 100.0 })
-            .with_base(0.5);
+        let mut param = ModulatedParam::new(ParamRange::Linear {
+            min: 0.0,
+            max: 100.0,
+        })
+        .with_base(0.5);
 
         // No CV: should return base * range
         assert!((param.value() - 50.0).abs() < 1e-10);

@@ -222,8 +222,8 @@ impl MidiState {
                 let v = value as f64 / 127.0 * 10.0;
 
                 match cc {
-                    1 => self.mod_wheel.set(v),         // Mod wheel
-                    11 => self.expression.set(v),      // Expression
+                    1 => self.mod_wheel.set(v),                                  // Mod wheel
+                    11 => self.expression.set(v),                                // Expression
                     64 => self.sustain.set(if value >= 64 { 5.0 } else { 0.0 }), // Sustain
                     _ => {}
                 }

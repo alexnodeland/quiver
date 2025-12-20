@@ -296,7 +296,10 @@ impl Patch {
     }
 
     fn validate_output_port(&self, port_ref: PortRef) -> Result<(), PatchError> {
-        let node = self.nodes.get(port_ref.node).ok_or(PatchError::InvalidNode)?;
+        let node = self
+            .nodes
+            .get(port_ref.node)
+            .ok_or(PatchError::InvalidNode)?;
         node.module
             .port_spec()
             .outputs
@@ -307,7 +310,10 @@ impl Patch {
     }
 
     fn validate_input_port(&self, port_ref: PortRef) -> Result<(), PatchError> {
-        let node = self.nodes.get(port_ref.node).ok_or(PatchError::InvalidNode)?;
+        let node = self
+            .nodes
+            .get(port_ref.node)
+            .ok_or(PatchError::InvalidNode)?;
         node.module
             .port_spec()
             .inputs
@@ -340,8 +346,7 @@ impl Patch {
     }
 
     fn topological_sort(&self) -> Result<Vec<NodeId>, PatchError> {
-        let mut in_degree: HashMap<NodeId, usize> =
-            self.nodes.keys().map(|k| (k, 0)).collect();
+        let mut in_degree: HashMap<NodeId, usize> = self.nodes.keys().map(|k| (k, 0)).collect();
         let mut successors: HashMap<NodeId, Vec<NodeId>> =
             self.nodes.keys().map(|k| (k, vec![])).collect();
 

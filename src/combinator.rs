@@ -40,12 +40,18 @@ pub trait Module: Send {
 pub trait ModuleExt: Module + Sized {
     /// Chain this module with another (sequential composition: `>>>`)
     fn then<M: Module<In = Self::Out>>(self, next: M) -> Chain<Self, M> {
-        Chain { first: self, second: next }
+        Chain {
+            first: self,
+            second: next,
+        }
     }
 
     /// Run two modules in parallel (`***`)
     fn parallel<M: Module>(self, other: M) -> Parallel<Self, M> {
-        Parallel { left: self, right: other }
+        Parallel {
+            left: self,
+            right: other,
+        }
     }
 
     /// Split input to two parallel processors (`&&&`)
@@ -53,7 +59,10 @@ pub trait ModuleExt: Module + Sized {
     where
         Self::In: Clone,
     {
-        Fanout { left: self, right: other }
+        Fanout {
+            left: self,
+            right: other,
+        }
     }
 
     /// Transform output with a pure function
@@ -69,7 +78,11 @@ pub trait ModuleExt: Module + Sized {
     where
         F: Fn(U) -> Self::In,
     {
-        Contramap { module: self, f, _phantom: PhantomData }
+        Contramap {
+            module: self,
+            f,
+            _phantom: PhantomData,
+        }
     }
 
     /// Create a feedback loop with unit delay
@@ -86,12 +99,18 @@ pub trait ModuleExt: Module + Sized {
 
     /// Apply this module only to the first element of a tuple
     fn first<C>(self) -> First<Self, C> {
-        First { module: self, _phantom: PhantomData }
+        First {
+            module: self,
+            _phantom: PhantomData,
+        }
     }
 
     /// Apply this module only to the second element of a tuple
     fn second<C>(self) -> Second<Self, C> {
-        Second { module: self, _phantom: PhantomData }
+        Second {
+            module: self,
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -287,7 +306,9 @@ pub struct Split<T> {
 
 impl<T> Split<T> {
     pub fn new() -> Self {
-        Self { _phantom: PhantomData }
+        Self {
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -320,7 +341,10 @@ where
     F: Fn(T, T) -> T,
 {
     pub fn new(f: F) -> Self {
-        Self { f, _phantom: PhantomData }
+        Self {
+            f,
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -347,7 +371,9 @@ pub struct Swap<A, B> {
 
 impl<A, B> Swap<A, B> {
     pub fn new() -> Self {
-        Self { _phantom: PhantomData }
+        Self {
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -432,7 +458,9 @@ pub struct Identity<T> {
 
 impl<T> Identity<T> {
     pub fn new() -> Self {
-        Self { _phantom: PhantomData }
+        Self {
+            _phantom: PhantomData,
+        }
     }
 }
 

@@ -500,8 +500,7 @@ impl Mixer {
     pub fn new(num_channels: usize) -> Self {
         let inputs = (0..num_channels)
             .map(|i| {
-                PortDef::new(i as u32, format!("ch{}", i), SignalKind::Audio)
-                    .with_attenuverter()
+                PortDef::new(i as u32, format!("ch{}", i), SignalKind::Audio).with_attenuverter()
             })
             .collect();
 
@@ -674,7 +673,7 @@ impl PinkNoiseState {
         }
     }
 
-    fn next(&mut self) -> f64 {
+    fn sample(&mut self) -> f64 {
         self.index = self.index.wrapping_add(1);
         let changed_bits = (self.index ^ (self.index.wrapping_sub(1))).trailing_ones() as usize;
 
@@ -724,7 +723,7 @@ impl GraphModule for NoiseGenerator {
 
     fn tick(&mut self, _inputs: &PortValues, outputs: &mut PortValues) {
         let white = rand::random::<f64>() * 2.0 - 1.0;
-        let pink = self.pink.next();
+        let pink = self.pink.sample();
 
         outputs.set(10, white * 5.0);
         outputs.set(11, pink * 5.0);
@@ -897,6 +896,466 @@ impl GraphModule for StereoOutput {
 
     fn type_id(&self) -> &'static str {
         "stereo_output"
+    }
+}
+
+/// Sample and Hold
+///
+/// Samples the input signal when triggered and holds the value until the next trigger.
+pub struct SampleAndHold {
+    held_value: f64,
+    last_trigger: f64,
+    spec: PortSpec,
+}
+
+impl SampleAndHold {
+    pub fn new() -> Self {
+        Self {
+            held_value: 0.0,
+            last_trigger: 0.0,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::CvBipolar),
+                    PortDef::new(1, "trig", SignalKind::Trigger),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::CvBipolar)],
+            },
+        }
+    }
+}
+
+impl Default for SampleAndHold {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for SampleAndHold {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let trigger = inputs.get_or(1, 0.0);
+
+        // Sample on rising edge
+        if trigger > 2.5 && self.last_trigger <= 2.5 {
+            self.held_value = input;
+        }
+        self.last_trigger = trigger;
+
+        outputs.set(10, self.held_value);
+    }
+
+    fn reset(&mut self) {
+        self.held_value = 0.0;
+        self.last_trigger = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "sample_hold"
+    }
+}
+
+/// Slew Limiter
+///
+/// Limits the rate of change of a signal, creating portamento/glide effects.
+/// Separate rise and fall times allow asymmetric behavior.
+pub struct SlewLimiter {
+    current: f64,
+    sample_rate: f64,
+    spec: PortSpec,
+}
+
+impl SlewLimiter {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            current: 0.0,
+            sample_rate,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::CvBipolar),
+                    PortDef::new(1, "rise", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(2, "fall", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::CvBipolar)],
+            },
+        }
+    }
+
+    fn cv_to_rate(&self, cv: f64) -> f64 {
+        // Map 0-1 CV to rate: 0 = instant, 1 = very slow (~10 seconds)
+        // Rate is in units per sample
+        let time = 0.001 + cv.clamp(0.0, 1.0).powi(2) * 10.0; // 1ms to 10s
+        1.0 / (time * self.sample_rate)
+    }
+}
+
+impl Default for SlewLimiter {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for SlewLimiter {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let target = inputs.get_or(0, 0.0);
+        let rise_cv = inputs.get_or(1, 0.5);
+        let fall_cv = inputs.get_or(2, 0.5);
+
+        let diff = target - self.current;
+
+        if diff > 0.0 {
+            // Rising
+            let rate = self.cv_to_rate(rise_cv);
+            self.current += diff.min(rate * 10.0); // Scale for voltage range
+        } else if diff < 0.0 {
+            // Falling
+            let rate = self.cv_to_rate(fall_cv);
+            self.current += diff.max(-rate * 10.0);
+        }
+
+        outputs.set(10, self.current);
+    }
+
+    fn reset(&mut self) {
+        self.current = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "slew_limiter"
+    }
+}
+
+/// Quantizer
+///
+/// Quantizes input CV to musical scale degrees.
+/// Supports chromatic, major, minor, and pentatonic scales.
+pub struct Quantizer {
+    scale: Scale,
+    spec: PortSpec,
+}
+
+/// Musical scales for quantization
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Scale {
+    Chromatic,
+    Major,
+    Minor,
+    PentatonicMajor,
+    PentatonicMinor,
+    Dorian,
+    Mixolydian,
+    Blues,
+}
+
+impl Scale {
+    /// Returns the semitone offsets for this scale (relative to root)
+    fn semitones(&self) -> &'static [i32] {
+        match self {
+            Scale::Chromatic => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            Scale::Major => &[0, 2, 4, 5, 7, 9, 11],
+            Scale::Minor => &[0, 2, 3, 5, 7, 8, 10],
+            Scale::PentatonicMajor => &[0, 2, 4, 7, 9],
+            Scale::PentatonicMinor => &[0, 3, 5, 7, 10],
+            Scale::Dorian => &[0, 2, 3, 5, 7, 9, 10],
+            Scale::Mixolydian => &[0, 2, 4, 5, 7, 9, 10],
+            Scale::Blues => &[0, 3, 5, 6, 7, 10],
+        }
+    }
+}
+
+impl Quantizer {
+    pub fn new(scale: Scale) -> Self {
+        Self {
+            scale,
+            spec: PortSpec {
+                inputs: vec![PortDef::new(0, "in", SignalKind::VoltPerOctave)],
+                outputs: vec![PortDef::new(10, "out", SignalKind::VoltPerOctave)],
+            },
+        }
+    }
+
+    pub fn chromatic() -> Self {
+        Self::new(Scale::Chromatic)
+    }
+
+    pub fn major() -> Self {
+        Self::new(Scale::Major)
+    }
+
+    pub fn minor() -> Self {
+        Self::new(Scale::Minor)
+    }
+
+    pub fn set_scale(&mut self, scale: Scale) {
+        self.scale = scale;
+    }
+
+    fn quantize(&self, voltage: f64) -> f64 {
+        let semitones = self.scale.semitones();
+
+        // Convert voltage to semitones (1V = 12 semitones)
+        let total_semitones = voltage * 12.0;
+
+        // Find octave and position within octave
+        let octave = (total_semitones / 12.0).floor();
+        let within_octave = total_semitones - octave * 12.0;
+
+        // Find nearest scale degree
+        let mut nearest = semitones[0];
+        let mut min_dist = f64::MAX;
+
+        for &semi in semitones {
+            let dist = (within_octave - semi as f64).abs();
+            if dist < min_dist {
+                min_dist = dist;
+                nearest = semi;
+            }
+            // Also check wrapping to next octave
+            let dist_wrap = (within_octave - (semi + 12) as f64).abs();
+            if dist_wrap < min_dist {
+                min_dist = dist_wrap;
+                nearest = semi + 12;
+            }
+        }
+
+        // Convert back to voltage
+        (octave * 12.0 + nearest as f64) / 12.0
+    }
+}
+
+impl Default for Quantizer {
+    fn default() -> Self {
+        Self::chromatic()
+    }
+}
+
+impl GraphModule for Quantizer {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let quantized = self.quantize(input);
+        outputs.set(10, quantized);
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "quantizer"
+    }
+}
+
+/// Clock Generator
+///
+/// Generates clock pulses at a specified tempo (BPM).
+pub struct Clock {
+    phase: f64,
+    sample_rate: f64,
+    spec: PortSpec,
+}
+
+impl Clock {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            phase: 0.0,
+            sample_rate,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "bpm", SignalKind::CvUnipolar)
+                        .with_default(1.2) // 120 BPM when scaled
+                        .with_attenuverter(),
+                    PortDef::new(1, "reset", SignalKind::Trigger),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Clock),
+                    PortDef::new(11, "div2", SignalKind::Clock),
+                    PortDef::new(12, "div4", SignalKind::Clock),
+                ],
+            },
+        }
+    }
+
+    fn cv_to_bpm(cv: f64) -> f64 {
+        // Map 0-10V to 20-300 BPM (exponential)
+        20.0 * (15.0_f64).powf(cv / 10.0)
+    }
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Clock {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let bpm_cv = inputs.get_or(0, 1.2); // Default ~120 BPM
+        let reset = inputs.get_or(1, 0.0);
+
+        let bpm = Self::cv_to_bpm(bpm_cv);
+        let freq = bpm / 60.0; // Hz
+
+        // Reset on trigger
+        if reset > 2.5 {
+            self.phase = 0.0;
+        }
+
+        // Main clock output (short pulse at start of each cycle)
+        let pulse_width = 0.1; // 10% duty cycle
+        let main_out = if self.phase < pulse_width { 5.0 } else { 0.0 };
+
+        // Divided outputs (using integer phase counting would be cleaner,
+        // but this works for demonstration)
+        let div2_phase = (self.phase * 0.5).fract();
+        let div4_phase = (self.phase * 0.25).fract();
+        let div2_out = if div2_phase < pulse_width { 5.0 } else { 0.0 };
+        let div4_out = if div4_phase < pulse_width { 5.0 } else { 0.0 };
+
+        outputs.set(10, main_out);
+        outputs.set(11, div2_out);
+        outputs.set(12, div4_out);
+
+        // Advance phase
+        self.phase = (self.phase + freq / self.sample_rate).fract();
+    }
+
+    fn reset(&mut self) {
+        self.phase = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "clock"
+    }
+}
+
+/// Attenuverter
+///
+/// Attenuates and/or inverts a signal. The level control goes from
+/// -1 (inverted full scale) through 0 (silence) to +1 (full scale).
+pub struct Attenuverter {
+    spec: PortSpec,
+}
+
+impl Attenuverter {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::CvBipolar),
+                    PortDef::new(1, "level", SignalKind::CvBipolar).with_default(5.0), // Default to unity gain
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::CvBipolar)],
+            },
+        }
+    }
+}
+
+impl Default for Attenuverter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for Attenuverter {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let level = inputs.get_or(1, 5.0) / 5.0; // Normalize to -1..+1
+
+        outputs.set(10, input * level);
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "attenuverter"
+    }
+}
+
+/// Multiple (Signal Splitter)
+///
+/// Takes one input and copies it to multiple outputs.
+/// Useful for sending one signal to multiple destinations.
+pub struct Multiple {
+    spec: PortSpec,
+}
+
+impl Multiple {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![PortDef::new(0, "in", SignalKind::CvBipolar)],
+                outputs: vec![
+                    PortDef::new(10, "out1", SignalKind::CvBipolar),
+                    PortDef::new(11, "out2", SignalKind::CvBipolar),
+                    PortDef::new(12, "out3", SignalKind::CvBipolar),
+                    PortDef::new(13, "out4", SignalKind::CvBipolar),
+                ],
+            },
+        }
+    }
+}
+
+impl Default for Multiple {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for Multiple {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+
+        outputs.set(10, input);
+        outputs.set(11, input);
+        outputs.set(12, input);
+        outputs.set(13, input);
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "multiple"
     }
 }
 
@@ -1075,5 +1534,168 @@ mod tests {
         inputs.set(0, 5.0);
         seq.tick(&inputs, &mut outputs);
         assert!((outputs.get(10).unwrap() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_sample_and_hold() {
+        let mut sh = SampleAndHold::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Set input value, no trigger
+        inputs.set(0, 3.0);
+        inputs.set(1, 0.0);
+        sh.tick(&inputs, &mut outputs);
+        // Initial held value should be 0
+        assert!((outputs.get(10).unwrap() - 0.0).abs() < 0.01);
+
+        // Trigger rising edge - should sample input
+        inputs.set(1, 5.0);
+        sh.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01);
+
+        // Change input, but no new trigger - should hold previous value
+        inputs.set(0, 7.0);
+        sh.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01);
+
+        // New trigger - should sample new value
+        inputs.set(1, 0.0);
+        sh.tick(&inputs, &mut outputs);
+        inputs.set(1, 5.0);
+        sh.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 7.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_slew_limiter() {
+        let mut slew = SlewLimiter::new(1000.0); // 1kHz sample rate
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Set rise/fall rates (normalized 0-1)
+        inputs.set(1, 0.5); // Rise rate
+        inputs.set(2, 0.5); // Fall rate
+
+        // Step input from 0 to 5V
+        inputs.set(0, 5.0);
+        slew.tick(&inputs, &mut outputs);
+        let first = outputs.get(10).unwrap();
+
+        // Should start rising but not instantly reach target
+        assert!(first > 0.0);
+        assert!(first < 5.0);
+
+        // Continue rising
+        for _ in 0..100 {
+            slew.tick(&inputs, &mut outputs);
+        }
+        // Should be close to target now
+        let after_100 = outputs.get(10).unwrap();
+        assert!(after_100 > first);
+    }
+
+    #[test]
+    fn test_quantizer_chromatic() {
+        let mut quant = Quantizer::new(Scale::Chromatic);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Exactly on a note
+        inputs.set(0, 0.0); // C
+        quant.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 0.0).abs() < 0.01);
+
+        // Between C and C#
+        inputs.set(0, 0.04); // 1/25 of a semitone above C
+        quant.tick(&inputs, &mut outputs);
+        // Should quantize to C (0.0)
+        assert!((outputs.get(10).unwrap() - 0.0).abs() < 0.01);
+
+        // Closer to C#
+        inputs.set(0, 0.07);
+        quant.tick(&inputs, &mut outputs);
+        // Should quantize to C# (1/12 = 0.0833...)
+        let expected_csharp = 1.0 / 12.0;
+        assert!((outputs.get(10).unwrap() - expected_csharp).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_quantizer_major_scale() {
+        let mut quant = Quantizer::new(Scale::Major);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // C# (1 semitone) should snap to C or D
+        inputs.set(0, 1.0 / 12.0); // C#
+        quant.tick(&inputs, &mut outputs);
+        let out = outputs.get(10).unwrap();
+        // Should be C (0) or D (2/12)
+        assert!(out.abs() < 0.01 || (out - 2.0 / 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_clock() {
+        let mut clock = Clock::new(1000.0); // 1kHz sample rate
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Set tempo CV: 10V maps to 300 BPM (5 Hz), so 200 samples per beat
+        inputs.set(0, 10.0); // Maximum tempo
+
+        let mut trigger_count = 0;
+        let mut last_trigger = 0.0;
+
+        for _ in 0..1000 {
+            clock.tick(&inputs, &mut outputs);
+            let trigger = outputs.get(10).unwrap(); // Main clock output
+            if trigger > 2.5 && last_trigger <= 2.5 {
+                trigger_count += 1;
+            }
+            last_trigger = trigger;
+        }
+
+        // At 300 BPM (5 Hz), should get ~5 triggers per second
+        // In 1000 samples at 1kHz, that's 5 triggers
+        assert!(trigger_count >= 3);
+    }
+
+    #[test]
+    fn test_attenuverter() {
+        let mut att = Attenuverter::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Test unity gain (5V = unity in 0-10V range)
+        inputs.set(0, 5.0); // Input
+        inputs.set(1, 5.0); // 5V = unity (1.0 multiplier)
+        att.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 5.0).abs() < 0.1);
+
+        // Test half attenuation (2.5V = 0.5 multiplier)
+        inputs.set(1, 2.5);
+        att.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 2.5).abs() < 0.1);
+
+        // Test zero (0V = 0 multiplier)
+        inputs.set(1, 0.0);
+        att.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 0.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_multiple() {
+        let mut mult = Multiple::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 3.14159);
+        mult.tick(&inputs, &mut outputs);
+
+        // All 4 outputs should have the same value
+        assert!((outputs.get(10).unwrap() - 3.14159).abs() < 0.0001);
+        assert!((outputs.get(11).unwrap() - 3.14159).abs() < 0.0001);
+        assert!((outputs.get(12).unwrap() - 3.14159).abs() < 0.0001);
+        assert!((outputs.get(13).unwrap() - 3.14159).abs() < 0.0001);
     }
 }

@@ -39,53 +39,45 @@
 //! let (left, right) = patch.tick();
 //! ```
 
-pub mod combinator;
-pub mod port;
-pub mod graph;
-pub mod modules;
 pub mod analog;
+pub mod combinator;
+pub mod graph;
 pub mod io;
+pub mod modules;
+pub mod port;
 pub mod serialize;
 
 /// Prelude module for convenient imports
 pub mod prelude {
     // Layer 1: Combinators
     pub use crate::combinator::{
-        Module, ModuleExt, Chain, Parallel, Fanout, Feedback, Map, Contramap,
-        Split, Merge, Swap, First, Second, Identity, Constant,
+        Chain, Constant, Contramap, Fanout, Feedback, First, Identity, Map, Merge, Module,
+        ModuleExt, Parallel, Second, Split, Swap,
     };
 
     // Layer 2: Port System
     pub use crate::port::{
-        SignalKind, PortId, PortDef, PortSpec, PortValues, BlockPortValues,
-        ModulatedParam, ParamRange, ParamId, ParamDef, GraphModule,
+        BlockPortValues, GraphModule, ModulatedParam, ParamDef, ParamId, ParamRange, PortDef,
+        PortId, PortSpec, PortValues, SignalKind,
     };
 
     // Layer 3: Patch Graph
-    pub use crate::graph::{
-        Patch, NodeId, CableId, PortRef, Cable, NodeHandle, PatchError,
-    };
+    pub use crate::graph::{Cable, CableId, NodeHandle, NodeId, Patch, PatchError, PortRef};
 
     // Core DSP Modules
     pub use crate::modules::{
-        Vco, Lfo, Svf, Adsr, Vca, Mixer, Offset, UnitDelay,
-        NoiseGenerator, StepSequencer, StereoOutput,
+        Adsr, Attenuverter, Clock, Lfo, Mixer, Multiple, NoiseGenerator, Offset, Quantizer,
+        SampleAndHold, Scale, SlewLimiter, StepSequencer, StereoOutput, Svf, UnitDelay, Vca, Vco,
     };
 
     // Analog Modeling
-    pub use crate::analog::{
-        saturation, ComponentModel, ThermalModel, noise, AnalogVco,
-    };
+    pub use crate::analog::{noise, saturation, AnalogVco, ComponentModel, ThermalModel};
 
     // External I/O
-    pub use crate::io::{
-        AtomicF64, ExternalInput, MidiState,
-    };
+    pub use crate::io::{AtomicF64, ExternalInput, MidiState};
 
     // Serialization
-    pub use crate::serialize::{
-        PatchDef, ModuleDef, CableDef, ModuleRegistry, ModuleMetadata,
-    };
+    pub use crate::serialize::{CableDef, ModuleDef, ModuleMetadata, ModuleRegistry, PatchDef};
 }
 
 // Re-export key types at crate root for convenience

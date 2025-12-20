@@ -244,7 +244,8 @@ pub mod noise {
             }
         }
 
-        pub fn next(&mut self) -> f64 {
+        /// Generate the next pink noise sample
+        pub fn sample(&mut self) -> f64 {
             self.index = self.index.wrapping_add(1);
             let changed_bits = (self.index ^ (self.index.wrapping_sub(1))).trailing_ones() as usize;
 
@@ -293,7 +294,8 @@ pub mod noise {
             Self::new(sample_rate, 50.0, amplitude)
         }
 
-        pub fn next(&mut self) -> f64 {
+        /// Generate the next power supply noise sample
+        pub fn sample(&mut self) -> f64 {
             let out = (self.phase * std::f64::consts::TAU).sin() * self.amplitude;
             self.phase = (self.phase + self.frequency / self.sample_rate).fract();
             out + white() * self.amplitude * 0.1
@@ -602,7 +604,7 @@ mod tests {
         let mut sum = 0.0;
 
         for _ in 0..1000 {
-            sum += pink.next().abs();
+            sum += pink.sample().abs();
         }
 
         // Should produce some output
