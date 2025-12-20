@@ -54,6 +54,7 @@ pub mod mdk;
 pub mod modules;
 pub mod polyphony;
 pub mod port;
+pub mod presets;
 pub mod serialize;
 pub mod simd;
 
@@ -127,6 +128,12 @@ pub mod prelude {
     pub use crate::mdk::{
         AudioAnalysis, DocFormat, DocGenerator, ModuleCategory, ModulePresets, ModuleTemplate,
         ModuleTestHarness, PortTemplate, StateFieldTemplate, TestResult, TestSuiteResult,
+    };
+
+    // Phase 5: Preset Library
+    pub use crate::presets::{
+        ClassicPresets, PresetCategory, PresetInfo, PresetLibrary, SoundDesignPresets,
+        TutorialPresets,
     };
 }
 
