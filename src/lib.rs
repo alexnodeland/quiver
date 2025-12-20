@@ -50,6 +50,7 @@ pub mod combinator;
 pub mod extended_io;
 pub mod graph;
 pub mod io;
+pub mod mdk;
 pub mod modules;
 pub mod polyphony;
 pub mod port;
@@ -120,6 +121,11 @@ pub mod prelude {
         AudioBusConfig, OscBinding, OscInput, OscMessage, OscPattern, OscReceiver, OscValue,
         PluginCategory, PluginInfo, PluginParameter, PluginWrapper, WebAudioConfig,
         WebAudioProcessor, WebAudioWorklet,
+    };
+
+    // Phase 5: Module Development Kit
+    pub use crate::mdk::{
+        ModuleCategory, ModulePresets, ModuleTemplate, PortTemplate, StateFieldTemplate,
     };
 }
 
