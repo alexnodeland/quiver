@@ -1359,6 +1359,758 @@ impl GraphModule for Multiple {
     }
 }
 
+// ============================================================================
+// Phase 2 Modules: Hardware Fidelity
+// ============================================================================
+
+/// Ring Modulator
+///
+/// Multiplies two audio signals together, producing sum and difference frequencies.
+/// Classic technique for metallic, bell-like, and atonal sounds.
+pub struct RingModulator {
+    spec: PortSpec,
+}
+
+impl RingModulator {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "carrier", SignalKind::Audio),
+                    PortDef::new(1, "modulator", SignalKind::Audio),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+            },
+        }
+    }
+}
+
+impl Default for RingModulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for RingModulator {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let carrier = inputs.get_or(0, 0.0);
+        let modulator = inputs.get_or(1, 0.0);
+
+        // Ring modulation is simple multiplication
+        // Normalize by 5.0 to keep output in ±5V range (both inputs are ±5V)
+        let out = (carrier * modulator) / 5.0;
+        outputs.set(10, out);
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "ring_mod"
+    }
+}
+
+/// Crossfader / Panner
+///
+/// Crossfades between two audio inputs or pans a mono input across stereo outputs.
+/// The position control goes from -5V (full A/left) to +5V (full B/right).
+pub struct Crossfader {
+    spec: PortSpec,
+}
+
+impl Crossfader {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "a", SignalKind::Audio),
+                    PortDef::new(1, "b", SignalKind::Audio),
+                    PortDef::new(2, "pos", SignalKind::CvBipolar).with_default(0.0),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Audio),
+                    PortDef::new(11, "left", SignalKind::Audio),
+                    PortDef::new(12, "right", SignalKind::Audio),
+                ],
+            },
+        }
+    }
+}
+
+impl Default for Crossfader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for Crossfader {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let a = inputs.get_or(0, 0.0);
+        let b = inputs.get_or(1, 0.0);
+        let pos = inputs.get_or(2, 0.0);
+
+        // Map position from -5V to +5V to 0.0 to 1.0
+        let mix = ((pos / 5.0) + 1.0) / 2.0;
+        let mix = mix.clamp(0.0, 1.0);
+
+        // Equal-power crossfade for smoother transitions
+        let a_gain = (1.0 - mix).sqrt();
+        let b_gain = mix.sqrt();
+
+        // Main output: crossfade between A and B
+        let out = a * a_gain + b * b_gain;
+        outputs.set(10, out);
+
+        // Stereo outputs: pan the main output
+        // At pos=-5V: full left, at pos=+5V: full right
+        outputs.set(11, out * a_gain);  // Left
+        outputs.set(12, out * b_gain);  // Right
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "crossfader"
+    }
+}
+
+/// Logic AND Gate
+///
+/// Outputs high (+5V) only when both inputs are high (>2.5V).
+pub struct LogicAnd {
+    spec: PortSpec,
+}
+
+impl LogicAnd {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "a", SignalKind::Gate),
+                    PortDef::new(1, "b", SignalKind::Gate),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Gate)],
+            },
+        }
+    }
+}
+
+impl Default for LogicAnd {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for LogicAnd {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let a = inputs.get_or(0, 0.0) > 2.5;
+        let b = inputs.get_or(1, 0.0) > 2.5;
+
+        outputs.set(10, if a && b { 5.0 } else { 0.0 });
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "logic_and"
+    }
+}
+
+/// Logic OR Gate
+///
+/// Outputs high (+5V) when either or both inputs are high (>2.5V).
+pub struct LogicOr {
+    spec: PortSpec,
+}
+
+impl LogicOr {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "a", SignalKind::Gate),
+                    PortDef::new(1, "b", SignalKind::Gate),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Gate)],
+            },
+        }
+    }
+}
+
+impl Default for LogicOr {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for LogicOr {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let a = inputs.get_or(0, 0.0) > 2.5;
+        let b = inputs.get_or(1, 0.0) > 2.5;
+
+        outputs.set(10, if a || b { 5.0 } else { 0.0 });
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "logic_or"
+    }
+}
+
+/// Logic XOR Gate
+///
+/// Outputs high (+5V) when exactly one input is high (>2.5V).
+pub struct LogicXor {
+    spec: PortSpec,
+}
+
+impl LogicXor {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "a", SignalKind::Gate),
+                    PortDef::new(1, "b", SignalKind::Gate),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Gate)],
+            },
+        }
+    }
+}
+
+impl Default for LogicXor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for LogicXor {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let a = inputs.get_or(0, 0.0) > 2.5;
+        let b = inputs.get_or(1, 0.0) > 2.5;
+
+        outputs.set(10, if a ^ b { 5.0 } else { 0.0 });
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "logic_xor"
+    }
+}
+
+/// Logic NOT Gate (Inverter)
+///
+/// Inverts the input: outputs high (+5V) when input is low, and vice versa.
+pub struct LogicNot {
+    spec: PortSpec,
+}
+
+impl LogicNot {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![PortDef::new(0, "in", SignalKind::Gate)],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Gate)],
+            },
+        }
+    }
+}
+
+impl Default for LogicNot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for LogicNot {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0) > 2.5;
+        outputs.set(10, if input { 0.0 } else { 5.0 });
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "logic_not"
+    }
+}
+
+/// Comparator
+///
+/// Compares two CV inputs and outputs a gate based on the comparison.
+/// Outputs high (+5V) when A > B, otherwise low (0V).
+/// Also provides inverted output (A <= B).
+pub struct Comparator {
+    spec: PortSpec,
+}
+
+impl Comparator {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "a", SignalKind::CvBipolar),
+                    PortDef::new(1, "b", SignalKind::CvBipolar),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "gt", SignalKind::Gate),   // A > B
+                    PortDef::new(11, "lt", SignalKind::Gate),   // A < B
+                    PortDef::new(12, "eq", SignalKind::Gate),   // A ≈ B (within threshold)
+                ],
+            },
+        }
+    }
+}
+
+impl Default for Comparator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for Comparator {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let a = inputs.get_or(0, 0.0);
+        let b = inputs.get_or(1, 0.0);
+
+        // Use a small threshold for equality comparison (hysteresis)
+        let threshold = 0.01;
+
+        let gt = a > b + threshold;
+        let lt = a < b - threshold;
+        let eq = !gt && !lt;
+
+        outputs.set(10, if gt { 5.0 } else { 0.0 });
+        outputs.set(11, if lt { 5.0 } else { 0.0 });
+        outputs.set(12, if eq { 5.0 } else { 0.0 });
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "comparator"
+    }
+}
+
+/// Rectifier
+///
+/// Performs full-wave and half-wave rectification of audio/CV signals.
+/// Also provides absolute value output.
+pub struct Rectifier {
+    spec: PortSpec,
+}
+
+impl Rectifier {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![PortDef::new(0, "in", SignalKind::Audio)],
+                outputs: vec![
+                    PortDef::new(10, "full", SignalKind::Audio),    // Full-wave rectified
+                    PortDef::new(11, "half_pos", SignalKind::Audio), // Half-wave (positive)
+                    PortDef::new(12, "half_neg", SignalKind::Audio), // Half-wave (negative, inverted)
+                    PortDef::new(13, "abs", SignalKind::CvUnipolar), // Absolute value (0-10V)
+                ],
+            },
+        }
+    }
+}
+
+impl Default for Rectifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for Rectifier {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+
+        // Full-wave rectification: absolute value, keeps ±5V range as 0-5V
+        outputs.set(10, input.abs());
+
+        // Half-wave positive: pass positive, block negative
+        outputs.set(11, input.max(0.0));
+
+        // Half-wave negative: pass negative inverted, block positive
+        outputs.set(12, (-input).max(0.0));
+
+        // Absolute value scaled to 0-10V unipolar (input ±5V -> output 0-10V)
+        outputs.set(13, input.abs() * 2.0);
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "rectifier"
+    }
+}
+
+/// Precision Adder
+///
+/// A high-precision CV adder/mixer with multiple inputs.
+/// Useful for combining V/Oct signals for transposition.
+/// Includes a precision 1V/octave offset output for tuning.
+pub struct PrecisionAdder {
+    spec: PortSpec,
+}
+
+impl PrecisionAdder {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in1", SignalKind::VoltPerOctave),
+                    PortDef::new(1, "in2", SignalKind::VoltPerOctave),
+                    PortDef::new(2, "in3", SignalKind::CvBipolar),
+                    PortDef::new(3, "in4", SignalKind::CvBipolar),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "sum", SignalKind::VoltPerOctave),
+                    PortDef::new(11, "inv", SignalKind::VoltPerOctave), // Inverted sum
+                ],
+            },
+        }
+    }
+}
+
+impl Default for PrecisionAdder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for PrecisionAdder {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let sum = inputs.get_or(0, 0.0)
+            + inputs.get_or(1, 0.0)
+            + inputs.get_or(2, 0.0)
+            + inputs.get_or(3, 0.0);
+
+        outputs.set(10, sum);
+        outputs.set(11, -sum);
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "precision_adder"
+    }
+}
+
+/// Voltage-Controlled Switch
+///
+/// Routes one of two inputs to the output based on a control signal.
+/// When CV > 2.5V, output = B; otherwise output = A.
+/// Also provides complementary outputs.
+pub struct VcSwitch {
+    spec: PortSpec,
+}
+
+impl VcSwitch {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "a", SignalKind::Audio),
+                    PortDef::new(1, "b", SignalKind::Audio),
+                    PortDef::new(2, "cv", SignalKind::Gate).with_default(0.0),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Audio),     // Selected input
+                    PortDef::new(11, "a_out", SignalKind::Audio),   // A when selected, else 0
+                    PortDef::new(12, "b_out", SignalKind::Audio),   // B when selected, else 0
+                ],
+            },
+        }
+    }
+}
+
+impl Default for VcSwitch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for VcSwitch {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let a = inputs.get_or(0, 0.0);
+        let b = inputs.get_or(1, 0.0);
+        let cv = inputs.get_or(2, 0.0);
+
+        let select_b = cv > 2.5;
+
+        if select_b {
+            outputs.set(10, b);
+            outputs.set(11, 0.0);
+            outputs.set(12, b);
+        } else {
+            outputs.set(10, a);
+            outputs.set(11, a);
+            outputs.set(12, 0.0);
+        }
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "vc_switch"
+    }
+}
+
+/// Bernoulli Gate
+///
+/// A probabilistic gate router. On each trigger, randomly routes the signal
+/// to one of two outputs based on a probability parameter.
+/// Inspired by Mutable Instruments Branches.
+pub struct BernoulliGate {
+    last_trigger: f64,
+    spec: PortSpec,
+}
+
+impl BernoulliGate {
+    pub fn new() -> Self {
+        Self {
+            last_trigger: 0.0,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "trig", SignalKind::Trigger),
+                    PortDef::new(1, "prob", SignalKind::CvUnipolar).with_default(5.0), // 50% default
+                ],
+                outputs: vec![
+                    PortDef::new(10, "a", SignalKind::Trigger),   // Output A
+                    PortDef::new(11, "b", SignalKind::Trigger),   // Output B
+                    PortDef::new(12, "gate_a", SignalKind::Gate), // Latched gate A
+                    PortDef::new(13, "gate_b", SignalKind::Gate), // Latched gate B
+                ],
+            },
+        }
+    }
+}
+
+impl Default for BernoulliGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for BernoulliGate {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let trigger = inputs.get_or(0, 0.0);
+        let prob = (inputs.get_or(1, 5.0) / 10.0).clamp(0.0, 1.0); // Normalize to 0-1
+
+        let rising_edge = trigger > 2.5 && self.last_trigger <= 2.5;
+        self.last_trigger = trigger;
+
+        // Default: no trigger output
+        let mut trig_a = 0.0;
+        let mut trig_b = 0.0;
+
+        if rising_edge {
+            // Random decision based on probability
+            let rand: f64 = rand::random();
+            if rand < prob {
+                trig_a = 5.0;
+            } else {
+                trig_b = 5.0;
+            }
+        }
+
+        // Trigger outputs (momentary)
+        outputs.set(10, trig_a);
+        outputs.set(11, trig_b);
+
+        // Gate outputs track which side was last triggered
+        // These latch until the other side is triggered
+        let gate_a = if trig_a > 0.0 {
+            5.0
+        } else if trig_b > 0.0 {
+            0.0
+        } else {
+            outputs.get_or(12, 0.0) // Keep previous state
+        };
+        let gate_b = if trig_b > 0.0 {
+            5.0
+        } else if trig_a > 0.0 {
+            0.0
+        } else {
+            outputs.get_or(13, 0.0) // Keep previous state
+        };
+
+        outputs.set(12, gate_a);
+        outputs.set(13, gate_b);
+    }
+
+    fn reset(&mut self) {
+        self.last_trigger = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "bernoulli_gate"
+    }
+}
+
+/// Min module
+///
+/// Outputs the minimum of two input signals.
+pub struct Min {
+    spec: PortSpec,
+}
+
+impl Min {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "a", SignalKind::CvBipolar),
+                    PortDef::new(1, "b", SignalKind::CvBipolar),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::CvBipolar)],
+            },
+        }
+    }
+}
+
+impl Default for Min {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for Min {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let a = inputs.get_or(0, 0.0);
+        let b = inputs.get_or(1, 0.0);
+        outputs.set(10, a.min(b));
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "min"
+    }
+}
+
+/// Max module
+///
+/// Outputs the maximum of two input signals.
+pub struct Max {
+    spec: PortSpec,
+}
+
+impl Max {
+    pub fn new() -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "a", SignalKind::CvBipolar),
+                    PortDef::new(1, "b", SignalKind::CvBipolar),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::CvBipolar)],
+            },
+        }
+    }
+}
+
+impl Default for Max {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for Max {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let a = inputs.get_or(0, 0.0);
+        let b = inputs.get_or(1, 0.0);
+        outputs.set(10, a.max(b));
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "max"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1697,5 +2449,311 @@ mod tests {
         assert!((outputs.get(11).unwrap() - 3.14159).abs() < 0.0001);
         assert!((outputs.get(12).unwrap() - 3.14159).abs() < 0.0001);
         assert!((outputs.get(13).unwrap() - 3.14159).abs() < 0.0001);
+    }
+
+    // ========================================================================
+    // Phase 2 Module Tests
+    // ========================================================================
+
+    #[test]
+    fn test_ring_modulator() {
+        let mut rm = RingModulator::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Both at +5V: should produce positive output
+        inputs.set(0, 5.0);  // Carrier
+        inputs.set(1, 5.0);  // Modulator
+        rm.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 5.0).abs() < 0.1);
+
+        // Opposite polarity: should produce negative output
+        inputs.set(0, 5.0);
+        inputs.set(1, -5.0);
+        rm.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - (-5.0)).abs() < 0.1);
+
+        // Zero modulator: should produce zero
+        inputs.set(0, 5.0);
+        inputs.set(1, 0.0);
+        rm.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap()).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_crossfader() {
+        let mut xf = Crossfader::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 5.0);   // A
+        inputs.set(1, -5.0);  // B
+
+        // Full A (pos = -5V)
+        inputs.set(2, -5.0);
+        xf.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 5.0).abs() < 0.1);
+
+        // Full B (pos = +5V)
+        inputs.set(2, 5.0);
+        xf.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - (-5.0)).abs() < 0.1);
+
+        // Center (pos = 0V): equal mix
+        inputs.set(2, 0.0);
+        xf.tick(&inputs, &mut outputs);
+        // Equal power mix at center
+        let out = outputs.get(10).unwrap();
+        assert!(out.abs() < 1.0); // Should be near zero (equal mix of +5 and -5)
+    }
+
+    #[test]
+    fn test_logic_and() {
+        let mut gate = LogicAnd::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Both low
+        inputs.set(0, 0.0);
+        inputs.set(1, 0.0);
+        gate.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() < 2.5);
+
+        // One high
+        inputs.set(0, 5.0);
+        inputs.set(1, 0.0);
+        gate.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() < 2.5);
+
+        // Both high
+        inputs.set(0, 5.0);
+        inputs.set(1, 5.0);
+        gate.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() > 2.5);
+    }
+
+    #[test]
+    fn test_logic_or() {
+        let mut gate = LogicOr::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Both low
+        inputs.set(0, 0.0);
+        inputs.set(1, 0.0);
+        gate.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() < 2.5);
+
+        // One high
+        inputs.set(0, 5.0);
+        inputs.set(1, 0.0);
+        gate.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() > 2.5);
+
+        // Both high
+        inputs.set(0, 5.0);
+        inputs.set(1, 5.0);
+        gate.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() > 2.5);
+    }
+
+    #[test]
+    fn test_logic_xor() {
+        let mut gate = LogicXor::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Both low
+        inputs.set(0, 0.0);
+        inputs.set(1, 0.0);
+        gate.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() < 2.5);
+
+        // One high
+        inputs.set(0, 5.0);
+        inputs.set(1, 0.0);
+        gate.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() > 2.5);
+
+        // Both high
+        inputs.set(0, 5.0);
+        inputs.set(1, 5.0);
+        gate.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() < 2.5);
+    }
+
+    #[test]
+    fn test_logic_not() {
+        let mut gate = LogicNot::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Low input
+        inputs.set(0, 0.0);
+        gate.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() > 2.5);
+
+        // High input
+        inputs.set(0, 5.0);
+        gate.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() < 2.5);
+    }
+
+    #[test]
+    fn test_comparator() {
+        let mut cmp = Comparator::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // A > B
+        inputs.set(0, 3.0);
+        inputs.set(1, 1.0);
+        cmp.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() > 2.5);  // gt
+        assert!(outputs.get(11).unwrap() < 2.5);  // lt
+        assert!(outputs.get(12).unwrap() < 2.5);  // eq
+
+        // A < B
+        inputs.set(0, 1.0);
+        inputs.set(1, 3.0);
+        cmp.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() < 2.5);  // gt
+        assert!(outputs.get(11).unwrap() > 2.5);  // lt
+        assert!(outputs.get(12).unwrap() < 2.5);  // eq
+
+        // A ≈ B
+        inputs.set(0, 2.0);
+        inputs.set(1, 2.0);
+        cmp.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() < 2.5);  // gt
+        assert!(outputs.get(11).unwrap() < 2.5);  // lt
+        assert!(outputs.get(12).unwrap() > 2.5);  // eq
+    }
+
+    #[test]
+    fn test_rectifier() {
+        let mut rect = Rectifier::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Positive input
+        inputs.set(0, 3.0);
+        rect.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01);  // full
+        assert!((outputs.get(11).unwrap() - 3.0).abs() < 0.01);  // half_pos
+        assert!((outputs.get(12).unwrap()).abs() < 0.01);        // half_neg
+
+        // Negative input
+        inputs.set(0, -3.0);
+        rect.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01);  // full (abs)
+        assert!((outputs.get(11).unwrap()).abs() < 0.01);        // half_pos
+        assert!((outputs.get(12).unwrap() - 3.0).abs() < 0.01);  // half_neg (inverted)
+    }
+
+    #[test]
+    fn test_precision_adder() {
+        let mut adder = PrecisionAdder::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 1.0);
+        inputs.set(1, 2.0);
+        inputs.set(2, 0.5);
+        inputs.set(3, -0.5);
+        adder.tick(&inputs, &mut outputs);
+
+        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01);  // sum
+        assert!((outputs.get(11).unwrap() - (-3.0)).abs() < 0.01);  // inverted
+    }
+
+    #[test]
+    fn test_vc_switch() {
+        let mut sw = VcSwitch::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 3.0);  // A
+        inputs.set(1, 7.0);  // B
+
+        // CV low: select A
+        inputs.set(2, 0.0);
+        sw.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01);
+        assert!((outputs.get(11).unwrap() - 3.0).abs() < 0.01);
+        assert!((outputs.get(12).unwrap()).abs() < 0.01);
+
+        // CV high: select B
+        inputs.set(2, 5.0);
+        sw.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 7.0).abs() < 0.01);
+        assert!((outputs.get(11).unwrap()).abs() < 0.01);
+        assert!((outputs.get(12).unwrap() - 7.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_bernoulli_gate() {
+        let mut bg = BernoulliGate::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Set probability to 100%
+        inputs.set(1, 10.0);
+
+        // Trigger rising edge
+        inputs.set(0, 0.0);
+        bg.tick(&inputs, &mut outputs);
+        inputs.set(0, 5.0);
+        bg.tick(&inputs, &mut outputs);
+
+        // At 100% prob, should always go to A
+        assert!(outputs.get(10).unwrap() > 2.5);  // trig_a
+        assert!(outputs.get(11).unwrap() < 2.5);  // trig_b
+
+        // Reset and test 0% probability
+        bg.reset();
+        inputs.set(1, 0.0);
+        inputs.set(0, 0.0);
+        bg.tick(&inputs, &mut outputs);
+        inputs.set(0, 5.0);
+        bg.tick(&inputs, &mut outputs);
+
+        // At 0% prob, should always go to B
+        assert!(outputs.get(10).unwrap() < 2.5);  // trig_a
+        assert!(outputs.get(11).unwrap() > 2.5);  // trig_b
+    }
+
+    #[test]
+    fn test_min() {
+        let mut m = Min::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 3.0);
+        inputs.set(1, 5.0);
+        m.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01);
+
+        inputs.set(0, 7.0);
+        inputs.set(1, 2.0);
+        m.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_max() {
+        let mut m = Max::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 3.0);
+        inputs.set(1, 5.0);
+        m.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 5.0).abs() < 0.01);
+
+        inputs.set(0, 7.0);
+        inputs.set(1, 2.0);
+        m.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 7.0).abs() < 0.01);
     }
 }

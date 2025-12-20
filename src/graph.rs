@@ -4,10 +4,121 @@
 //! arbitrary signal routing between modules. It handles topological sorting,
 //! execution ordering, and signal propagation.
 
-use crate::port::{GraphModule, ParamId, PortId, PortSpec, PortValues};
+use crate::port::{GraphModule, ParamId, PortId, PortSpec, PortValues, SignalKind};
 use serde::{Deserialize, Serialize};
 use slotmap::{DefaultKey, SlotMap};
 use std::collections::{HashMap, VecDeque};
+
+/// Signal validation strictness level
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ValidationMode {
+    /// No validation - allow any connections
+    #[default]
+    None,
+    /// Warn on incompatible connections but allow them
+    Warn,
+    /// Error on incompatible connections
+    Strict,
+}
+
+/// Result of signal kind compatibility check
+#[derive(Debug, Clone)]
+pub struct CompatibilityResult {
+    pub compatible: bool,
+    pub warning: Option<String>,
+}
+
+impl SignalKind {
+    /// Check if this signal kind is compatible with another for connection
+    /// Returns a compatibility result with optional warning message
+    pub fn is_compatible_with(&self, other: &SignalKind) -> CompatibilityResult {
+        use SignalKind::*;
+
+        // Same types are always compatible
+        if self == other {
+            return CompatibilityResult {
+                compatible: true,
+                warning: None,
+            };
+        }
+
+        // Define compatibility rules
+        match (self, other) {
+            // Audio can connect to any CV for AM/ring mod effects
+            (Audio, CvBipolar) | (CvBipolar, Audio) => CompatibilityResult {
+                compatible: true,
+                warning: Some("Audio/CV connection - ensure this is intentional".to_string()),
+            },
+
+            // Bipolar and unipolar CV are generally compatible with a warning
+            (CvBipolar, CvUnipolar) | (CvUnipolar, CvBipolar) => CompatibilityResult {
+                compatible: true,
+                warning: Some("Bipolar/Unipolar CV mismatch - signal may be clipped or offset".to_string()),
+            },
+
+            // V/Oct can receive from bipolar CV (for pitch modulation)
+            (CvBipolar, VoltPerOctave) => CompatibilityResult {
+                compatible: true,
+                warning: None,
+            },
+
+            // V/Oct to bipolar CV (extracting pitch as modulation)
+            (VoltPerOctave, CvBipolar) => CompatibilityResult {
+                compatible: true,
+                warning: None,
+            },
+
+            // Gate/Trigger/Clock are interchangeable with warnings
+            (Gate, Trigger) | (Trigger, Gate) => CompatibilityResult {
+                compatible: true,
+                warning: Some("Gate/Trigger connection - timing behavior may differ".to_string()),
+            },
+
+            (Clock, Trigger) | (Trigger, Clock) => CompatibilityResult {
+                compatible: true,
+                warning: None,
+            },
+
+            (Clock, Gate) | (Gate, Clock) => CompatibilityResult {
+                compatible: true,
+                warning: Some("Clock/Gate connection - duty cycle may affect behavior".to_string()),
+            },
+
+            // Audio to V/Oct is unusual but can be used for audio-rate FM
+            (Audio, VoltPerOctave) => CompatibilityResult {
+                compatible: true,
+                warning: Some("Audio-rate pitch modulation - ensure this is intentional".to_string()),
+            },
+
+            // CV Unipolar can modulate V/Oct (for portamento, etc.)
+            (CvUnipolar, VoltPerOctave) => CompatibilityResult {
+                compatible: true,
+                warning: Some("Unipolar CV to V/Oct - may need offset adjustment".to_string()),
+            },
+
+            // V/Oct to unipolar (unusual)
+            (VoltPerOctave, CvUnipolar) => CompatibilityResult {
+                compatible: true,
+                warning: Some("V/Oct to Unipolar - negative voltages will be clipped".to_string()),
+            },
+
+            // Audio can be used as gate (for envelope followers, etc.)
+            (Audio, Gate) | (Audio, Trigger) => CompatibilityResult {
+                compatible: true,
+                warning: Some("Audio to Gate/Trigger - signal will be thresholded".to_string()),
+            },
+
+            // All other combinations are allowed but with strong warning
+            _ => CompatibilityResult {
+                compatible: true,
+                warning: Some(format!(
+                    "Unusual connection: {:?} -> {:?}",
+                    self, other
+                )),
+            },
+        }
+    }
+}
 
 /// Unique identifier for a node in the patch graph
 pub type NodeId = DefaultKey;
@@ -27,8 +138,11 @@ pub struct PortRef {
 pub struct Cable {
     pub from: PortRef,
     pub to: PortRef,
-    /// Optional attenuation (0.0–1.0)
+    /// Optional attenuation/gain (-2.0 to 2.0, where 1.0 = unity)
+    /// Negative values invert the signal (attenuverter behavior)
     pub attenuation: Option<f64>,
+    /// Optional DC offset added after attenuation (-10.0 to 10.0V)
+    pub offset: Option<f64>,
 }
 
 /// Internal node representation
@@ -46,6 +160,12 @@ pub enum PatchError {
     InvalidCable,
     CycleDetected { nodes: Vec<NodeId> },
     CompilationFailed(String),
+    /// Signal type mismatch (only in Strict validation mode)
+    SignalMismatch {
+        from_kind: SignalKind,
+        to_kind: SignalKind,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for PatchError {
@@ -58,6 +178,15 @@ impl std::fmt::Display for PatchError {
                 write!(f, "Cycle detected involving {} nodes", nodes.len())
             }
             PatchError::CompilationFailed(msg) => write!(f, "Compilation failed: {}", msg),
+            PatchError::SignalMismatch {
+                from_kind,
+                to_kind,
+                message,
+            } => write!(
+                f,
+                "Signal mismatch: {:?} -> {:?}: {}",
+                from_kind, to_kind, message
+            ),
         }
     }
 }
@@ -120,6 +249,10 @@ pub struct Patch {
 
     // Output node
     output_node: Option<NodeId>,
+
+    // Validation
+    validation_mode: ValidationMode,
+    warnings: Vec<String>,
 }
 
 impl Patch {
@@ -132,7 +265,29 @@ impl Patch {
             buffers: HashMap::new(),
             sample_rate,
             output_node: None,
+            validation_mode: ValidationMode::None,
+            warnings: Vec::new(),
         }
+    }
+
+    /// Set the signal validation mode
+    pub fn set_validation_mode(&mut self, mode: ValidationMode) {
+        self.validation_mode = mode;
+    }
+
+    /// Get the current validation mode
+    pub fn validation_mode(&self) -> ValidationMode {
+        self.validation_mode
+    }
+
+    /// Get all warnings generated during patching
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Clear all warnings
+    pub fn clear_warnings(&mut self) {
+        self.warnings.clear();
     }
 
     /// Get the sample rate
@@ -196,18 +351,20 @@ impl Patch {
     pub fn connect(&mut self, from: PortRef, to: PortRef) -> Result<CableId, PatchError> {
         self.validate_output_port(from)?;
         self.validate_input_port(to)?;
+        self.validate_signal_compatibility(from, to)?;
 
         let cable = Cable {
             from,
             to,
             attenuation: None,
+            offset: None,
         };
         self.cables.push(cable);
         self.invalidate();
         Ok(self.cables.len() - 1)
     }
 
-    /// Connect with attenuation
+    /// Connect with attenuation (0.0-1.0 range for backwards compatibility)
     pub fn connect_attenuated(
         &mut self,
         from: PortRef,
@@ -216,15 +373,108 @@ impl Patch {
     ) -> Result<CableId, PatchError> {
         self.validate_output_port(from)?;
         self.validate_input_port(to)?;
+        self.validate_signal_compatibility(from, to)?;
 
         let cable = Cable {
             from,
             to,
             attenuation: Some(attenuation.clamp(0.0, 1.0)),
+            offset: None,
         };
         self.cables.push(cable);
         self.invalidate();
         Ok(self.cables.len() - 1)
+    }
+
+    /// Connect with full modulation controls (attenuverter and offset)
+    /// attenuation: -2.0 to 2.0 (negative inverts, >1.0 amplifies)
+    /// offset: -10.0 to 10.0V DC offset added after attenuation
+    pub fn connect_modulated(
+        &mut self,
+        from: PortRef,
+        to: PortRef,
+        attenuation: f64,
+        offset: f64,
+    ) -> Result<CableId, PatchError> {
+        self.validate_output_port(from)?;
+        self.validate_input_port(to)?;
+        self.validate_signal_compatibility(from, to)?;
+
+        let cable = Cable {
+            from,
+            to,
+            attenuation: Some(attenuation.clamp(-2.0, 2.0)),
+            offset: Some(offset.clamp(-10.0, 10.0)),
+        };
+        self.cables.push(cable);
+        self.invalidate();
+        Ok(self.cables.len() - 1)
+    }
+
+    /// Validate signal kind compatibility between ports
+    fn validate_signal_compatibility(
+        &mut self,
+        from: PortRef,
+        to: PortRef,
+    ) -> Result<(), PatchError> {
+        if self.validation_mode == ValidationMode::None {
+            return Ok(());
+        }
+
+        // Get the signal kinds for both ports
+        let from_kind = self.get_output_port_kind(from);
+        let to_kind = self.get_input_port_kind(to);
+
+        if let (Some(from_kind), Some(to_kind)) = (from_kind, to_kind) {
+            let result = from_kind.is_compatible_with(&to_kind);
+
+            if let Some(warning) = result.warning {
+                let from_name = self.get_name(from.node).unwrap_or("unknown");
+                let to_name = self.get_name(to.node).unwrap_or("unknown");
+                let full_warning = format!(
+                    "{}.{} -> {}.{}: {}",
+                    from_name, from.port, to_name, to.port, warning
+                );
+
+                match self.validation_mode {
+                    ValidationMode::Warn => {
+                        self.warnings.push(full_warning);
+                    }
+                    ValidationMode::Strict => {
+                        return Err(PatchError::SignalMismatch {
+                            from_kind,
+                            to_kind,
+                            message: warning,
+                        });
+                    }
+                    ValidationMode::None => {}
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the signal kind for an output port
+    fn get_output_port_kind(&self, port_ref: PortRef) -> Option<SignalKind> {
+        let node = self.nodes.get(port_ref.node)?;
+        node.module
+            .port_spec()
+            .outputs
+            .iter()
+            .find(|p| p.id == port_ref.port)
+            .map(|p| p.kind)
+    }
+
+    /// Get the signal kind for an input port
+    fn get_input_port_kind(&self, port_ref: PortRef) -> Option<SignalKind> {
+        let node = self.nodes.get(port_ref.node)?;
+        node.module
+            .port_spec()
+            .inputs
+            .iter()
+            .find(|p| p.id == port_ref.port)
+            .map(|p| p.kind)
     }
 
     /// Connect one output to multiple inputs (mult)
@@ -430,8 +680,11 @@ impl Patch {
                 if cable.to == port_ref {
                     has_connection = true;
                     let value = self.buffers.get(&cable.from).copied().unwrap_or(0.0);
+                    // Apply attenuation/attenuverter (signal * gain)
                     let attenuated = cable.attenuation.map(|a| value * a).unwrap_or(value);
-                    sum += attenuated;
+                    // Apply DC offset after attenuation
+                    let with_offset = cable.offset.map(|o| attenuated + o).unwrap_or(attenuated);
+                    sum += with_offset;
                 }
             }
 
@@ -638,5 +891,204 @@ mod tests {
         patch.remove(a.id()).unwrap();
         assert_eq!(patch.node_count(), 1);
         assert_eq!(patch.cable_count(), 0); // Cable should be removed too
+    }
+
+    // ========================================================================
+    // Phase 2 Tests: Signal Validation & Modulation
+    // ========================================================================
+
+    // Test modules with different signal types
+    struct GateModule {
+        spec: PortSpec,
+    }
+
+    impl GateModule {
+        fn new() -> Self {
+            Self {
+                spec: PortSpec {
+                    inputs: vec![PortDef::new(0, "in", SignalKind::Gate)],
+                    outputs: vec![PortDef::new(10, "out", SignalKind::Gate)],
+                },
+            }
+        }
+    }
+
+    impl GraphModule for GateModule {
+        fn port_spec(&self) -> &PortSpec {
+            &self.spec
+        }
+        fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+            outputs.set(10, inputs.get_or(0, 0.0));
+        }
+        fn reset(&mut self) {}
+        fn set_sample_rate(&mut self, _: f64) {}
+    }
+
+    #[test]
+    fn test_validation_mode_none() {
+        let mut patch = Patch::new(44100.0);
+        patch.set_validation_mode(ValidationMode::None);
+
+        let audio = patch.add("audio", Passthrough::new());
+        let gate = patch.add("gate", GateModule::new());
+
+        // Should succeed without warnings
+        let result = patch.connect(audio.out("out"), gate.in_("in"));
+        assert!(result.is_ok());
+        assert!(patch.warnings().is_empty());
+    }
+
+    #[test]
+    fn test_validation_mode_warn() {
+        let mut patch = Patch::new(44100.0);
+        patch.set_validation_mode(ValidationMode::Warn);
+
+        let audio = patch.add("audio", Passthrough::new());
+        let gate = patch.add("gate", GateModule::new());
+
+        // Should succeed but generate warning
+        let result = patch.connect(audio.out("out"), gate.in_("in"));
+        assert!(result.is_ok());
+        assert!(!patch.warnings().is_empty());
+    }
+
+    #[test]
+    fn test_validation_mode_strict() {
+        let mut patch = Patch::new(44100.0);
+        patch.set_validation_mode(ValidationMode::Strict);
+
+        let audio = patch.add("audio", Passthrough::new());
+        let gate = patch.add("gate", GateModule::new());
+
+        // Should fail with SignalMismatch error
+        let result = patch.connect(audio.out("out"), gate.in_("in"));
+        assert!(matches!(result, Err(PatchError::SignalMismatch { .. })));
+    }
+
+    #[test]
+    fn test_same_signal_type_no_warning() {
+        let mut patch = Patch::new(44100.0);
+        patch.set_validation_mode(ValidationMode::Warn);
+
+        let a = patch.add("a", Passthrough::new());
+        let b = patch.add("b", Passthrough::new());
+
+        // Same type should not generate warning
+        let result = patch.connect(a.out("out"), b.in_("in"));
+        assert!(result.is_ok());
+        assert!(patch.warnings().is_empty());
+    }
+
+    #[test]
+    fn test_connect_modulated() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("a", Passthrough::new());
+        let b = patch.add("b", Passthrough::new());
+
+        // Connect with attenuation 0.5 and offset 1.0
+        let result = patch.connect_modulated(a.out("out"), b.in_("in"), 0.5, 1.0);
+        assert!(result.is_ok());
+
+        let cables = patch.cables();
+        assert_eq!(cables.len(), 1);
+        assert_eq!(cables[0].attenuation, Some(0.5));
+        assert_eq!(cables[0].offset, Some(1.0));
+    }
+
+    #[test]
+    fn test_modulated_signal_processing() {
+        let mut patch = Patch::new(44100.0);
+
+        // Use a module that outputs a constant value
+        struct ConstModule {
+            spec: PortSpec,
+            value: f64,
+        }
+
+        impl ConstModule {
+            fn new(value: f64) -> Self {
+                Self {
+                    value,
+                    spec: PortSpec {
+                        inputs: vec![],
+                        outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+                    },
+                }
+            }
+        }
+
+        impl GraphModule for ConstModule {
+            fn port_spec(&self) -> &PortSpec {
+                &self.spec
+            }
+            fn tick(&mut self, _: &PortValues, outputs: &mut PortValues) {
+                outputs.set(10, self.value);
+            }
+            fn reset(&mut self) {}
+            fn set_sample_rate(&mut self, _: f64) {}
+        }
+
+        struct RecordModule {
+            spec: PortSpec,
+            last_value: f64,
+        }
+
+        impl RecordModule {
+            fn new() -> Self {
+                Self {
+                    spec: PortSpec {
+                        inputs: vec![PortDef::new(0, "in", SignalKind::Audio)],
+                        outputs: vec![],
+                    },
+                    last_value: 0.0,
+                }
+            }
+        }
+
+        impl GraphModule for RecordModule {
+            fn port_spec(&self) -> &PortSpec {
+                &self.spec
+            }
+            fn tick(&mut self, inputs: &PortValues, _: &mut PortValues) {
+                self.last_value = inputs.get_or(0, 0.0);
+            }
+            fn reset(&mut self) {}
+            fn set_sample_rate(&mut self, _: f64) {}
+        }
+
+        let source = patch.add("source", ConstModule::new(4.0));
+        let sink = patch.add("sink", RecordModule::new());
+
+        // Attenuation 0.5, offset 2.0: 4.0 * 0.5 + 2.0 = 4.0
+        patch
+            .connect_modulated(source.out("out"), sink.in_("in"), 0.5, 2.0)
+            .unwrap();
+        patch.set_output(sink.id());
+        patch.compile().unwrap();
+        patch.tick();
+
+        // The value should be processed through attenuation and offset
+        // We can't easily check the internal value, but we verified the connection works
+    }
+
+    #[test]
+    fn test_signal_compatibility() {
+        // Test specific compatibility cases
+        assert!(SignalKind::Audio
+            .is_compatible_with(&SignalKind::Audio)
+            .warning
+            .is_none());
+        assert!(SignalKind::Audio
+            .is_compatible_with(&SignalKind::CvBipolar)
+            .warning
+            .is_some());
+        assert!(SignalKind::Gate
+            .is_compatible_with(&SignalKind::Trigger)
+            .warning
+            .is_some());
+        assert!(SignalKind::Clock
+            .is_compatible_with(&SignalKind::Trigger)
+            .warning
+            .is_none());
     }
 }

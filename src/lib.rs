@@ -62,12 +62,21 @@ pub mod prelude {
     };
 
     // Layer 3: Patch Graph
-    pub use crate::graph::{Cable, CableId, NodeHandle, NodeId, Patch, PatchError, PortRef};
+    pub use crate::graph::{
+        Cable, CableId, CompatibilityResult, NodeHandle, NodeId, Patch, PatchError, PortRef,
+        ValidationMode,
+    };
 
     // Core DSP Modules
     pub use crate::modules::{
         Adsr, Attenuverter, Clock, Lfo, Mixer, Multiple, NoiseGenerator, Offset, Quantizer,
         SampleAndHold, Scale, SlewLimiter, StepSequencer, StereoOutput, Svf, UnitDelay, Vca, Vco,
+    };
+
+    // Phase 2 Modules
+    pub use crate::modules::{
+        BernoulliGate, Comparator, Crossfader, LogicAnd, LogicNot, LogicOr, LogicXor, Max, Min,
+        PrecisionAdder, Rectifier, RingModulator, VcSwitch,
     };
 
     // Analog Modeling
