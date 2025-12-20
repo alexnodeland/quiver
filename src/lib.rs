@@ -57,6 +57,7 @@ pub mod port;
 pub mod presets;
 pub mod serialize;
 pub mod simd;
+pub mod visual;
 
 /// Prelude module for convenient imports
 pub mod prelude {
@@ -134,6 +135,12 @@ pub mod prelude {
     pub use crate::presets::{
         ClassicPresets, PresetCategory, PresetInfo, PresetLibrary, SoundDesignPresets,
         TutorialPresets,
+    };
+
+    // Phase 5: Visual Tools
+    pub use crate::visual::{
+        AutomationData, AutomationPoint, AutomationRecorder, AutomationTrack, DotExporter,
+        DotStyle, LevelMeter, Scope, SpectrumAnalyzer, TriggerMode,
     };
 }
 
