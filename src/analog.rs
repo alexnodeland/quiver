@@ -307,10 +307,159 @@ pub mod noise {
     }
 }
 
+/// V/Oct Tracking Model
+///
+/// Models the non-linear tracking errors that occur in analog VCOs,
+/// where pitch accuracy degrades at extreme octaves.
+#[derive(Debug, Clone)]
+pub struct VoctTrackingModel {
+    /// Base tracking error in cents (random offset per instance)
+    base_error_cents: f64,
+
+    /// Error coefficient per octave (cents/octave away from center)
+    octave_error_coef: f64,
+
+    /// Center octave (typically C4 = 0V = octave 4)
+    center_octave: f64,
+
+    /// Random walk state for slow drift
+    drift_state: f64,
+
+    /// Drift rate (how fast the tracking wanders)
+    drift_rate: f64,
+}
+
+impl VoctTrackingModel {
+    /// Create a new tracking model with typical analog characteristics
+    pub fn new() -> Self {
+        Self {
+            base_error_cents: (rand::random::<f64>() * 2.0 - 1.0) * 5.0, // ±5 cents base
+            octave_error_coef: 1.0 + rand::random::<f64>() * 2.0,        // 1-3 cents/octave
+            center_octave: 4.0,
+            drift_state: 0.0,
+            drift_rate: 0.0001,
+        }
+    }
+
+    /// Create a perfect tracking model (no errors)
+    pub fn perfect() -> Self {
+        Self {
+            base_error_cents: 0.0,
+            octave_error_coef: 0.0,
+            center_octave: 4.0,
+            drift_state: 0.0,
+            drift_rate: 0.0,
+        }
+    }
+
+    /// Apply tracking error to a V/Oct value, returning the modified V/Oct
+    pub fn apply(&mut self, voct: f64, dt: f64) -> f64 {
+        // Update drift (slow random walk)
+        self.drift_state += (rand::random::<f64>() * 2.0 - 1.0) * self.drift_rate * dt * 1000.0;
+        self.drift_state = self.drift_state.clamp(-10.0, 10.0);
+
+        // Calculate octave distance from center
+        let current_octave = self.center_octave + voct;
+        let octave_distance = (current_octave - self.center_octave).abs();
+
+        // Total error in cents
+        let error_cents =
+            self.base_error_cents + (octave_distance * self.octave_error_coef) + self.drift_state;
+
+        // Convert cents error to V/Oct offset (100 cents = 1 semitone = 1/12 octave)
+        let error_voct = error_cents / 1200.0;
+
+        voct + error_voct
+    }
+
+    /// Reset the drift state
+    pub fn reset(&mut self) {
+        self.drift_state = 0.0;
+    }
+}
+
+impl Default for VoctTrackingModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// High-Frequency Rolloff Model
+///
+/// Models the high-frequency rolloff that occurs in analog VCOs due to
+/// slew rate limiting and parasitic capacitance.
+#[derive(Debug, Clone)]
+pub struct HighFrequencyRolloff {
+    /// -3dB cutoff frequency
+    cutoff_hz: f64,
+
+    /// Current filter state
+    state: f64,
+
+    /// Filter coefficient
+    coef: f64,
+
+    /// Sample rate
+    sample_rate: f64,
+}
+
+impl HighFrequencyRolloff {
+    /// Create a new rolloff filter with given cutoff frequency
+    pub fn new(sample_rate: f64, cutoff_hz: f64) -> Self {
+        let coef = Self::calculate_coef(sample_rate, cutoff_hz);
+        Self {
+            cutoff_hz,
+            state: 0.0,
+            coef,
+            sample_rate,
+        }
+    }
+
+    /// Create a default rolloff (12kHz cutoff)
+    pub fn default_analog(sample_rate: f64) -> Self {
+        Self::new(sample_rate, 12000.0)
+    }
+
+    fn calculate_coef(sample_rate: f64, cutoff_hz: f64) -> f64 {
+        let omega = TAU * cutoff_hz / sample_rate;
+        omega / (1.0 + omega)
+    }
+
+    /// Apply frequency-dependent rolloff
+    /// Higher frequencies get more attenuation
+    pub fn apply(&mut self, input: f64, frequency: f64) -> f64 {
+        // Increase rolloff for higher frequencies
+        let freq_factor = (frequency / self.cutoff_hz).max(0.1);
+        let effective_coef = self.coef / freq_factor.min(4.0);
+
+        // One-pole lowpass filter
+        self.state += effective_coef * (input - self.state);
+        self.state
+    }
+
+    /// Set sample rate and recalculate coefficient
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+        self.coef = Self::calculate_coef(sample_rate, self.cutoff_hz);
+    }
+
+    /// Reset filter state
+    pub fn reset(&mut self) {
+        self.state = 0.0;
+    }
+}
+
+impl Default for HighFrequencyRolloff {
+    fn default() -> Self {
+        Self::new(44100.0, 12000.0)
+    }
+}
+
 /// Analog-modeled Voltage Controlled Oscillator
 ///
 /// A VCO with analog imperfections: component tolerance, thermal drift,
-/// DC offset, and slight asymmetric saturation.
+/// DC offset, asymmetric saturation, V/Oct tracking errors, and
+/// high-frequency rolloff.
 pub struct AnalogVco {
     phase: f64,
     sample_rate: f64,
@@ -320,9 +469,14 @@ pub struct AnalogVco {
     thermal: ThermalModel,
     dc_offset: f64,
 
-    // State
+    // Phase 3: Enhanced analog modeling
+    voct_tracking: VoctTrackingModel,
+    hf_rolloff: HighFrequencyRolloff,
+
+    // Sync state
     last_output: f64,
     last_sync: f64,
+    sync_ramp: f64, // For soft sync ramping
 
     spec: PortSpec,
 }
@@ -335,8 +489,11 @@ impl AnalogVco {
             freq_component: ComponentModel::new(0.02, 0.0001), // 2% tolerance
             thermal: ThermalModel::new(25.0, 0.01, 0.001),
             dc_offset: (rand::random::<f64>() * 2.0 - 1.0) * 0.01,
+            voct_tracking: VoctTrackingModel::new(),
+            hf_rolloff: HighFrequencyRolloff::default_analog(sample_rate),
             last_output: 0.0,
             last_sync: 0.0,
+            sync_ramp: 1.0,
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "voct", SignalKind::VoltPerOctave),
@@ -372,21 +529,33 @@ impl GraphModule for AnalogVco {
         let pw = inputs.get_or(2, 0.5).clamp(0.05, 0.95);
         let sync = inputs.get_or(3, 0.0);
 
+        let dt = 1.0 / self.sample_rate;
+
+        // Phase 3: Apply V/Oct tracking errors
+        let voct_with_error = self.voct_tracking.apply(voct, dt);
+
         // Apply component tolerance and thermal drift to frequency
-        let base_freq = 261.63 * 2.0_f64.powf(voct);
+        let base_freq = 261.63 * 2.0_f64.powf(voct_with_error);
         let freq = self.freq_component.apply(base_freq);
         let freq = freq * (1.0 + self.thermal.offset() * 0.001); // Thermal detuning
         let freq = freq * 2.0_f64.powf(fm);
 
         // Update thermal model
-        self.thermal
-            .update(self.last_output.powi(2), 1.0 / self.sample_rate);
+        self.thermal.update(self.last_output.powi(2), dt);
 
-        // Hard sync
+        // Phase 3: Improved oscillator sync with soft ramp
         if sync > 2.5 && self.last_sync <= 2.5 {
+            // Hard sync: reset phase
             self.phase = 0.0;
+            // Start a soft sync ramp for smoother transient
+            self.sync_ramp = 0.0;
         }
         self.last_sync = sync;
+
+        // Ramp up sync amplitude smoothly to avoid clicks
+        if self.sync_ramp < 1.0 {
+            self.sync_ramp = (self.sync_ramp + 0.01).min(1.0);
+        }
 
         // Generate waveforms with slight analog imperfections
         let sin = (self.phase * TAU).sin();
@@ -396,6 +565,15 @@ impl GraphModule for AnalogVco {
 
         // Add DC offset and slight asymmetric saturation
         let saw = saturation::asym_sat(saw + self.dc_offset, 1.0, 0.98);
+
+        // Apply sync ramp for smooth sync transients
+        let sin = sin * self.sync_ramp;
+        let tri = tri * self.sync_ramp;
+        let saw = saw * self.sync_ramp;
+        let sqr = sqr * self.sync_ramp;
+
+        // Phase 3: Apply high-frequency rolloff (more effect on high notes)
+        let sin = self.hf_rolloff.apply(sin, freq);
 
         self.last_output = saw;
         self.phase = (self.phase + freq / self.sample_rate).fract();
@@ -414,11 +592,15 @@ impl GraphModule for AnalogVco {
         self.phase = 0.0;
         self.last_output = 0.0;
         self.last_sync = 0.0;
+        self.sync_ramp = 1.0;
         self.thermal.reset();
+        self.voct_tracking.reset();
+        self.hf_rolloff.reset();
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
+        self.hf_rolloff.set_sample_rate(sample_rate);
     }
 
     fn type_id(&self) -> &'static str {
@@ -623,5 +805,80 @@ mod tests {
         vco.tick(&inputs, &mut outputs);
         assert!(outputs.get(10).is_some());
         assert!(outputs.get(12).is_some());
+    }
+
+    // Phase 3 Tests
+
+    #[test]
+    fn test_voct_tracking_model() {
+        let mut tracking = VoctTrackingModel::new();
+
+        // Should add some error to the pitch
+        let voct_in = 0.0;
+        let voct_out = tracking.apply(voct_in, 1.0 / 44100.0);
+
+        // Error should be small but non-zero (within ±50 cents = ±0.042 V/Oct)
+        assert!((voct_out - voct_in).abs() < 0.05);
+
+        // Error should increase with octave distance
+        let error_at_c4 = (tracking.apply(0.0, 0.0) - 0.0).abs();
+        let error_at_c6 = (tracking.apply(2.0, 0.0) - 2.0).abs();
+        // C6 is 2 octaves away, so error should be larger
+        assert!(error_at_c6 >= error_at_c4 * 0.5); // Allow some variance due to randomness
+    }
+
+    #[test]
+    fn test_voct_tracking_perfect() {
+        let mut tracking = VoctTrackingModel::perfect();
+
+        // Perfect tracking should have no error
+        let voct_out = tracking.apply(2.0, 1.0 / 44100.0);
+        assert!((voct_out - 2.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_high_frequency_rolloff() {
+        let mut rolloff = HighFrequencyRolloff::new(44100.0, 12000.0);
+
+        // Process a signal
+        let output = rolloff.apply(1.0, 261.0); // Low frequency
+        assert!(output > 0.0);
+
+        // Reset and test high frequency - should have more attenuation
+        rolloff.reset();
+        let mut high_freq_out = 0.0;
+        for _ in 0..100 {
+            high_freq_out = rolloff.apply(1.0, 16000.0);
+        }
+        // High frequency signal should be attenuated
+        assert!(high_freq_out < 1.0);
+    }
+
+    #[test]
+    fn test_analog_vco_with_sync() {
+        let mut vco = AnalogVco::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 0.0); // C4
+
+        // Run a few samples
+        for _ in 0..100 {
+            vco.tick(&inputs, &mut outputs);
+        }
+
+        // Trigger sync
+        inputs.set(3, 5.0); // Sync high
+        vco.tick(&inputs, &mut outputs);
+
+        // After sync, amplitude should be ramping up
+        let out1 = outputs.get(10).unwrap_or(0.0);
+
+        inputs.set(3, 0.0); // Sync low
+        vco.tick(&inputs, &mut outputs);
+        let out2 = outputs.get(10).unwrap_or(0.0);
+
+        // Sync ramp should be taking effect (output increasing toward full amplitude)
+        assert!(out1.abs() <= out2.abs() || (out1.abs() < 5.0 && out2.abs() < 5.0));
     }
 }

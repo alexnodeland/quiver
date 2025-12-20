@@ -465,6 +465,32 @@ impl ModuleRegistry {
             "Output maximum of two signals",
             |_| Box::new(Max::new()),
         );
+
+        // Phase 3 Modules
+
+        self.register_factory(
+            "diode_ladder",
+            "Diode Ladder Filter",
+            "Filters",
+            "24dB/oct ladder filter with diode saturation",
+            |sr| Box::new(DiodeLadderFilter::new(sr)),
+        );
+
+        self.register_factory(
+            "crosstalk",
+            "Crosstalk",
+            "Analog Modeling",
+            "Channel crosstalk simulation",
+            |sr| Box::new(Crosstalk::new(sr)),
+        );
+
+        self.register_factory(
+            "ground_loop",
+            "Ground Loop",
+            "Analog Modeling",
+            "Ground loop hum simulation (50/60 Hz)",
+            |sr| Box::new(GroundLoop::new(sr)),
+        );
     }
 
     /// Register a module factory with metadata
