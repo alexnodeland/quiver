@@ -79,8 +79,14 @@ pub mod prelude {
         PrecisionAdder, Rectifier, RingModulator, VcSwitch,
     };
 
+    // Phase 3 Modules
+    pub use crate::modules::{Crosstalk, DiodeLadderFilter, GroundLoop};
+
     // Analog Modeling
     pub use crate::analog::{noise, saturation, AnalogVco, ComponentModel, ThermalModel};
+
+    // Phase 3: Enhanced Analog Modeling
+    pub use crate::analog::{HighFrequencyRolloff, VoctTrackingModel};
 
     // External I/O
     pub use crate::io::{AtomicF64, ExternalInput, MidiState};

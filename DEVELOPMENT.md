@@ -4,9 +4,9 @@ This document outlines the development roadmap and current status for the Quiver
 
 ## Current Status
 
-**Version**: 0.2.0 (Phase 2 Complete)
+**Version**: 0.3.0 (Phase 3 Complete)
 
-The library now includes all Phase 1 (Core Foundation) and Phase 2 (Hardware Fidelity) features:
+The library now includes all Phase 1 (Core Foundation), Phase 2 (Hardware Fidelity), and Phase 3 (Analog Modeling Refinement) features:
 
 ### Completed Features
 
@@ -117,26 +117,27 @@ The library now includes all Phase 1 (Core Foundation) and Phase 2 (Hardware Fid
    - [x] Attenuverter range (-2.0 to 2.0) for signal inversion
    - [x] Updated serialization for modulated cables
 
+#### Phase 3: Analog Modeling Refinement (Complete)
+
+1. **Enhanced VCO Modeling**
+   - [x] `VoctTrackingModel` - V/Oct tracking errors with octave-dependent drift
+   - [x] `HighFrequencyRolloff` - Frequency-dependent amplitude rolloff
+   - [x] Improved oscillator sync with soft ramp for smoother transients
+   - [x] Enhanced `AnalogVco` integrating all new modeling features
+
+2. **Filter Improvements**
+   - [x] Self-oscillation capability in `Svf` at high resonance (>0.95)
+   - [x] Keyboard tracking inputs (`keytrack`, `keytrack_amt`) for Svf
+   - [x] `DiodeLadderFilter` - 24dB/oct ladder filter with diode saturation
+
+3. **Improved Noise Models**
+   - [x] Correlated stereo noise outputs in `NoiseGenerator`
+   - [x] `Crosstalk` - Channel crosstalk simulation with HF emphasis
+   - [x] `GroundLoop` - 50/60 Hz hum with harmonics and thermal modulation
+
 ---
 
 ## Development Roadmap
-
-### Phase 3: Analog Modeling Refinement
-
-1. **Enhanced VCO Modeling**
-   - V/Oct tracking errors
-   - High-frequency response rolloff
-   - Oscillator sync
-
-2. **Filter Improvements**
-   - Self-oscillation
-   - Keyboard tracking
-   - Diode ladder filter variant
-
-3. **Improved Noise Models**
-   - Correlated noise between channels
-   - Crosstalk simulation
-   - Ground loop simulation
 
 ### Phase 4: Advanced Features
 

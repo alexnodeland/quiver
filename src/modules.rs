@@ -198,7 +198,12 @@ impl GraphModule for Lfo {
 /// State Variable Filter (SVF)
 ///
 /// A versatile 12dB/oct filter with simultaneous lowpass, bandpass,
-/// highpass, and notch outputs. Features cutoff, resonance, and FM inputs.
+/// highpass, and notch outputs. Features cutoff, resonance, FM, and
+/// keyboard tracking inputs.
+///
+/// Phase 3 additions:
+/// - Self-oscillation at high resonance values
+/// - Keyboard tracking for filter-follows-pitch
 pub struct Svf {
     low: f64,
     band: f64,
@@ -222,6 +227,10 @@ impl Svf {
                         .with_default(0.0)
                         .with_attenuverter(),
                     PortDef::new(3, "fm", SignalKind::CvBipolar).with_attenuverter(),
+                    // Phase 3: Keyboard tracking input
+                    PortDef::new(4, "keytrack", SignalKind::VoltPerOctave),
+                    // Phase 3: Keyboard tracking amount (0-1)
+                    PortDef::new(5, "keytrack_amt", SignalKind::CvUnipolar).with_default(0.0),
                 ],
                 outputs: vec![
                     PortDef::new(10, "lp", SignalKind::Audio),
@@ -250,20 +259,45 @@ impl GraphModule for Svf {
         let cutoff_cv = inputs.get_or(1, 0.5) + inputs.get_or(3, 0.0);
         let res = inputs.get_or(2, 0.0).clamp(0.0, 1.0);
 
-        // Map cutoff CV (0-1) to frequency (20 Hz - 20 kHz, exponential)
-        let cutoff_hz = 20.0 * (1000.0_f64).powf(cutoff_cv.clamp(0.0, 1.0));
+        // Phase 3: Keyboard tracking
+        let keytrack_voct = inputs.get_or(4, 0.0);
+        let keytrack_amt = inputs.get_or(5, 0.0).clamp(0.0, 1.0);
+
+        // Calculate base cutoff frequency
+        let base_cutoff_hz = 20.0 * (1000.0_f64).powf(cutoff_cv.clamp(0.0, 1.0));
+
+        // Apply keyboard tracking: each octave of V/Oct doubles the cutoff
+        let keytrack_multiplier = 2.0_f64.powf(keytrack_voct * keytrack_amt);
+        let cutoff_hz = (base_cutoff_hz * keytrack_multiplier).clamp(20.0, 20000.0);
+
         let f = 2.0 * (PI * cutoff_hz / self.sample_rate).sin();
         let f = f.min(0.99); // Prevent instability
-        let q = 1.0 - res * 0.9; // Resonance: higher res = lower damping
 
-        // SVF topology
+        // Phase 3: Self-oscillation at high resonance
+        // When res > 0.95, allow Q to go below zero for self-oscillation
+        let q = if res > 0.95 {
+            // Self-oscillation zone: Q becomes negative, causing oscillation
+            let osc_amount = (res - 0.95) / 0.05; // 0 to 1 in the 0.95-1.0 range
+            0.1 - osc_amount * 0.15 // Goes from 0.1 to -0.05
+        } else {
+            1.0 - res * 0.9 // Normal resonance: higher res = lower damping
+        };
+
+        // SVF topology with self-oscillation support
         let high = input - self.low - q * self.band;
         self.band += f * high;
         self.low += f * self.band;
         let notch = high + self.low;
 
+        // Soft clip to prevent runaway in self-oscillation mode
+        let band_out = if res > 0.95 {
+            (self.band * 0.5).tanh() * 2.0
+        } else {
+            self.band
+        };
+
         outputs.set(10, self.low);
-        outputs.set(11, self.band);
+        outputs.set(11, band_out);
         outputs.set(12, high);
         outputs.set(13, notch);
     }
@@ -279,6 +313,152 @@ impl GraphModule for Svf {
 
     fn type_id(&self) -> &'static str {
         "svf"
+    }
+}
+
+/// Diode Ladder Filter
+///
+/// A 24dB/oct (4-pole) lowpass filter modeled after the classic TB-303 / Moog
+/// diode ladder topology. Features:
+/// - Characteristic "squelchy" resonance
+/// - Keyboard tracking
+/// - Self-oscillation at high resonance
+/// - Non-linear diode saturation at each stage
+///
+/// This is a Phase 3 addition.
+pub struct DiodeLadderFilter {
+    /// Filter stages (4 poles)
+    stages: [f64; 4],
+    /// Feedback path
+    feedback: f64,
+    /// Sample rate
+    sample_rate: f64,
+    /// Port specification
+    spec: PortSpec,
+}
+
+impl DiodeLadderFilter {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            stages: [0.0; 4],
+            feedback: 0.0,
+            sample_rate,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "cutoff", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(2, "res", SignalKind::CvUnipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                    PortDef::new(3, "fm", SignalKind::CvBipolar).with_attenuverter(),
+                    PortDef::new(4, "keytrack", SignalKind::VoltPerOctave),
+                    PortDef::new(5, "keytrack_amt", SignalKind::CvUnipolar).with_default(0.0),
+                    PortDef::new(6, "drive", SignalKind::CvUnipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Audio),
+                    PortDef::new(11, "pole1", SignalKind::Audio), // 6dB/oct
+                    PortDef::new(12, "pole2", SignalKind::Audio), // 12dB/oct
+                    PortDef::new(13, "pole3", SignalKind::Audio), // 18dB/oct
+                ],
+            },
+        }
+    }
+
+    /// Diode saturation curve - asymmetric soft clipping
+    #[inline]
+    fn diode_sat(x: f64) -> f64 {
+        // Asymmetric tanh-like saturation mimicking diode behavior
+        if x >= 0.0 {
+            (x * 1.2).tanh()
+        } else {
+            (x * 0.8).tanh()
+        }
+    }
+}
+
+impl Default for DiodeLadderFilter {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for DiodeLadderFilter {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let cutoff_cv = inputs.get_or(1, 0.5) + inputs.get_or(3, 0.0);
+        let res = inputs.get_or(2, 0.0).clamp(0.0, 1.0);
+        let keytrack_voct = inputs.get_or(4, 0.0);
+        let keytrack_amt = inputs.get_or(5, 0.0).clamp(0.0, 1.0);
+        let drive = inputs.get_or(6, 0.0).clamp(0.0, 1.0);
+
+        // Calculate base cutoff frequency (20 Hz - 20 kHz)
+        let base_cutoff_hz = 20.0 * (1000.0_f64).powf(cutoff_cv.clamp(0.0, 1.0));
+
+        // Apply keyboard tracking
+        let keytrack_multiplier = 2.0_f64.powf(keytrack_voct * keytrack_amt);
+        let cutoff_hz = (base_cutoff_hz * keytrack_multiplier).clamp(20.0, 20000.0);
+
+        // Calculate filter coefficient (using bilinear transform approximation)
+        let wc = PI * cutoff_hz / self.sample_rate;
+        let g = wc.tan();
+        let g1 = g / (1.0 + g);
+
+        // Resonance with self-oscillation capability
+        // k = 4 for self-oscillation in 4-pole ladder
+        let k = res * 4.0;
+
+        // Drive amount for input saturation
+        let drive_gain = 1.0 + drive * 3.0;
+
+        // Apply input drive
+        let input_driven = Self::diode_sat(input / 5.0 * drive_gain) * 5.0;
+
+        // Feedback with saturation
+        let fb = Self::diode_sat(self.feedback * k);
+
+        // Input with resonance feedback subtracted
+        let u = input_driven - fb * 5.0;
+
+        // 4-pole ladder with diode saturation at each stage
+        let s1 = self.stages[0] + g1 * (Self::diode_sat(u / 5.0) * 5.0 - self.stages[0]);
+        let s2 = self.stages[1] + g1 * (Self::diode_sat(s1 / 5.0) * 5.0 - self.stages[1]);
+        let s3 = self.stages[2] + g1 * (Self::diode_sat(s2 / 5.0) * 5.0 - self.stages[2]);
+        let s4 = self.stages[3] + g1 * (Self::diode_sat(s3 / 5.0) * 5.0 - self.stages[3]);
+
+        // Update state
+        self.stages[0] = s1;
+        self.stages[1] = s2;
+        self.stages[2] = s3;
+        self.stages[3] = s4;
+        self.feedback = s4 / 5.0;
+
+        // Outputs (all normalized to ±5V range)
+        outputs.set(10, s4); // 24dB/oct (main output)
+        outputs.set(11, s1); // 6dB/oct
+        outputs.set(12, s2); // 12dB/oct
+        outputs.set(13, s3); // 18dB/oct
+    }
+
+    fn reset(&mut self) {
+        self.stages = [0.0; 4];
+        self.feedback = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "diode_ladder"
     }
 }
 
@@ -690,8 +870,17 @@ impl PinkNoiseState {
 /// Noise Generator
 ///
 /// Generates white and pink noise signals.
+///
+/// Phase 3 addition: Correlated stereo noise outputs for more realistic
+/// analog modeling (shared randomness between channels).
 pub struct NoiseGenerator {
     pink: PinkNoiseState,
+    /// Phase 3: Secondary pink noise for stereo correlation
+    pink2: PinkNoiseState,
+    /// Phase 3: Correlation amount between channels (0 = independent, 1 = identical)
+    correlation: f64,
+    /// Phase 3: Last white noise sample for correlation
+    last_white: f64,
     spec: PortSpec,
 }
 
@@ -699,14 +888,30 @@ impl NoiseGenerator {
     pub fn new() -> Self {
         Self {
             pink: PinkNoiseState::new(),
+            pink2: PinkNoiseState::new(),
+            correlation: 0.3, // Default 30% correlation (realistic)
+            last_white: 0.0,
             spec: PortSpec {
-                inputs: vec![],
+                inputs: vec![
+                    // Phase 3: Correlation control
+                    PortDef::new(0, "correlation", SignalKind::CvUnipolar).with_default(0.3),
+                ],
                 outputs: vec![
                     PortDef::new(10, "white", SignalKind::Audio),
                     PortDef::new(11, "pink", SignalKind::Audio),
+                    // Phase 3: Correlated stereo pair
+                    PortDef::new(12, "white2", SignalKind::Audio),
+                    PortDef::new(13, "pink2", SignalKind::Audio),
                 ],
             },
         }
+    }
+
+    /// Create a noise generator with specific correlation
+    pub fn with_correlation(correlation: f64) -> Self {
+        let mut gen = Self::new();
+        gen.correlation = correlation.clamp(0.0, 1.0);
+        gen
     }
 }
 
@@ -721,22 +926,235 @@ impl GraphModule for NoiseGenerator {
         &self.spec
     }
 
-    fn tick(&mut self, _inputs: &PortValues, outputs: &mut PortValues) {
-        let white = rand::random::<f64>() * 2.0 - 1.0;
-        let pink = self.pink.sample();
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        // Phase 3: Adjustable correlation
+        let correlation = inputs.get_or(0, self.correlation).clamp(0.0, 1.0);
 
-        outputs.set(10, white * 5.0);
-        outputs.set(11, pink * 5.0);
+        // Primary white noise
+        let white1 = rand::random::<f64>() * 2.0 - 1.0;
+
+        // Phase 3: Correlated white noise for second channel
+        // Mix between independent noise and correlated (shared) noise
+        let independent = rand::random::<f64>() * 2.0 - 1.0;
+        let white2 = white1 * correlation + independent * (1.0 - correlation);
+
+        // Primary pink noise
+        let pink1 = self.pink.sample();
+
+        // Phase 3: Correlated pink noise
+        let pink2_independent = self.pink2.sample();
+        let pink2 = pink1 * correlation + pink2_independent * (1.0 - correlation);
+
+        self.last_white = white1;
+
+        outputs.set(10, white1 * 5.0);
+        outputs.set(11, pink1 * 5.0);
+        outputs.set(12, white2 * 5.0);
+        outputs.set(13, pink2 * 5.0);
     }
 
     fn reset(&mut self) {
         self.pink = PinkNoiseState::new();
+        self.pink2 = PinkNoiseState::new();
+        self.last_white = 0.0;
     }
 
     fn set_sample_rate(&mut self, _: f64) {}
 
     fn type_id(&self) -> &'static str {
         "noise"
+    }
+}
+
+/// Crosstalk Simulator
+///
+/// Simulates signal crosstalk between adjacent channels, a common
+/// phenomenon in analog audio equipment where signals "leak" between
+/// channels due to capacitive coupling or poor isolation.
+///
+/// This is a Phase 3 addition.
+pub struct Crosstalk {
+    sample_rate: f64,
+    /// High-frequency emphasis filter states
+    hf_state: [f64; 2],
+    spec: PortSpec,
+}
+
+impl Crosstalk {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            sample_rate,
+            hf_state: [0.0; 2],
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in_a", SignalKind::Audio),
+                    PortDef::new(1, "in_b", SignalKind::Audio),
+                    // Crosstalk amount (0-1, typically very low in real gear)
+                    PortDef::new(2, "amount", SignalKind::CvUnipolar).with_default(0.01),
+                    // Frequency-dependent crosstalk (higher = more HF crosstalk)
+                    PortDef::new(3, "hf_emphasis", SignalKind::CvUnipolar).with_default(0.5),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out_a", SignalKind::Audio),
+                    PortDef::new(11, "out_b", SignalKind::Audio),
+                ],
+            },
+        }
+    }
+}
+
+impl Default for Crosstalk {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Crosstalk {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let in_a = inputs.get_or(0, 0.0);
+        let in_b = inputs.get_or(1, 0.0);
+        let amount = inputs.get_or(2, 0.01).clamp(0.0, 0.5);
+        let hf_emphasis = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
+
+        // High-pass filter coefficient for HF emphasis (crosstalk is typically worse at HF)
+        let hf_coef = 0.1 + hf_emphasis * 0.4;
+
+        // Extract high-frequency component for emphasized crosstalk
+        let hf_a = in_a - self.hf_state[0];
+        let hf_b = in_b - self.hf_state[1];
+        self.hf_state[0] += hf_coef * (in_a - self.hf_state[0]);
+        self.hf_state[1] += hf_coef * (in_b - self.hf_state[1]);
+
+        // Mix original signal with emphasized HF crosstalk from other channel
+        let crosstalk_to_a = (in_b * (1.0 - hf_emphasis) + hf_b * hf_emphasis) * amount;
+        let crosstalk_to_b = (in_a * (1.0 - hf_emphasis) + hf_a * hf_emphasis) * amount;
+
+        outputs.set(10, in_a + crosstalk_to_a);
+        outputs.set(11, in_b + crosstalk_to_b);
+    }
+
+    fn reset(&mut self) {
+        self.hf_state = [0.0; 2];
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "crosstalk"
+    }
+}
+
+/// Ground Loop Simulator
+///
+/// Simulates ground loop hum and related power supply interference,
+/// common in analog audio equipment. Adds realistic 50/60 Hz hum
+/// with harmonics and modulation from signal activity.
+///
+/// This is a Phase 3 addition.
+pub struct GroundLoop {
+    sample_rate: f64,
+    /// Hum oscillator phase
+    phase: f64,
+    /// Hum frequency (50 or 60 Hz)
+    frequency: f64,
+    /// Thermal modulation state
+    thermal_state: f64,
+    spec: PortSpec,
+}
+
+impl GroundLoop {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            sample_rate,
+            phase: 0.0,
+            frequency: 60.0, // Default to 60 Hz (North America)
+            thermal_state: 0.0,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    // Hum level (typically very low)
+                    PortDef::new(1, "level", SignalKind::CvUnipolar).with_default(0.005),
+                    // Signal-dependent modulation (thermal effects)
+                    PortDef::new(2, "modulation", SignalKind::CvUnipolar).with_default(0.1),
+                    // Frequency select (0 = 50 Hz, 1 = 60 Hz)
+                    PortDef::new(3, "freq_select", SignalKind::CvUnipolar).with_default(1.0),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+            },
+        }
+    }
+
+    /// Create a 50 Hz ground loop (Europe, etc.)
+    pub fn hz_50(sample_rate: f64) -> Self {
+        let mut gl = Self::new(sample_rate);
+        gl.frequency = 50.0;
+        gl
+    }
+
+    /// Create a 60 Hz ground loop (North America)
+    pub fn hz_60(sample_rate: f64) -> Self {
+        let mut gl = Self::new(sample_rate);
+        gl.frequency = 60.0;
+        gl
+    }
+}
+
+impl Default for GroundLoop {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for GroundLoop {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let level = inputs.get_or(1, 0.005).clamp(0.0, 0.1);
+        let modulation = inputs.get_or(2, 0.1).clamp(0.0, 1.0);
+        let freq_select = inputs.get_or(3, 1.0);
+
+        // Select frequency based on input
+        let freq = if freq_select > 0.5 { 60.0 } else { 50.0 };
+
+        // Update thermal state based on signal energy (slow integration)
+        let signal_energy = (input / 5.0).powi(2);
+        self.thermal_state += (signal_energy - self.thermal_state) * 0.0001;
+
+        // Modulated hum level based on signal activity
+        let modulated_level = level * (1.0 + self.thermal_state * modulation * 10.0);
+
+        // Generate hum with harmonics (fundamental + 2nd + 3rd harmonic)
+        let fundamental = (self.phase * TAU).sin();
+        let second_harmonic = (self.phase * 2.0 * TAU).sin() * 0.5;
+        let third_harmonic = (self.phase * 3.0 * TAU).sin() * 0.25;
+        let hum = (fundamental + second_harmonic + third_harmonic) * modulated_level * 5.0;
+
+        // Advance phase
+        self.phase = (self.phase + freq / self.sample_rate).fract();
+
+        outputs.set(10, input + hum);
+    }
+
+    fn reset(&mut self) {
+        self.phase = 0.0;
+        self.thermal_state = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "ground_loop"
     }
 }
 
