@@ -123,8 +123,11 @@ pub struct CableDef {
     /// Destination: "module_name.port_name"
     pub to: String,
 
-    /// Optional attenuation
+    /// Optional attenuation/gain (-2.0 to 2.0)
     pub attenuation: Option<f64>,
+
+    /// Optional DC offset (-10.0 to 10.0V)
+    pub offset: Option<f64>,
 }
 
 impl CableDef {
@@ -133,11 +136,23 @@ impl CableDef {
             from: from.into(),
             to: to.into(),
             attenuation: None,
+            offset: None,
         }
     }
 
     pub fn with_attenuation(mut self, attenuation: f64) -> Self {
         self.attenuation = Some(attenuation);
+        self
+    }
+
+    pub fn with_offset(mut self, offset: f64) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    pub fn with_modulation(mut self, attenuation: f64, offset: f64) -> Self {
+        self.attenuation = Some(attenuation);
+        self.offset = Some(offset);
         self
     }
 }
@@ -344,6 +359,112 @@ impl ModuleRegistry {
             "Signal splitter (1 input to 4 outputs)",
             |_| Box::new(Multiple::new()),
         );
+
+        // Phase 2 Modules
+
+        self.register_factory(
+            "ring_mod",
+            "Ring Modulator",
+            "Effects",
+            "Multiplies two signals for metallic/bell sounds",
+            |_| Box::new(RingModulator::new()),
+        );
+
+        self.register_factory(
+            "crossfader",
+            "Crossfader/Panner",
+            "Utilities",
+            "Crossfade between inputs or pan stereo",
+            |_| Box::new(Crossfader::new()),
+        );
+
+        self.register_factory(
+            "logic_and",
+            "Logic AND",
+            "Logic",
+            "Output high when both inputs are high",
+            |_| Box::new(LogicAnd::new()),
+        );
+
+        self.register_factory(
+            "logic_or",
+            "Logic OR",
+            "Logic",
+            "Output high when either input is high",
+            |_| Box::new(LogicOr::new()),
+        );
+
+        self.register_factory(
+            "logic_xor",
+            "Logic XOR",
+            "Logic",
+            "Output high when exactly one input is high",
+            |_| Box::new(LogicXor::new()),
+        );
+
+        self.register_factory(
+            "logic_not",
+            "Logic NOT",
+            "Logic",
+            "Invert gate signal",
+            |_| Box::new(LogicNot::new()),
+        );
+
+        self.register_factory(
+            "comparator",
+            "Comparator",
+            "Logic",
+            "Compare two CVs, output gates for greater/less/equal",
+            |_| Box::new(Comparator::new()),
+        );
+
+        self.register_factory(
+            "rectifier",
+            "Rectifier",
+            "Effects",
+            "Full-wave and half-wave rectification",
+            |_| Box::new(Rectifier::new()),
+        );
+
+        self.register_factory(
+            "precision_adder",
+            "Precision Adder",
+            "Utilities",
+            "High-precision CV adder for V/Oct signals",
+            |_| Box::new(PrecisionAdder::new()),
+        );
+
+        self.register_factory(
+            "vc_switch",
+            "VC Switch",
+            "Utilities",
+            "Voltage-controlled signal router",
+            |_| Box::new(VcSwitch::new()),
+        );
+
+        self.register_factory(
+            "bernoulli_gate",
+            "Bernoulli Gate",
+            "Random",
+            "Probabilistic trigger router",
+            |_| Box::new(BernoulliGate::new()),
+        );
+
+        self.register_factory(
+            "min",
+            "Min",
+            "Utilities",
+            "Output minimum of two signals",
+            |_| Box::new(Min::new()),
+        );
+
+        self.register_factory(
+            "max",
+            "Max",
+            "Utilities",
+            "Output maximum of two signals",
+            |_| Box::new(Max::new()),
+        );
     }
 
     /// Register a module factory with metadata
@@ -462,6 +583,7 @@ impl Patch {
                     from: format!("{}.{}", from_name, from_port),
                     to: format!("{}.{}", to_name, to_port),
                     attenuation: cable.attenuation,
+                    offset: cable.offset,
                 })
             })
             .collect();
@@ -521,14 +643,33 @@ impl Patch {
                 PatchError::CompilationFailed(format!("Unknown module: {}", to_module))
             })?;
 
-            if let Some(attenuation) = cable_def.attenuation {
-                patch.connect_attenuated(
-                    from_handle.out(from_port),
-                    to_handle.in_(to_port),
-                    attenuation,
-                )?;
-            } else {
-                patch.connect(from_handle.out(from_port), to_handle.in_(to_port))?;
+            match (cable_def.attenuation, cable_def.offset) {
+                (Some(attenuation), Some(offset)) => {
+                    patch.connect_modulated(
+                        from_handle.out(from_port),
+                        to_handle.in_(to_port),
+                        attenuation,
+                        offset,
+                    )?;
+                }
+                (Some(attenuation), None) => {
+                    patch.connect_attenuated(
+                        from_handle.out(from_port),
+                        to_handle.in_(to_port),
+                        attenuation,
+                    )?;
+                }
+                (None, Some(offset)) => {
+                    patch.connect_modulated(
+                        from_handle.out(from_port),
+                        to_handle.in_(to_port),
+                        1.0, // Unity gain
+                        offset,
+                    )?;
+                }
+                (None, None) => {
+                    patch.connect(from_handle.out(from_port), to_handle.in_(to_port))?;
+                }
             }
         }
 

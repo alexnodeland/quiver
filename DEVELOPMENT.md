@@ -4,9 +4,9 @@ This document outlines the development roadmap and current status for the Quiver
 
 ## Current Status
 
-**Version**: 0.1.0 (MVP Complete)
+**Version**: 0.2.0 (Phase 2 Complete)
 
-The initial implementation includes all Phase 1 (Core Foundation) items and significant portions of Phase 2 and Phase 3:
+The library now includes all Phase 1 (Core Foundation) and Phase 2 (Hardware Fidelity) features:
 
 ### Completed Features
 
@@ -85,39 +85,41 @@ The initial implementation includes all Phase 1 (Core Foundation) items and sign
 - [x] CI pipeline (GitHub Actions)
 - [x] Code formatting (rustfmt)
 - [x] Linting (clippy)
-- [x] 58 unit tests
+- [x] 78 unit tests
+
+#### Phase 2: Hardware Fidelity (Complete)
+
+1. **Normalled Connections**
+   - [x] `normalled_to` field in `PortDef`
+   - [x] Automatic default routing when inputs are unpatched
+   - [x] StereoOutput right channel normalled to left
+
+2. **Signal Kind Validation**
+   - [x] `ValidationMode` enum (None, Warn, Strict)
+   - [x] `set_validation_mode()` method on `Patch`
+   - [x] Signal compatibility checking with detailed warnings
+   - [x] `SignalMismatch` error for Strict mode
+
+3. **Phase 2 Modules**
+   - [x] `RingModulator` - Four-quadrant multiplier for metallic sounds
+   - [x] `Crossfader` - Equal-power crossfade with stereo panning
+   - [x] `LogicAnd` / `LogicOr` / `LogicXor` / `LogicNot` - Gate logic
+   - [x] `Comparator` - CV comparison with gt/lt/eq outputs
+   - [x] `Rectifier` - Full-wave, half-wave, and absolute value
+   - [x] `PrecisionAdder` - High-precision V/Oct summing
+   - [x] `VcSwitch` - Voltage-controlled signal router
+   - [x] `BernoulliGate` - Probabilistic trigger router
+   - [x] `Min` / `Max` - Signal minimum/maximum
+
+4. **Improved Modulation**
+   - [x] Extended `Cable` with `offset` field (-10V to +10V)
+   - [x] `connect_modulated()` method for attenuation + offset
+   - [x] Attenuverter range (-2.0 to 2.0) for signal inversion
+   - [x] Updated serialization for modulated cables
 
 ---
 
 ## Development Roadmap
-
-### Phase 2: Hardware Fidelity (Next)
-
-Priority features to improve hardware modular fidelity:
-
-1. **Normalled Connections**
-   - Add `normalled_to` field to `PortDef`
-   - Implement default routing when inputs are unpatched
-   - Common use: VCO pitch normalled to keyboard CV
-
-2. **Signal Kind Validation**
-   - Add validation mode to `Patch::connect()`
-   - Warn/error when connecting incompatible signal types
-   - Configurable strictness levels
-
-3. **Additional Modules**
-   - Ring modulator
-   - Crossfader / Panner
-   - Logic modules (AND, OR, comparator)
-   - Rectifier / Absolute value
-   - Precision adder
-   - Voltage-controlled switch
-   - Bernoulli gate (random routing)
-
-4. **Improved Modulation**
-   - Per-input attenuation controls
-   - CV amount knobs on modules
-   - Offset per input
 
 ### Phase 3: Analog Modeling Refinement
 
