@@ -53,7 +53,9 @@ impl SignalKind {
             // Bipolar and unipolar CV are generally compatible with a warning
             (CvBipolar, CvUnipolar) | (CvUnipolar, CvBipolar) => CompatibilityResult {
                 compatible: true,
-                warning: Some("Bipolar/Unipolar CV mismatch - signal may be clipped or offset".to_string()),
+                warning: Some(
+                    "Bipolar/Unipolar CV mismatch - signal may be clipped or offset".to_string(),
+                ),
             },
 
             // V/Oct can receive from bipolar CV (for pitch modulation)
@@ -87,7 +89,9 @@ impl SignalKind {
             // Audio to V/Oct is unusual but can be used for audio-rate FM
             (Audio, VoltPerOctave) => CompatibilityResult {
                 compatible: true,
-                warning: Some("Audio-rate pitch modulation - ensure this is intentional".to_string()),
+                warning: Some(
+                    "Audio-rate pitch modulation - ensure this is intentional".to_string(),
+                ),
             },
 
             // CV Unipolar can modulate V/Oct (for portamento, etc.)
@@ -111,10 +115,7 @@ impl SignalKind {
             // All other combinations are allowed but with strong warning
             _ => CompatibilityResult {
                 compatible: true,
-                warning: Some(format!(
-                    "Unusual connection: {:?} -> {:?}",
-                    self, other
-                )),
+                warning: Some(format!("Unusual connection: {:?} -> {:?}", self, other)),
             },
         }
     }
@@ -158,7 +159,9 @@ pub enum PatchError {
     InvalidNode,
     InvalidPort,
     InvalidCable,
-    CycleDetected { nodes: Vec<NodeId> },
+    CycleDetected {
+        nodes: Vec<NodeId>,
+    },
     CompilationFailed(String),
     /// Signal type mismatch (only in Strict validation mode)
     SignalMismatch {

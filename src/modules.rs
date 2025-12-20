@@ -1472,8 +1472,8 @@ impl GraphModule for Crossfader {
 
         // Stereo outputs: pan the main output
         // At pos=-5V: full left, at pos=+5V: full right
-        outputs.set(11, out * a_gain);  // Left
-        outputs.set(12, out * b_gain);  // Right
+        outputs.set(11, out * a_gain); // Left
+        outputs.set(12, out * b_gain); // Right
     }
 
     fn reset(&mut self) {}
@@ -1690,9 +1690,9 @@ impl Comparator {
                     PortDef::new(1, "b", SignalKind::CvBipolar),
                 ],
                 outputs: vec![
-                    PortDef::new(10, "gt", SignalKind::Gate),   // A > B
-                    PortDef::new(11, "lt", SignalKind::Gate),   // A < B
-                    PortDef::new(12, "eq", SignalKind::Gate),   // A ≈ B (within threshold)
+                    PortDef::new(10, "gt", SignalKind::Gate), // A > B
+                    PortDef::new(11, "lt", SignalKind::Gate), // A < B
+                    PortDef::new(12, "eq", SignalKind::Gate), // A ≈ B (within threshold)
                 ],
             },
         }
@@ -1749,7 +1749,7 @@ impl Rectifier {
             spec: PortSpec {
                 inputs: vec![PortDef::new(0, "in", SignalKind::Audio)],
                 outputs: vec![
-                    PortDef::new(10, "full", SignalKind::Audio),    // Full-wave rectified
+                    PortDef::new(10, "full", SignalKind::Audio), // Full-wave rectified
                     PortDef::new(11, "half_pos", SignalKind::Audio), // Half-wave (positive)
                     PortDef::new(12, "half_neg", SignalKind::Audio), // Half-wave (negative, inverted)
                     PortDef::new(13, "abs", SignalKind::CvUnipolar), // Absolute value (0-10V)
@@ -1872,9 +1872,9 @@ impl VcSwitch {
                     PortDef::new(2, "cv", SignalKind::Gate).with_default(0.0),
                 ],
                 outputs: vec![
-                    PortDef::new(10, "out", SignalKind::Audio),     // Selected input
-                    PortDef::new(11, "a_out", SignalKind::Audio),   // A when selected, else 0
-                    PortDef::new(12, "b_out", SignalKind::Audio),   // B when selected, else 0
+                    PortDef::new(10, "out", SignalKind::Audio), // Selected input
+                    PortDef::new(11, "a_out", SignalKind::Audio), // A when selected, else 0
+                    PortDef::new(12, "b_out", SignalKind::Audio), // B when selected, else 0
                 ],
             },
         }
@@ -2462,8 +2462,8 @@ mod tests {
         let mut outputs = PortValues::new();
 
         // Both at +5V: should produce positive output
-        inputs.set(0, 5.0);  // Carrier
-        inputs.set(1, 5.0);  // Modulator
+        inputs.set(0, 5.0); // Carrier
+        inputs.set(1, 5.0); // Modulator
         rm.tick(&inputs, &mut outputs);
         assert!((outputs.get(10).unwrap() - 5.0).abs() < 0.1);
 
@@ -2486,8 +2486,8 @@ mod tests {
         let mut inputs = PortValues::new();
         let mut outputs = PortValues::new();
 
-        inputs.set(0, 5.0);   // A
-        inputs.set(1, -5.0);  // B
+        inputs.set(0, 5.0); // A
+        inputs.set(1, -5.0); // B
 
         // Full A (pos = -5V)
         inputs.set(2, -5.0);
@@ -2609,25 +2609,25 @@ mod tests {
         inputs.set(0, 3.0);
         inputs.set(1, 1.0);
         cmp.tick(&inputs, &mut outputs);
-        assert!(outputs.get(10).unwrap() > 2.5);  // gt
-        assert!(outputs.get(11).unwrap() < 2.5);  // lt
-        assert!(outputs.get(12).unwrap() < 2.5);  // eq
+        assert!(outputs.get(10).unwrap() > 2.5); // gt
+        assert!(outputs.get(11).unwrap() < 2.5); // lt
+        assert!(outputs.get(12).unwrap() < 2.5); // eq
 
         // A < B
         inputs.set(0, 1.0);
         inputs.set(1, 3.0);
         cmp.tick(&inputs, &mut outputs);
-        assert!(outputs.get(10).unwrap() < 2.5);  // gt
-        assert!(outputs.get(11).unwrap() > 2.5);  // lt
-        assert!(outputs.get(12).unwrap() < 2.5);  // eq
+        assert!(outputs.get(10).unwrap() < 2.5); // gt
+        assert!(outputs.get(11).unwrap() > 2.5); // lt
+        assert!(outputs.get(12).unwrap() < 2.5); // eq
 
         // A ≈ B
         inputs.set(0, 2.0);
         inputs.set(1, 2.0);
         cmp.tick(&inputs, &mut outputs);
-        assert!(outputs.get(10).unwrap() < 2.5);  // gt
-        assert!(outputs.get(11).unwrap() < 2.5);  // lt
-        assert!(outputs.get(12).unwrap() > 2.5);  // eq
+        assert!(outputs.get(10).unwrap() < 2.5); // gt
+        assert!(outputs.get(11).unwrap() < 2.5); // lt
+        assert!(outputs.get(12).unwrap() > 2.5); // eq
     }
 
     #[test]
@@ -2639,16 +2639,16 @@ mod tests {
         // Positive input
         inputs.set(0, 3.0);
         rect.tick(&inputs, &mut outputs);
-        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01);  // full
-        assert!((outputs.get(11).unwrap() - 3.0).abs() < 0.01);  // half_pos
-        assert!((outputs.get(12).unwrap()).abs() < 0.01);        // half_neg
+        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01); // full
+        assert!((outputs.get(11).unwrap() - 3.0).abs() < 0.01); // half_pos
+        assert!((outputs.get(12).unwrap()).abs() < 0.01); // half_neg
 
         // Negative input
         inputs.set(0, -3.0);
         rect.tick(&inputs, &mut outputs);
-        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01);  // full (abs)
-        assert!((outputs.get(11).unwrap()).abs() < 0.01);        // half_pos
-        assert!((outputs.get(12).unwrap() - 3.0).abs() < 0.01);  // half_neg (inverted)
+        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01); // full (abs)
+        assert!((outputs.get(11).unwrap()).abs() < 0.01); // half_pos
+        assert!((outputs.get(12).unwrap() - 3.0).abs() < 0.01); // half_neg (inverted)
     }
 
     #[test]
@@ -2663,8 +2663,8 @@ mod tests {
         inputs.set(3, -0.5);
         adder.tick(&inputs, &mut outputs);
 
-        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01);  // sum
-        assert!((outputs.get(11).unwrap() - (-3.0)).abs() < 0.01);  // inverted
+        assert!((outputs.get(10).unwrap() - 3.0).abs() < 0.01); // sum
+        assert!((outputs.get(11).unwrap() - (-3.0)).abs() < 0.01); // inverted
     }
 
     #[test]
@@ -2673,8 +2673,8 @@ mod tests {
         let mut inputs = PortValues::new();
         let mut outputs = PortValues::new();
 
-        inputs.set(0, 3.0);  // A
-        inputs.set(1, 7.0);  // B
+        inputs.set(0, 3.0); // A
+        inputs.set(1, 7.0); // B
 
         // CV low: select A
         inputs.set(2, 0.0);
@@ -2707,8 +2707,8 @@ mod tests {
         bg.tick(&inputs, &mut outputs);
 
         // At 100% prob, should always go to A
-        assert!(outputs.get(10).unwrap() > 2.5);  // trig_a
-        assert!(outputs.get(11).unwrap() < 2.5);  // trig_b
+        assert!(outputs.get(10).unwrap() > 2.5); // trig_a
+        assert!(outputs.get(11).unwrap() < 2.5); // trig_b
 
         // Reset and test 0% probability
         bg.reset();
@@ -2719,8 +2719,8 @@ mod tests {
         bg.tick(&inputs, &mut outputs);
 
         // At 0% prob, should always go to B
-        assert!(outputs.get(10).unwrap() < 2.5);  // trig_a
-        assert!(outputs.get(11).unwrap() > 2.5);  // trig_b
+        assert!(outputs.get(10).unwrap() < 2.5); // trig_a
+        assert!(outputs.get(11).unwrap() > 2.5); // trig_b
     }
 
     #[test]
