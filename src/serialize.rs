@@ -1,0 +1,596 @@
+//! Serialization and Persistence
+//!
+//! This module provides types and utilities for saving and loading patches,
+//! including module registry and patch definitions.
+
+use crate::graph::{NodeHandle, Patch, PatchError};
+use crate::modules::*;
+use crate::analog::{AnalogVco, Saturator, Wavefolder};
+use crate::port::{GraphModule, PortSpec};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Serializable patch definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatchDef {
+    /// Schema version for forward compatibility
+    pub version: u32,
+
+    /// Patch metadata
+    pub name: String,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
+
+    /// Module instances
+    pub modules: Vec<ModuleDef>,
+
+    /// Cable connections
+    pub cables: Vec<CableDef>,
+
+    /// Parameter values (key: "module_name.param_id")
+    pub parameters: HashMap<String, f64>,
+}
+
+impl PatchDef {
+    /// Create a new empty patch definition
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            version: 1,
+            name: name.into(),
+            author: None,
+            description: None,
+            tags: vec![],
+            modules: vec![],
+            cables: vec![],
+            parameters: HashMap::new(),
+        }
+    }
+
+    /// Set the author
+    pub fn with_author(mut self, author: impl Into<String>) -> Self {
+        self.author = Some(author.into());
+        self
+    }
+
+    /// Set the description
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = Some(desc.into());
+        self
+    }
+
+    /// Add a tag
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.tags.push(tag.into());
+        self
+    }
+
+    /// Serialize to JSON string
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Deserialize from JSON string
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
+impl Default for PatchDef {
+    fn default() -> Self {
+        Self::new("Untitled")
+    }
+}
+
+/// Serializable module definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleDef {
+    /// Unique instance name
+    pub name: String,
+
+    /// Module type identifier
+    pub module_type: String,
+
+    /// UI position (optional)
+    pub position: Option<(f32, f32)>,
+
+    /// Module-specific state
+    pub state: Option<serde_json::Value>,
+}
+
+impl ModuleDef {
+    pub fn new(name: impl Into<String>, module_type: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            module_type: module_type.into(),
+            position: None,
+            state: None,
+        }
+    }
+
+    pub fn with_position(mut self, x: f32, y: f32) -> Self {
+        self.position = Some((x, y));
+        self
+    }
+}
+
+/// Serializable cable definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CableDef {
+    /// Source: "module_name.port_name"
+    pub from: String,
+
+    /// Destination: "module_name.port_name"
+    pub to: String,
+
+    /// Optional attenuation
+    pub attenuation: Option<f64>,
+}
+
+impl CableDef {
+    pub fn new(from: impl Into<String>, to: impl Into<String>) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+            attenuation: None,
+        }
+    }
+
+    pub fn with_attenuation(mut self, attenuation: f64) -> Self {
+        self.attenuation = Some(attenuation);
+        self
+    }
+}
+
+/// Module factory function type
+pub type ModuleFactory = Box<dyn Fn(f64) -> Box<dyn GraphModule> + Send + Sync>;
+
+/// Metadata about a registered module type
+#[derive(Debug, Clone)]
+pub struct ModuleMetadata {
+    pub type_id: String,
+    pub name: String,
+    pub category: String,
+    pub description: String,
+    pub port_spec: PortSpec,
+}
+
+/// Registry of available module types for instantiation
+pub struct ModuleRegistry {
+    factories: HashMap<String, ModuleFactory>,
+    metadata: HashMap<String, ModuleMetadata>,
+}
+
+impl ModuleRegistry {
+    /// Create a new empty registry
+    pub fn new() -> Self {
+        let mut registry = Self {
+            factories: HashMap::new(),
+            metadata: HashMap::new(),
+        };
+
+        // Register built-in modules
+        registry.register_builtin();
+        registry
+    }
+
+    fn register_builtin(&mut self) {
+        // Oscillators
+        self.register_factory(
+            "vco",
+            "VCO",
+            "Oscillators",
+            "Voltage-controlled oscillator with multiple waveforms",
+            |sr| Box::new(Vco::new(sr)),
+        );
+
+        self.register_factory(
+            "analog_vco",
+            "Analog VCO",
+            "Oscillators",
+            "VCO with analog modeling (drift, saturation)",
+            |sr| Box::new(AnalogVco::new(sr)),
+        );
+
+        self.register_factory(
+            "lfo",
+            "LFO",
+            "Modulation",
+            "Low-frequency oscillator for modulation",
+            |sr| Box::new(Lfo::new(sr)),
+        );
+
+        // Filters
+        self.register_factory(
+            "svf",
+            "SVF",
+            "Filters",
+            "State-variable filter with LP/BP/HP/Notch outputs",
+            |sr| Box::new(Svf::new(sr)),
+        );
+
+        // Envelopes
+        self.register_factory(
+            "adsr",
+            "ADSR",
+            "Envelopes",
+            "Attack-Decay-Sustain-Release envelope generator",
+            |sr| Box::new(Adsr::new(sr)),
+        );
+
+        // Amplifiers
+        self.register_factory(
+            "vca",
+            "VCA",
+            "Utilities",
+            "Voltage-controlled amplifier",
+            |_| Box::new(Vca::new()),
+        );
+
+        // Utilities
+        self.register_factory(
+            "mixer",
+            "Mixer",
+            "Utilities",
+            "4-channel audio mixer",
+            |_| Box::new(Mixer::new(4)),
+        );
+
+        self.register_factory(
+            "offset",
+            "Offset",
+            "Utilities",
+            "DC offset / voltage source",
+            |_| Box::new(Offset::new(0.0)),
+        );
+
+        self.register_factory(
+            "unit_delay",
+            "Unit Delay",
+            "Utilities",
+            "Single-sample delay for feedback",
+            |_| Box::new(UnitDelay::new()),
+        );
+
+        // Sources
+        self.register_factory(
+            "noise",
+            "Noise",
+            "Sources",
+            "White and pink noise generator",
+            |_| Box::new(NoiseGenerator::new()),
+        );
+
+        // Sequencing
+        self.register_factory(
+            "step_sequencer",
+            "Step Sequencer",
+            "Sequencing",
+            "8-step CV/gate sequencer",
+            |_| Box::new(StepSequencer::new()),
+        );
+
+        // Output
+        self.register_factory(
+            "stereo_output",
+            "Stereo Output",
+            "I/O",
+            "Final stereo audio output",
+            |_| Box::new(StereoOutput::new()),
+        );
+
+        // Analog modeling
+        self.register_factory(
+            "saturator",
+            "Saturator",
+            "Effects",
+            "Soft saturation / overdrive",
+            |_| Box::new(Saturator::default()),
+        );
+
+        self.register_factory(
+            "wavefolder",
+            "Wavefolder",
+            "Effects",
+            "Wavefolder for complex harmonics",
+            |_| Box::new(Wavefolder::default()),
+        );
+    }
+
+    /// Register a module factory with metadata
+    pub fn register_factory<F>(
+        &mut self,
+        type_id: &str,
+        name: &str,
+        category: &str,
+        description: &str,
+        factory: F,
+    ) where
+        F: Fn(f64) -> Box<dyn GraphModule> + Send + Sync + 'static,
+    {
+        // Get port spec from a temporary instance
+        let temp_instance = factory(44100.0);
+        let port_spec = temp_instance.port_spec().clone();
+
+        self.factories
+            .insert(type_id.to_string(), Box::new(factory));
+
+        self.metadata.insert(
+            type_id.to_string(),
+            ModuleMetadata {
+                type_id: type_id.to_string(),
+                name: name.to_string(),
+                category: category.to_string(),
+                description: description.to_string(),
+                port_spec,
+            },
+        );
+    }
+
+    /// Instantiate a module by type ID
+    pub fn instantiate(
+        &self,
+        type_id: &str,
+        sample_rate: f64,
+    ) -> Option<Box<dyn GraphModule>> {
+        self.factories.get(type_id).map(|f| f(sample_rate))
+    }
+
+    /// List all registered module types
+    pub fn list_modules(&self) -> impl Iterator<Item = &ModuleMetadata> {
+        self.metadata.values()
+    }
+
+    /// Get metadata for a specific module type
+    pub fn get_metadata(&self, type_id: &str) -> Option<&ModuleMetadata> {
+        self.metadata.get(type_id)
+    }
+
+    /// List modules in a specific category
+    pub fn list_by_category<'a>(&'a self, category: &'a str) -> impl Iterator<Item = &'a ModuleMetadata> {
+        self.metadata
+            .values()
+            .filter(move |m| m.category == category)
+    }
+
+    /// Get all unique categories
+    pub fn categories(&self) -> Vec<String> {
+        let mut cats: Vec<_> = self
+            .metadata
+            .values()
+            .map(|m| m.category.clone())
+            .collect();
+        cats.sort();
+        cats.dedup();
+        cats
+    }
+}
+
+impl Default for ModuleRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Extension methods for Patch to support serialization
+impl Patch {
+    /// Convert patch to a serializable definition
+    pub fn to_def(&self, name: &str) -> PatchDef {
+        let modules: Vec<ModuleDef> = self
+            .nodes()
+            .map(|(_, node_name, module)| {
+                ModuleDef {
+                    name: node_name.to_string(),
+                    module_type: module.type_id().to_string(),
+                    position: None, // TODO: store positions
+                    state: module.serialize_state(),
+                }
+            })
+            .collect();
+
+        let cables: Vec<CableDef> = self
+            .cables()
+            .iter()
+            .filter_map(|cable| {
+                // Find node names and port names
+                let from_name = self.get_name(cable.from.node)?;
+                let to_name = self.get_name(cable.to.node)?;
+
+                // Find port names from the modules
+                let (_, _, from_module) = self.nodes().find(|(id, _, _)| *id == cable.from.node)?;
+                let (_, _, to_module) = self.nodes().find(|(id, _, _)| *id == cable.to.node)?;
+
+                let from_port = from_module
+                    .port_spec()
+                    .outputs
+                    .iter()
+                    .find(|p| p.id == cable.from.port)
+                    .map(|p| p.name.as_str())?;
+
+                let to_port = to_module
+                    .port_spec()
+                    .inputs
+                    .iter()
+                    .find(|p| p.id == cable.to.port)
+                    .map(|p| p.name.as_str())?;
+
+                Some(CableDef {
+                    from: format!("{}.{}", from_name, from_port),
+                    to: format!("{}.{}", to_name, to_port),
+                    attenuation: cable.attenuation,
+                })
+            })
+            .collect();
+
+        PatchDef {
+            version: 1,
+            name: name.to_string(),
+            author: None,
+            description: None,
+            tags: vec![],
+            modules,
+            cables,
+            parameters: HashMap::new(),
+        }
+    }
+
+    /// Load a patch from a definition
+    pub fn from_def(
+        def: &PatchDef,
+        registry: &ModuleRegistry,
+        sample_rate: f64,
+    ) -> Result<Self, PatchError> {
+        let mut patch = Patch::new(sample_rate);
+        let mut name_to_handle: HashMap<String, NodeHandle> = HashMap::new();
+
+        // Instantiate modules
+        for module_def in &def.modules {
+            let module = registry
+                .instantiate(&module_def.module_type, sample_rate)
+                .ok_or_else(|| {
+                    PatchError::CompilationFailed(format!(
+                        "Unknown module type: {}",
+                        module_def.module_type
+                    ))
+                })?;
+
+            let handle = patch.add_boxed(&module_def.name, module);
+
+            // Set position if available
+            if let Some((x, y)) = module_def.position {
+                patch.set_position(handle.id(), (x, y));
+            }
+
+            name_to_handle.insert(module_def.name.clone(), handle);
+        }
+
+        // Create cables
+        for cable_def in &def.cables {
+            let (from_module, from_port) = parse_port_ref(&cable_def.from)?;
+            let (to_module, to_port) = parse_port_ref(&cable_def.to)?;
+
+            let from_handle = name_to_handle.get(from_module).ok_or_else(|| {
+                PatchError::CompilationFailed(format!("Unknown module: {}", from_module))
+            })?;
+
+            let to_handle = name_to_handle.get(to_module).ok_or_else(|| {
+                PatchError::CompilationFailed(format!("Unknown module: {}", to_module))
+            })?;
+
+            if let Some(attenuation) = cable_def.attenuation {
+                patch.connect_attenuated(
+                    from_handle.out(from_port),
+                    to_handle.in_(to_port),
+                    attenuation,
+                )?;
+            } else {
+                patch.connect(from_handle.out(from_port), to_handle.in_(to_port))?;
+            }
+        }
+
+        // Find and set output node (look for stereo_output)
+        if let Some(handle) = name_to_handle.get("output") {
+            patch.set_output(handle.id());
+        } else if let Some(handle) = name_to_handle.values().find(|h| {
+            h.spec()
+                .outputs
+                .iter()
+                .any(|p| p.name == "left" || p.name == "right")
+        }) {
+            patch.set_output(handle.id());
+        }
+
+        patch.compile()?;
+        Ok(patch)
+    }
+}
+
+fn parse_port_ref(s: &str) -> Result<(&str, &str), PatchError> {
+    let parts: Vec<&str> = s.splitn(2, '.').collect();
+    if parts.len() != 2 {
+        return Err(PatchError::CompilationFailed(format!(
+            "Invalid port reference: {}",
+            s
+        )));
+    }
+    Ok((parts[0], parts[1]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_patch_def_serialization() {
+        let def = PatchDef::new("Test Patch")
+            .with_author("Test Author")
+            .with_description("A test patch")
+            .with_tag("test");
+
+        let json = def.to_json().unwrap();
+        let loaded = PatchDef::from_json(&json).unwrap();
+
+        assert_eq!(loaded.name, "Test Patch");
+        assert_eq!(loaded.author, Some("Test Author".to_string()));
+    }
+
+    #[test]
+    fn test_module_registry() {
+        let registry = ModuleRegistry::new();
+
+        // Should have built-in modules
+        assert!(registry.get_metadata("vco").is_some());
+        assert!(registry.get_metadata("svf").is_some());
+        assert!(registry.get_metadata("adsr").is_some());
+
+        // Should be able to instantiate
+        let vco = registry.instantiate("vco", 44100.0);
+        assert!(vco.is_some());
+    }
+
+    #[test]
+    fn test_module_registry_categories() {
+        let registry = ModuleRegistry::new();
+        let categories = registry.categories();
+
+        assert!(categories.contains(&"Oscillators".to_string()));
+        assert!(categories.contains(&"Filters".to_string()));
+        assert!(categories.contains(&"Utilities".to_string()));
+    }
+
+    #[test]
+    fn test_patch_roundtrip() {
+        let registry = ModuleRegistry::new();
+
+        // Create a simple patch
+        let mut patch = Patch::new(44100.0);
+        let vco = patch.add("vco", Vco::new(44100.0));
+        let vcf = patch.add("vcf", Svf::new(44100.0));
+        let output = patch.add("output", StereoOutput::new());
+
+        patch.connect(vco.out("saw"), vcf.in_("in")).unwrap();
+        patch.connect(vcf.out("lp"), output.in_("left")).unwrap();
+        patch.set_output(output.id());
+        patch.compile().unwrap();
+
+        // Serialize
+        let def = patch.to_def("Test");
+        let json = def.to_json().unwrap();
+
+        // Deserialize
+        let loaded_def = PatchDef::from_json(&json).unwrap();
+        let loaded_patch = Patch::from_def(&loaded_def, &registry, 44100.0).unwrap();
+
+        // Verify
+        assert_eq!(loaded_patch.node_count(), 3);
+        assert_eq!(loaded_patch.cable_count(), 2);
+    }
+
+    #[test]
+    fn test_cable_def() {
+        let cable = CableDef::new("vco.saw", "vcf.in").with_attenuation(0.5);
+        assert_eq!(cable.from, "vco.saw");
+        assert_eq!(cable.to, "vcf.in");
+        assert_eq!(cable.attenuation, Some(0.5));
+    }
+}
