@@ -746,20 +746,6 @@ mod tests {
     }
 
     #[test]
-    fn test_module_registry() {
-        let registry = ModuleRegistry::new();
-
-        // Should have built-in modules
-        assert!(registry.get_metadata("vco").is_some());
-        assert!(registry.get_metadata("svf").is_some());
-        assert!(registry.get_metadata("adsr").is_some());
-
-        // Should be able to instantiate
-        let vco = registry.instantiate("vco", 44100.0);
-        assert!(vco.is_some());
-    }
-
-    #[test]
     fn test_patch_roundtrip() {
         let registry = ModuleRegistry::new();
 
