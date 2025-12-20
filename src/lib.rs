@@ -50,11 +50,14 @@ pub mod combinator;
 pub mod extended_io;
 pub mod graph;
 pub mod io;
+pub mod mdk;
 pub mod modules;
 pub mod polyphony;
 pub mod port;
+pub mod presets;
 pub mod serialize;
 pub mod simd;
+pub mod visual;
 
 /// Prelude module for convenient imports
 pub mod prelude {
@@ -120,6 +123,24 @@ pub mod prelude {
         AudioBusConfig, OscBinding, OscInput, OscMessage, OscPattern, OscReceiver, OscValue,
         PluginCategory, PluginInfo, PluginParameter, PluginWrapper, WebAudioConfig,
         WebAudioProcessor, WebAudioWorklet,
+    };
+
+    // Phase 5: Module Development Kit
+    pub use crate::mdk::{
+        AudioAnalysis, DocFormat, DocGenerator, ModuleCategory, ModulePresets, ModuleTemplate,
+        ModuleTestHarness, PortTemplate, StateFieldTemplate, TestResult, TestSuiteResult,
+    };
+
+    // Phase 5: Preset Library
+    pub use crate::presets::{
+        ClassicPresets, PresetCategory, PresetInfo, PresetLibrary, SoundDesignPresets,
+        TutorialPresets,
+    };
+
+    // Phase 5: Visual Tools
+    pub use crate::visual::{
+        AutomationData, AutomationPoint, AutomationRecorder, AutomationTrack, DotExporter,
+        DotStyle, LevelMeter, Scope, SpectrumAnalyzer, TriggerMode,
     };
 }
 
