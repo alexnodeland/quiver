@@ -365,11 +365,11 @@ mod tests {
 
     #[test]
     fn test_atomic_f64() {
-        let a = AtomicF64::new(3.14);
-        assert!((a.get() - 3.14).abs() < 0.001);
+        let a = AtomicF64::new(3.5);
+        assert!((a.get() - 3.5).abs() < 0.001);
 
-        a.set(2.71);
-        assert!((a.get() - 2.71).abs() < 0.001);
+        a.set(2.5);
+        assert!((a.get() - 2.5).abs() < 0.001);
     }
 
     #[test]

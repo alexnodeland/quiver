@@ -2859,14 +2859,14 @@ mod tests {
         let mut inputs = PortValues::new();
         let mut outputs = PortValues::new();
 
-        inputs.set(0, 3.14159);
+        inputs.set(0, 3.5);
         mult.tick(&inputs, &mut outputs);
 
         // All 4 outputs should have the same value
-        assert!((outputs.get(10).unwrap() - 3.14159).abs() < 0.0001);
-        assert!((outputs.get(11).unwrap() - 3.14159).abs() < 0.0001);
-        assert!((outputs.get(12).unwrap() - 3.14159).abs() < 0.0001);
-        assert!((outputs.get(13).unwrap() - 3.14159).abs() < 0.0001);
+        assert!((outputs.get(10).unwrap() - 3.5).abs() < 0.0001);
+        assert!((outputs.get(11).unwrap() - 3.5).abs() < 0.0001);
+        assert!((outputs.get(12).unwrap() - 3.5).abs() < 0.0001);
+        assert!((outputs.get(13).unwrap() - 3.5).abs() < 0.0001);
     }
 
     // ========================================================================

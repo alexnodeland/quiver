@@ -52,9 +52,7 @@ impl ModuleCategory {
                 PortTemplate::new("mix", SignalKind::CvUnipolar, 0.5).with_attenuverter(),
                 PortTemplate::new("param", SignalKind::CvUnipolar, 0.5).with_attenuverter(),
             ],
-            ModuleCategory::InputOutput => vec![
-                PortTemplate::new("in", SignalKind::Audio, 0.0),
-            ],
+            ModuleCategory::InputOutput => vec![PortTemplate::new("in", SignalKind::Audio, 0.0)],
         }
     }
 
@@ -76,12 +74,8 @@ impl ModuleCategory {
                 PortTemplate::new("out", SignalKind::CvBipolar, 0.0),
                 PortTemplate::new("gate", SignalKind::Gate, 0.0),
             ],
-            ModuleCategory::Utility => vec![
-                PortTemplate::new("out", SignalKind::Audio, 0.0),
-            ],
-            ModuleCategory::Effect => vec![
-                PortTemplate::new("out", SignalKind::Audio, 0.0),
-            ],
+            ModuleCategory::Utility => vec![PortTemplate::new("out", SignalKind::Audio, 0.0)],
+            ModuleCategory::Effect => vec![PortTemplate::new("out", SignalKind::Audio, 0.0)],
             ModuleCategory::InputOutput => vec![
                 PortTemplate::new("left", SignalKind::Audio, 0.0),
                 PortTemplate::new("right", SignalKind::Audio, 0.0),
@@ -302,7 +296,10 @@ impl ModuleTemplate {
 
         // Initialize state fields
         for field in &self.state_fields {
-            code.push_str(&format!("            {}: {},\n", field.name, field.initial_value));
+            code.push_str(&format!(
+                "            {}: {},\n",
+                field.name, field.initial_value
+            ));
         }
 
         if self.needs_sample_rate {
@@ -379,9 +376,9 @@ impl ModuleTemplate {
                 var_name, i, input.default
             ));
         }
-        code.push_str("\n");
+        code.push('\n');
         code.push_str("        // TODO: Implement processing logic\n");
-        code.push_str("\n");
+        code.push('\n');
         code.push_str("        // Write outputs\n");
         for (i, output) in self.outputs.iter().enumerate() {
             code.push_str(&format!(
@@ -395,7 +392,10 @@ impl ModuleTemplate {
         // reset
         code.push_str("    fn reset(&mut self) {\n");
         for field in &self.state_fields {
-            code.push_str(&format!("        self.{} = {};\n", field.name, field.initial_value));
+            code.push_str(&format!(
+                "        self.{} = {};\n",
+                field.name, field.initial_value
+            ));
         }
         if self.state_fields.is_empty() {
             code.push_str("        // Reset internal state\n");
@@ -460,7 +460,10 @@ impl ModuleTemplate {
         } else {
             code.push_str("    fn set_sample_rate(&mut self, _: f64) {}\n");
         }
-        code.push_str(&format!("    fn type_id(&self) -> &'static str {{ \"{}\" }}\n", self.type_id));
+        code.push_str(&format!(
+            "    fn type_id(&self) -> &'static str {{ \"{}\" }}\n",
+            self.type_id
+        ));
         code.push_str("}\n");
 
         code
@@ -549,8 +552,7 @@ impl ModulePresets {
 
     /// Create a simple effect template
     pub fn effect(name: impl Into<String>) -> ModuleTemplate {
-        ModuleTemplate::new(name, ModuleCategory::Effect)
-            .with_doc("Audio effect processor")
+        ModuleTemplate::new(name, ModuleCategory::Effect).with_doc("Audio effect processor")
     }
 
     /// Create an I/O module template
@@ -680,15 +682,15 @@ impl<M: GraphModule> ModuleTestHarness<M> {
     /// Run all standard tests
     pub fn run_all(&mut self) -> TestSuiteResult {
         let module_type = self.module.type_id().to_string();
-        let mut results = Vec::new();
-
-        results.push(self.test_port_spec());
-        results.push(self.test_reset());
-        results.push(self.test_sample_rate());
-        results.push(self.test_zero_input());
-        results.push(self.test_stability());
-        results.push(self.test_nan_inf());
-        results.push(self.test_output_range());
+        let results = vec![
+            self.test_port_spec(),
+            self.test_reset(),
+            self.test_sample_rate(),
+            self.test_zero_input(),
+            self.test_stability(),
+            self.test_nan_inf(),
+            self.test_output_range(),
+        ];
 
         TestSuiteResult {
             module_type,
@@ -763,12 +765,20 @@ impl<M: GraphModule> ModuleTestHarness<M> {
 
         // After reset with zero inputs, module should produce consistent output
         self.module.tick(&inputs, &mut outputs);
-        let first_outputs: Vec<_> = spec.outputs.iter().map(|p| outputs.get_or(p.id, 0.0)).collect();
+        let first_outputs: Vec<_> = spec
+            .outputs
+            .iter()
+            .map(|p| outputs.get_or(p.id, 0.0))
+            .collect();
 
         self.module.reset();
         outputs.clear();
         self.module.tick(&inputs, &mut outputs);
-        let second_outputs: Vec<_> = spec.outputs.iter().map(|p| outputs.get_or(p.id, 0.0)).collect();
+        let second_outputs: Vec<_> = spec
+            .outputs
+            .iter()
+            .map(|p| outputs.get_or(p.id, 0.0))
+            .collect();
 
         // Outputs should match after reset
         for (i, (first, second)) in first_outputs.iter().zip(second_outputs.iter()).enumerate() {
@@ -855,10 +865,7 @@ impl<M: GraphModule> ModuleTestHarness<M> {
 
         // Check for reasonable output range (not exploding)
         if max_output > 1000.0 {
-            return TestResult::fail(
-                "stability",
-                format!("Output exploded to {:.2}", max_output),
-            );
+            return TestResult::fail("stability", format!("Output exploded to {:.2}", max_output));
         }
 
         TestResult::pass("stability").with_measurement("max_output", max_output)
@@ -888,13 +895,19 @@ impl<M: GraphModule> ModuleTestHarness<M> {
                     if value.is_nan() {
                         return TestResult::fail(
                             "no_nan_inf",
-                            format!("NaN detected in output {} with input {}", output.name, test_val),
+                            format!(
+                                "NaN detected in output {} with input {}",
+                                output.name, test_val
+                            ),
                         );
                     }
                     if value.is_infinite() {
                         return TestResult::fail(
                             "no_nan_inf",
-                            format!("Infinity detected in output {} with input {}", output.name, test_val),
+                            format!(
+                                "Infinity detected in output {} with input {}",
+                                output.name, test_val
+                            ),
                         );
                     }
                 }
@@ -1183,13 +1196,18 @@ impl DocGenerator {
         let mut doc = String::new();
 
         doc.push_str(&format!("<h1>{}</h1>\n", to_pascal_case(type_id)));
-        doc.push_str(&format!("<p><strong>Type ID:</strong> <code>{}</code></p>\n", type_id));
+        doc.push_str(&format!(
+            "<p><strong>Type ID:</strong> <code>{}</code></p>\n",
+            type_id
+        ));
 
         // Inputs
         if !spec.inputs.is_empty() {
             doc.push_str("<h2>Inputs</h2>\n");
             doc.push_str("<table>\n");
-            doc.push_str("<tr><th>Port</th><th>Type</th><th>Default</th><th>Attenuverter</th></tr>\n");
+            doc.push_str(
+                "<tr><th>Port</th><th>Type</th><th>Default</th><th>Attenuverter</th></tr>\n",
+            );
             for input in &spec.inputs {
                 doc.push_str(&format!(
                     "<tr><td><code>{}</code></td><td>{:?}</td><td>{:.2}</td><td>{}</td></tr>\n",
@@ -1329,7 +1347,9 @@ impl DocGenerator {
         if !template.inputs.is_empty() {
             doc.push_str("<h2>Inputs</h2>\n");
             doc.push_str("<table>\n");
-            doc.push_str("<tr><th>Port</th><th>Type</th><th>Default</th><th>Attenuverter</th></tr>\n");
+            doc.push_str(
+                "<tr><th>Port</th><th>Type</th><th>Default</th><th>Attenuverter</th></tr>\n",
+            );
             for input in &template.inputs {
                 doc.push_str(&format!(
                     "<tr><td><code>{}</code></td><td>{:?}</td><td>{:.2}</td><td>{}</td></tr>\n",
@@ -1532,9 +1552,7 @@ mod tests {
     fn test_audio_analysis_gate() {
         let mut samples = vec![0.0; 100];
         // Add a gate in the middle
-        for i in 30..60 {
-            samples[i] = 5.0;
-        }
+        samples[30..60].fill(5.0);
         assert!(AudioAnalysis::has_gate(&samples, 2.5));
 
         let no_gate = vec![0.0; 100];
