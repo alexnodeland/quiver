@@ -125,7 +125,8 @@ pub mod prelude {
 
     // Phase 5: Module Development Kit
     pub use crate::mdk::{
-        ModuleCategory, ModulePresets, ModuleTemplate, PortTemplate, StateFieldTemplate,
+        AudioAnalysis, DocFormat, DocGenerator, ModuleCategory, ModulePresets, ModuleTemplate,
+        ModuleTestHarness, PortTemplate, StateFieldTemplate, TestResult, TestSuiteResult,
     };
 }
 

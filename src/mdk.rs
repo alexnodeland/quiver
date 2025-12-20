@@ -5,7 +5,7 @@
 //! - Testing harness for validating module behavior
 //! - Documentation generator for module documentation
 
-use crate::port::SignalKind;
+use crate::port::{GraphModule, PortSpec, PortValues, SignalKind};
 
 /// Module category for template generation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,9 +561,822 @@ impl ModulePresets {
     }
 }
 
+// =============================================================================
+// Testing Harness
+// =============================================================================
+
+/// Test result from a module test
+#[derive(Debug, Clone)]
+pub struct TestResult {
+    /// Test name
+    pub name: String,
+    /// Whether the test passed
+    pub passed: bool,
+    /// Error message if failed
+    pub error: Option<String>,
+    /// Measured values (for diagnostic tests)
+    pub measurements: Vec<(String, f64)>,
+}
+
+impl TestResult {
+    fn pass(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            passed: true,
+            error: None,
+            measurements: Vec::new(),
+        }
+    }
+
+    fn fail(name: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            passed: false,
+            error: Some(error.into()),
+            measurements: Vec::new(),
+        }
+    }
+
+    fn with_measurement(mut self, name: impl Into<String>, value: f64) -> Self {
+        self.measurements.push((name.into(), value));
+        self
+    }
+}
+
+/// Test suite results
+#[derive(Debug, Clone)]
+pub struct TestSuiteResult {
+    /// Module type being tested
+    pub module_type: String,
+    /// Individual test results
+    pub results: Vec<TestResult>,
+}
+
+impl TestSuiteResult {
+    /// Returns true if all tests passed
+    pub fn all_passed(&self) -> bool {
+        self.results.iter().all(|r| r.passed)
+    }
+
+    /// Returns count of passed tests
+    pub fn passed_count(&self) -> usize {
+        self.results.iter().filter(|r| r.passed).count()
+    }
+
+    /// Returns count of failed tests
+    pub fn failed_count(&self) -> usize {
+        self.results.iter().filter(|r| !r.passed).count()
+    }
+
+    /// Generate a summary report
+    pub fn summary(&self) -> String {
+        let mut report = format!("Test Suite: {}\n", self.module_type);
+        report.push_str(&format!(
+            "Results: {}/{} passed\n",
+            self.passed_count(),
+            self.results.len()
+        ));
+        report.push_str(&"=".repeat(40));
+        report.push('\n');
+
+        for result in &self.results {
+            let status = if result.passed { "PASS" } else { "FAIL" };
+            report.push_str(&format!("[{}] {}\n", status, result.name));
+            if let Some(ref err) = result.error {
+                report.push_str(&format!("      Error: {}\n", err));
+            }
+            for (name, value) in &result.measurements {
+                report.push_str(&format!("      {}: {:.6}\n", name, value));
+            }
+        }
+
+        report
+    }
+}
+
+/// Testing harness for validating module behavior
+///
+/// Provides a suite of standard tests for GraphModule implementations:
+/// - Port specification validation
+/// - Reset behavior
+/// - Sample rate handling
+/// - DC offset detection
+/// - Stability testing
+/// - NaN/Inf detection
+pub struct ModuleTestHarness<M: GraphModule> {
+    module: M,
+    sample_rate: f64,
+}
+
+impl<M: GraphModule> ModuleTestHarness<M> {
+    /// Create a new test harness for a module
+    pub fn new(module: M, sample_rate: f64) -> Self {
+        Self {
+            module,
+            sample_rate,
+        }
+    }
+
+    /// Run all standard tests
+    pub fn run_all(&mut self) -> TestSuiteResult {
+        let module_type = self.module.type_id().to_string();
+        let mut results = Vec::new();
+
+        results.push(self.test_port_spec());
+        results.push(self.test_reset());
+        results.push(self.test_sample_rate());
+        results.push(self.test_zero_input());
+        results.push(self.test_stability());
+        results.push(self.test_nan_inf());
+        results.push(self.test_output_range());
+
+        TestSuiteResult {
+            module_type,
+            results,
+        }
+    }
+
+    /// Test that the port specification is valid
+    pub fn test_port_spec(&self) -> TestResult {
+        let spec = self.module.port_spec();
+
+        // Check for duplicate input port IDs
+        let mut input_ids: Vec<_> = spec.inputs.iter().map(|p| p.id).collect();
+        input_ids.sort();
+        for i in 1..input_ids.len() {
+            if input_ids[i] == input_ids[i - 1] {
+                return TestResult::fail(
+                    "port_spec_valid",
+                    format!("Duplicate input port ID: {}", input_ids[i]),
+                );
+            }
+        }
+
+        // Check for duplicate output port IDs
+        let mut output_ids: Vec<_> = spec.outputs.iter().map(|p| p.id).collect();
+        output_ids.sort();
+        for i in 1..output_ids.len() {
+            if output_ids[i] == output_ids[i - 1] {
+                return TestResult::fail(
+                    "port_spec_valid",
+                    format!("Duplicate output port ID: {}", output_ids[i]),
+                );
+            }
+        }
+
+        // Check for empty port names
+        for port in spec.inputs.iter().chain(spec.outputs.iter()) {
+            if port.name.is_empty() {
+                return TestResult::fail(
+                    "port_spec_valid",
+                    format!("Empty port name for ID {}", port.id),
+                );
+            }
+        }
+
+        TestResult::pass("port_spec_valid")
+            .with_measurement("input_count", spec.inputs.len() as f64)
+            .with_measurement("output_count", spec.outputs.len() as f64)
+    }
+
+    /// Test that reset clears internal state
+    pub fn test_reset(&mut self) -> TestResult {
+        let spec = self.module.port_spec().clone();
+
+        // Run module for a bit to build up state
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        for input in &spec.inputs {
+            inputs.set(input.id, 1.0);
+        }
+
+        for _ in 0..1000 {
+            self.module.tick(&inputs, &mut outputs);
+        }
+
+        // Reset and run with zero inputs
+        self.module.reset();
+
+        inputs.clear();
+        outputs.clear();
+
+        // After reset with zero inputs, module should produce consistent output
+        self.module.tick(&inputs, &mut outputs);
+        let first_outputs: Vec<_> = spec.outputs.iter().map(|p| outputs.get_or(p.id, 0.0)).collect();
+
+        self.module.reset();
+        outputs.clear();
+        self.module.tick(&inputs, &mut outputs);
+        let second_outputs: Vec<_> = spec.outputs.iter().map(|p| outputs.get_or(p.id, 0.0)).collect();
+
+        // Outputs should match after reset
+        for (i, (first, second)) in first_outputs.iter().zip(second_outputs.iter()).enumerate() {
+            if (first - second).abs() > 1e-10 {
+                return TestResult::fail(
+                    "reset_clears_state",
+                    format!(
+                        "Output {} differs after reset: {} vs {}",
+                        spec.outputs[i].name, first, second
+                    ),
+                );
+            }
+        }
+
+        TestResult::pass("reset_clears_state")
+    }
+
+    /// Test sample rate handling
+    pub fn test_sample_rate(&mut self) -> TestResult {
+        // Just verify it doesn't panic
+        self.module.set_sample_rate(self.sample_rate);
+        self.module.set_sample_rate(48000.0);
+        self.module.set_sample_rate(96000.0);
+        self.module.set_sample_rate(self.sample_rate);
+
+        TestResult::pass("sample_rate_handling")
+    }
+
+    /// Test output with zero inputs
+    pub fn test_zero_input(&mut self) -> TestResult {
+        self.module.reset();
+
+        let inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Run for a bit
+        for _ in 0..100 {
+            self.module.tick(&inputs, &mut outputs);
+        }
+
+        // Collect output values
+        let spec = self.module.port_spec();
+        let mut result = TestResult::pass("zero_input_behavior");
+
+        for output in &spec.outputs {
+            let value = outputs.get_or(output.id, 0.0);
+            result = result.with_measurement(format!("{}_at_zero", output.name), value);
+        }
+
+        result
+    }
+
+    /// Test stability over many samples
+    pub fn test_stability(&mut self) -> TestResult {
+        self.module.reset();
+
+        let spec = self.module.port_spec().clone();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Set typical input values
+        for input in &spec.inputs {
+            let default = match input.kind {
+                SignalKind::VoltPerOctave => 0.0,
+                SignalKind::Gate | SignalKind::Trigger => 0.0,
+                SignalKind::CvUnipolar => 0.5,
+                SignalKind::CvBipolar => 0.0,
+                SignalKind::Audio => 0.0,
+                SignalKind::Clock => 0.0,
+            };
+            inputs.set(input.id, default);
+        }
+
+        // Run for many samples
+        let mut max_output = 0.0_f64;
+        for _ in 0..44100 {
+            self.module.tick(&inputs, &mut outputs);
+
+            for output in &spec.outputs {
+                let value = outputs.get_or(output.id, 0.0).abs();
+                max_output = max_output.max(value);
+            }
+        }
+
+        // Check for reasonable output range (not exploding)
+        if max_output > 1000.0 {
+            return TestResult::fail(
+                "stability",
+                format!("Output exploded to {:.2}", max_output),
+            );
+        }
+
+        TestResult::pass("stability").with_measurement("max_output", max_output)
+    }
+
+    /// Test for NaN or Infinity in outputs
+    pub fn test_nan_inf(&mut self) -> TestResult {
+        self.module.reset();
+
+        let spec = self.module.port_spec().clone();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Test with various input values including edge cases
+        let test_values = [0.0, 1.0, -1.0, 5.0, -5.0, 10.0, -10.0, 0.001, -0.001];
+
+        for &test_val in &test_values {
+            for input in &spec.inputs {
+                inputs.set(input.id, test_val);
+            }
+
+            for _ in 0..100 {
+                self.module.tick(&inputs, &mut outputs);
+
+                for output in &spec.outputs {
+                    let value = outputs.get_or(output.id, 0.0);
+                    if value.is_nan() {
+                        return TestResult::fail(
+                            "no_nan_inf",
+                            format!("NaN detected in output {} with input {}", output.name, test_val),
+                        );
+                    }
+                    if value.is_infinite() {
+                        return TestResult::fail(
+                            "no_nan_inf",
+                            format!("Infinity detected in output {} with input {}", output.name, test_val),
+                        );
+                    }
+                }
+            }
+
+            self.module.reset();
+        }
+
+        TestResult::pass("no_nan_inf")
+    }
+
+    /// Test that outputs stay within expected voltage ranges
+    pub fn test_output_range(&mut self) -> TestResult {
+        self.module.reset();
+
+        let spec = self.module.port_spec().clone();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Set some typical modulation
+        for input in &spec.inputs {
+            inputs.set(input.id, input.default);
+        }
+
+        let mut violations = Vec::new();
+
+        for _ in 0..4410 {
+            self.module.tick(&inputs, &mut outputs);
+
+            for output in &spec.outputs {
+                let value = outputs.get_or(output.id, 0.0);
+                let (min, max) = output.kind.voltage_range();
+
+                // Allow 20% headroom for transients
+                let headroom = (max - min) * 0.2;
+                if value < min - headroom || value > max + headroom {
+                    violations.push(format!(
+                        "{}: {:.2} outside [{:.1}, {:.1}]",
+                        output.name, value, min, max
+                    ));
+                    if violations.len() >= 5 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if violations.is_empty() {
+            TestResult::pass("output_range")
+        } else {
+            TestResult::fail("output_range", violations.join("; "))
+        }
+    }
+
+    /// Custom test with user-provided input sequence
+    pub fn test_with_inputs(
+        &mut self,
+        name: &str,
+        input_sequence: &[PortValues],
+        validator: impl Fn(&[PortValues]) -> Result<(), String>,
+    ) -> TestResult {
+        self.module.reset();
+
+        let mut output_sequence = Vec::with_capacity(input_sequence.len());
+
+        for inputs in input_sequence {
+            let mut outputs = PortValues::new();
+            self.module.tick(inputs, &mut outputs);
+            output_sequence.push(outputs);
+        }
+
+        match validator(&output_sequence) {
+            Ok(()) => TestResult::pass(name),
+            Err(e) => TestResult::fail(name, e),
+        }
+    }
+
+    /// Get mutable access to the module for custom testing
+    pub fn module_mut(&mut self) -> &mut M {
+        &mut self.module
+    }
+
+    /// Get access to the module
+    pub fn module(&self) -> &M {
+        &self.module
+    }
+}
+
+/// Audio analysis utilities for testing
+pub struct AudioAnalysis;
+
+impl AudioAnalysis {
+    /// Calculate RMS (root mean square) of a signal
+    pub fn rms(samples: &[f64]) -> f64 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let sum_sq: f64 = samples.iter().map(|s| s * s).sum();
+        (sum_sq / samples.len() as f64).sqrt()
+    }
+
+    /// Calculate peak amplitude
+    pub fn peak(samples: &[f64]) -> f64 {
+        samples.iter().map(|s| s.abs()).fold(0.0, f64::max)
+    }
+
+    /// Calculate DC offset (average)
+    pub fn dc_offset(samples: &[f64]) -> f64 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        samples.iter().sum::<f64>() / samples.len() as f64
+    }
+
+    /// Estimate fundamental frequency using zero-crossing
+    pub fn estimate_frequency(samples: &[f64], sample_rate: f64) -> Option<f64> {
+        if samples.len() < 4 {
+            return None;
+        }
+
+        let mut crossings = 0;
+        let mut last_positive = samples[0] >= 0.0;
+
+        for &sample in samples.iter().skip(1) {
+            let positive = sample >= 0.0;
+            if positive != last_positive {
+                crossings += 1;
+                last_positive = positive;
+            }
+        }
+
+        if crossings < 2 {
+            return None;
+        }
+
+        // Frequency = (crossings / 2) / time
+        let time = samples.len() as f64 / sample_rate;
+        Some((crossings as f64 / 2.0) / time)
+    }
+
+    /// Check if signal is approximately silent
+    pub fn is_silent(samples: &[f64], threshold: f64) -> bool {
+        Self::peak(samples) < threshold
+    }
+
+    /// Check if signal contains a gate (sustained high value)
+    pub fn has_gate(samples: &[f64], threshold: f64) -> bool {
+        let mut consecutive_high = 0;
+        let required = 10; // Need at least 10 consecutive samples above threshold
+
+        for &sample in samples {
+            if sample > threshold {
+                consecutive_high += 1;
+                if consecutive_high >= required {
+                    return true;
+                }
+            } else {
+                consecutive_high = 0;
+            }
+        }
+
+        false
+    }
+}
+
+// =============================================================================
+// Documentation Generator
+// =============================================================================
+
+/// Format for generated documentation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocFormat {
+    /// Markdown format
+    Markdown,
+    /// Plain text format
+    PlainText,
+    /// HTML format
+    Html,
+}
+
+/// Documentation generator for modules
+///
+/// Generates documentation from a module's port specification and metadata.
+pub struct DocGenerator;
+
+impl DocGenerator {
+    /// Generate documentation for a module
+    pub fn generate<M: GraphModule>(module: &M, format: DocFormat) -> String {
+        let spec = module.port_spec();
+        let type_id = module.type_id();
+
+        match format {
+            DocFormat::Markdown => Self::generate_markdown(type_id, spec),
+            DocFormat::PlainText => Self::generate_plain_text(type_id, spec),
+            DocFormat::Html => Self::generate_html(type_id, spec),
+        }
+    }
+
+    /// Generate documentation from a module template
+    pub fn generate_from_template(template: &ModuleTemplate, format: DocFormat) -> String {
+        match format {
+            DocFormat::Markdown => Self::generate_markdown_from_template(template),
+            DocFormat::PlainText => Self::generate_plain_text_from_template(template),
+            DocFormat::Html => Self::generate_html_from_template(template),
+        }
+    }
+
+    fn generate_markdown(type_id: &str, spec: &PortSpec) -> String {
+        let mut doc = String::new();
+
+        doc.push_str(&format!("# {}\n\n", to_pascal_case(type_id)));
+        doc.push_str(&format!("**Type ID:** `{}`\n\n", type_id));
+
+        // Inputs
+        if !spec.inputs.is_empty() {
+            doc.push_str("## Inputs\n\n");
+            doc.push_str("| Port | Type | Default | Attenuverter |\n");
+            doc.push_str("|------|------|---------|-------------|\n");
+            for input in &spec.inputs {
+                doc.push_str(&format!(
+                    "| `{}` | {:?} | {:.2} | {} |\n",
+                    input.name,
+                    input.kind,
+                    input.default,
+                    if input.has_attenuverter { "Yes" } else { "No" }
+                ));
+            }
+            doc.push('\n');
+        }
+
+        // Outputs
+        if !spec.outputs.is_empty() {
+            doc.push_str("## Outputs\n\n");
+            doc.push_str("| Port | Type |\n");
+            doc.push_str("|------|------|\n");
+            for output in &spec.outputs {
+                doc.push_str(&format!("| `{}` | {:?} |\n", output.name, output.kind));
+            }
+            doc.push('\n');
+        }
+
+        doc
+    }
+
+    fn generate_plain_text(type_id: &str, spec: &PortSpec) -> String {
+        let mut doc = String::new();
+
+        doc.push_str(&format!("{}\n", to_pascal_case(type_id)));
+        doc.push_str(&"=".repeat(type_id.len() + 4));
+        doc.push_str("\n\n");
+
+        doc.push_str(&format!("Type ID: {}\n\n", type_id));
+
+        // Inputs
+        if !spec.inputs.is_empty() {
+            doc.push_str("INPUTS:\n");
+            for input in &spec.inputs {
+                doc.push_str(&format!(
+                    "  - {} ({:?}, default: {:.2}{})\n",
+                    input.name,
+                    input.kind,
+                    input.default,
+                    if input.has_attenuverter {
+                        ", has attenuverter"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            doc.push('\n');
+        }
+
+        // Outputs
+        if !spec.outputs.is_empty() {
+            doc.push_str("OUTPUTS:\n");
+            for output in &spec.outputs {
+                doc.push_str(&format!("  - {} ({:?})\n", output.name, output.kind));
+            }
+            doc.push('\n');
+        }
+
+        doc
+    }
+
+    fn generate_html(type_id: &str, spec: &PortSpec) -> String {
+        let mut doc = String::new();
+
+        doc.push_str(&format!("<h1>{}</h1>\n", to_pascal_case(type_id)));
+        doc.push_str(&format!("<p><strong>Type ID:</strong> <code>{}</code></p>\n", type_id));
+
+        // Inputs
+        if !spec.inputs.is_empty() {
+            doc.push_str("<h2>Inputs</h2>\n");
+            doc.push_str("<table>\n");
+            doc.push_str("<tr><th>Port</th><th>Type</th><th>Default</th><th>Attenuverter</th></tr>\n");
+            for input in &spec.inputs {
+                doc.push_str(&format!(
+                    "<tr><td><code>{}</code></td><td>{:?}</td><td>{:.2}</td><td>{}</td></tr>\n",
+                    input.name,
+                    input.kind,
+                    input.default,
+                    if input.has_attenuverter { "Yes" } else { "No" }
+                ));
+            }
+            doc.push_str("</table>\n");
+        }
+
+        // Outputs
+        if !spec.outputs.is_empty() {
+            doc.push_str("<h2>Outputs</h2>\n");
+            doc.push_str("<table>\n");
+            doc.push_str("<tr><th>Port</th><th>Type</th></tr>\n");
+            for output in &spec.outputs {
+                doc.push_str(&format!(
+                    "<tr><td><code>{}</code></td><td>{:?}</td></tr>\n",
+                    output.name, output.kind
+                ));
+            }
+            doc.push_str("</table>\n");
+        }
+
+        doc
+    }
+
+    fn generate_markdown_from_template(template: &ModuleTemplate) -> String {
+        let mut doc = String::new();
+
+        doc.push_str(&format!("# {}\n\n", template.name));
+
+        if !template.doc.is_empty() {
+            doc.push_str(&format!("{}\n\n", template.doc));
+        }
+
+        doc.push_str(&format!("**Type ID:** `{}`\n", template.type_id));
+        doc.push_str(&format!("**Category:** {:?}\n\n", template.category));
+
+        // Inputs
+        if !template.inputs.is_empty() {
+            doc.push_str("## Inputs\n\n");
+            doc.push_str("| Port | Type | Default | Attenuverter |\n");
+            doc.push_str("|------|------|---------|-------------|\n");
+            for input in &template.inputs {
+                doc.push_str(&format!(
+                    "| `{}` | {:?} | {:.2} | {} |\n",
+                    input.name,
+                    input.kind,
+                    input.default,
+                    if input.has_attenuverter { "Yes" } else { "No" }
+                ));
+            }
+            doc.push('\n');
+        }
+
+        // Outputs
+        if !template.outputs.is_empty() {
+            doc.push_str("## Outputs\n\n");
+            doc.push_str("| Port | Type |\n");
+            doc.push_str("|------|------|\n");
+            for output in &template.outputs {
+                doc.push_str(&format!("| `{}` | {:?} |\n", output.name, output.kind));
+            }
+            doc.push('\n');
+        }
+
+        doc
+    }
+
+    fn generate_plain_text_from_template(template: &ModuleTemplate) -> String {
+        let mut doc = String::new();
+
+        doc.push_str(&format!("{}\n", template.name));
+        doc.push_str(&"=".repeat(template.name.len()));
+        doc.push_str("\n\n");
+
+        if !template.doc.is_empty() {
+            doc.push_str(&format!("{}\n\n", template.doc));
+        }
+
+        doc.push_str(&format!("Type ID: {}\n", template.type_id));
+        doc.push_str(&format!("Category: {:?}\n\n", template.category));
+
+        // Inputs
+        if !template.inputs.is_empty() {
+            doc.push_str("INPUTS:\n");
+            for input in &template.inputs {
+                doc.push_str(&format!(
+                    "  - {} ({:?}, default: {:.2}{})\n",
+                    input.name,
+                    input.kind,
+                    input.default,
+                    if input.has_attenuverter {
+                        ", has attenuverter"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            doc.push('\n');
+        }
+
+        // Outputs
+        if !template.outputs.is_empty() {
+            doc.push_str("OUTPUTS:\n");
+            for output in &template.outputs {
+                doc.push_str(&format!("  - {} ({:?})\n", output.name, output.kind));
+            }
+            doc.push('\n');
+        }
+
+        doc
+    }
+
+    fn generate_html_from_template(template: &ModuleTemplate) -> String {
+        let mut doc = String::new();
+
+        doc.push_str(&format!("<h1>{}</h1>\n", template.name));
+
+        if !template.doc.is_empty() {
+            doc.push_str(&format!("<p>{}</p>\n", template.doc));
+        }
+
+        doc.push_str(&format!(
+            "<p><strong>Type ID:</strong> <code>{}</code></p>\n",
+            template.type_id
+        ));
+        doc.push_str(&format!(
+            "<p><strong>Category:</strong> {:?}</p>\n",
+            template.category
+        ));
+
+        // Inputs
+        if !template.inputs.is_empty() {
+            doc.push_str("<h2>Inputs</h2>\n");
+            doc.push_str("<table>\n");
+            doc.push_str("<tr><th>Port</th><th>Type</th><th>Default</th><th>Attenuverter</th></tr>\n");
+            for input in &template.inputs {
+                doc.push_str(&format!(
+                    "<tr><td><code>{}</code></td><td>{:?}</td><td>{:.2}</td><td>{}</td></tr>\n",
+                    input.name,
+                    input.kind,
+                    input.default,
+                    if input.has_attenuverter { "Yes" } else { "No" }
+                ));
+            }
+            doc.push_str("</table>\n");
+        }
+
+        // Outputs
+        if !template.outputs.is_empty() {
+            doc.push_str("<h2>Outputs</h2>\n");
+            doc.push_str("<table>\n");
+            doc.push_str("<tr><th>Port</th><th>Type</th></tr>\n");
+            for output in &template.outputs {
+                doc.push_str(&format!(
+                    "<tr><td><code>{}</code></td><td>{:?}</td></tr>\n",
+                    output.name, output.kind
+                ));
+            }
+            doc.push_str("</table>\n");
+        }
+
+        doc
+    }
+}
+
+/// Convert snake_case to PascalCase
+fn to_pascal_case(s: &str) -> String {
+    s.split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::Vco;
 
     #[test]
     fn test_module_template_generation() {
@@ -628,5 +1441,156 @@ mod tests {
         assert!(code.contains("impl GraphModule for SimpleModule"));
         // Minimal should be shorter
         assert!(code.len() < template.generate_code().len());
+    }
+
+    // Testing Harness Tests
+
+    #[test]
+    fn test_harness_runs_all_tests() {
+        let vco = Vco::new(44100.0);
+        let mut harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let results = harness.run_all();
+
+        assert_eq!(results.module_type, "vco");
+        assert_eq!(results.results.len(), 7); // 7 standard tests
+        assert!(results.passed_count() > 0);
+    }
+
+    #[test]
+    fn test_harness_port_spec_validation() {
+        let vco = Vco::new(44100.0);
+        let harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let result = harness.test_port_spec();
+        assert!(result.passed);
+        assert!(result.measurements.iter().any(|(n, _)| n == "input_count"));
+        assert!(result.measurements.iter().any(|(n, _)| n == "output_count"));
+    }
+
+    #[test]
+    fn test_suite_result_summary() {
+        let vco = Vco::new(44100.0);
+        let mut harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let results = harness.run_all();
+        let summary = results.summary();
+
+        assert!(summary.contains("Test Suite: vco"));
+        assert!(summary.contains("passed"));
+    }
+
+    #[test]
+    fn test_audio_analysis_rms() {
+        let samples = vec![1.0, -1.0, 1.0, -1.0];
+        let rms = AudioAnalysis::rms(&samples);
+        assert!((rms - 1.0).abs() < 0.001);
+
+        let silent = vec![0.0; 100];
+        assert_eq!(AudioAnalysis::rms(&silent), 0.0);
+    }
+
+    #[test]
+    fn test_audio_analysis_peak() {
+        let samples = vec![0.5, -0.8, 0.3, -0.2];
+        assert_eq!(AudioAnalysis::peak(&samples), 0.8);
+    }
+
+    #[test]
+    fn test_audio_analysis_dc_offset() {
+        let samples = vec![1.0, 1.0, 1.0, 1.0];
+        assert_eq!(AudioAnalysis::dc_offset(&samples), 1.0);
+
+        let balanced = vec![1.0, -1.0, 1.0, -1.0];
+        assert_eq!(AudioAnalysis::dc_offset(&balanced), 0.0);
+    }
+
+    #[test]
+    fn test_audio_analysis_frequency() {
+        // 440 Hz sine wave at 44100 Hz sample rate
+        let sample_rate = 44100.0;
+        let freq = 440.0;
+        let samples: Vec<f64> = (0..4410)
+            .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / sample_rate).sin())
+            .collect();
+
+        let estimated = AudioAnalysis::estimate_frequency(&samples, sample_rate).unwrap();
+        // Allow 5% tolerance
+        assert!((estimated - freq).abs() / freq < 0.05);
+    }
+
+    #[test]
+    fn test_audio_analysis_silence() {
+        let silent = vec![0.0; 100];
+        assert!(AudioAnalysis::is_silent(&silent, 0.01));
+
+        let loud = vec![1.0; 100];
+        assert!(!AudioAnalysis::is_silent(&loud, 0.01));
+    }
+
+    #[test]
+    fn test_audio_analysis_gate() {
+        let mut samples = vec![0.0; 100];
+        // Add a gate in the middle
+        for i in 30..60 {
+            samples[i] = 5.0;
+        }
+        assert!(AudioAnalysis::has_gate(&samples, 2.5));
+
+        let no_gate = vec![0.0; 100];
+        assert!(!AudioAnalysis::has_gate(&no_gate, 2.5));
+    }
+
+    // Documentation Generator Tests
+
+    #[test]
+    fn test_doc_generator_markdown() {
+        let vco = Vco::new(44100.0);
+        let doc = DocGenerator::generate(&vco, DocFormat::Markdown);
+
+        assert!(doc.contains("# Vco"));
+        assert!(doc.contains("**Type ID:** `vco`"));
+        assert!(doc.contains("## Inputs"));
+        assert!(doc.contains("## Outputs"));
+        assert!(doc.contains("| Port |"));
+    }
+
+    #[test]
+    fn test_doc_generator_plain_text() {
+        let vco = Vco::new(44100.0);
+        let doc = DocGenerator::generate(&vco, DocFormat::PlainText);
+
+        assert!(doc.contains("Vco"));
+        assert!(doc.contains("Type ID: vco"));
+        assert!(doc.contains("INPUTS:"));
+        assert!(doc.contains("OUTPUTS:"));
+    }
+
+    #[test]
+    fn test_doc_generator_html() {
+        let vco = Vco::new(44100.0);
+        let doc = DocGenerator::generate(&vco, DocFormat::Html);
+
+        assert!(doc.contains("<h1>Vco</h1>"));
+        assert!(doc.contains("<code>vco</code>"));
+        assert!(doc.contains("<table>"));
+        assert!(doc.contains("<th>Port</th>"));
+    }
+
+    #[test]
+    fn test_doc_generator_from_template() {
+        let template = ModulePresets::vco("CustomVco");
+        let doc = DocGenerator::generate_from_template(&template, DocFormat::Markdown);
+
+        assert!(doc.contains("# CustomVco"));
+        assert!(doc.contains("**Type ID:** `custom_vco`"));
+        assert!(doc.contains("**Category:** Oscillator"));
+    }
+
+    #[test]
+    fn test_pascal_case_conversion() {
+        assert_eq!(to_pascal_case("my_vco"), "MyVco");
+        assert_eq!(to_pascal_case("diode_ladder_filter"), "DiodeLadderFilter");
+        assert_eq!(to_pascal_case("vco"), "Vco");
     }
 }
