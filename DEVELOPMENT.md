@@ -4,9 +4,9 @@ This document outlines the development roadmap and current status for the Quiver
 
 ## Current Status
 
-**Version**: 0.4.0 (Phase 4 Complete)
+**Version**: 0.5.0 (Phase 5 Complete)
 
-The library now includes all Phase 1 (Core Foundation), Phase 2 (Hardware Fidelity), Phase 3 (Analog Modeling Refinement), and Phase 4 (Advanced Features) features:
+The library now includes all Phase 1 (Core Foundation), Phase 2 (Hardware Fidelity), Phase 3 (Analog Modeling Refinement), Phase 4 (Advanced Features), and Phase 5 (Ecosystem) features:
 
 ### Completed Features
 
@@ -85,7 +85,7 @@ The library now includes all Phase 1 (Core Foundation), Phase 2 (Hardware Fideli
 - [x] CI pipeline (GitHub Actions)
 - [x] Code formatting (rustfmt)
 - [x] Linting (clippy)
-- [x] 78 unit tests
+- [x] 154 unit tests
 
 #### Phase 2: Hardware Fidelity (Complete)
 
@@ -163,26 +163,28 @@ The library now includes all Phase 1 (Core Foundation), Phase 2 (Hardware Fideli
    - [x] Web Audio interface (`WebAudioProcessor`, `WebAudioWorklet`, `WebAudioConfig`)
    - [x] Stereo interleave/deinterleave utilities for Web Audio
 
----
-
-## Development Roadmap
-
-### Phase 5: Ecosystem
+#### Phase 5: Ecosystem (Complete)
 
 1. **Module Development Kit**
-   - Module template generator
-   - Testing harness
-   - Documentation generator
+   - [x] `ModuleTemplate` - Template generator for new modules
+   - [x] `ModulePresets` - Pre-configured templates (VCO, VCF, LFO, VCA, etc.)
+   - [x] `ModuleTestHarness` - Testing harness with standard test suite
+   - [x] `AudioAnalysis` - RMS, peak, DC offset, frequency estimation
+   - [x] `DocGenerator` - Documentation generator (Markdown, PlainText, HTML)
 
 2. **Preset Library**
-   - Classic synth patches
-   - Sound design examples
-   - Tutorial patches
+   - [x] `ClassicPresets` - Moog Bass, 303 Acid, Juno Pad, Sync Lead, PWM Strings
+   - [x] `SoundDesignPresets` - Metallic Ring, Noise Sweep, Wavefold Growl
+   - [x] `TutorialPresets` - Basic Subtractive, Envelope Basics, Filter Modulation, FM Basics
+   - [x] `PresetLibrary` - Searchable preset catalog with categories and tags
 
 3. **Visual Tools**
-   - Patch visualization (DOT/GraphViz export)
-   - Parameter automation recording
-   - Scope/analyzer modules
+   - [x] `DotExporter` - Patch visualization (DOT/GraphViz export)
+   - [x] `DotStyle` - Customizable graph styles (dark, light, minimal)
+   - [x] `AutomationRecorder` - Parameter automation recording and playback
+   - [x] `Scope` - Oscilloscope with trigger modes (Free, RisingEdge, FallingEdge, Single)
+   - [x] `SpectrumAnalyzer` - FFT-based frequency analysis
+   - [x] `LevelMeter` - RMS/peak level monitoring with hold
 
 ---
 
