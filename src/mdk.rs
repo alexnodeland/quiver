@@ -1617,12 +1617,8 @@ mod tests {
         let template = ModuleTemplate::new("TestModule", ModuleCategory::Effect)
             .with_doc("A test module")
             .with_type_id("test_module")
-            .with_inputs(vec![
-                PortTemplate::new("in", SignalKind::Audio, 0.0),
-            ])
-            .with_outputs(vec![
-                PortTemplate::new("out", SignalKind::Audio, 0.0),
-            ])
+            .with_inputs(vec![PortTemplate::new("in", SignalKind::Audio, 0.0)])
+            .with_outputs(vec![PortTemplate::new("out", SignalKind::Audio, 0.0)])
             .with_sample_rate(true);
 
         assert_eq!(template.name, "TestModule");
@@ -1654,8 +1650,8 @@ mod tests {
 
     #[test]
     fn test_state_field_template() {
-        let field = StateFieldTemplate::new("level", "f64", "0.0")
-            .with_description("Current level");
+        let field =
+            StateFieldTemplate::new("level", "f64", "0.0").with_description("Current level");
 
         assert_eq!(field.name, "level");
         assert_eq!(field.field_type, "f64");

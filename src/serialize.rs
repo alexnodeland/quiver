@@ -848,7 +848,11 @@ mod tests {
         let registry = ModuleRegistry::new();
         for meta in registry.list_modules() {
             let instance = registry.instantiate(&meta.type_id, 44100.0);
-            assert!(instance.is_some(), "Failed to instantiate: {}", meta.type_id);
+            assert!(
+                instance.is_some(),
+                "Failed to instantiate: {}",
+                meta.type_id
+            );
         }
     }
 

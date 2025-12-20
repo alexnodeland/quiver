@@ -1060,7 +1060,10 @@ mod tests {
         allocator.note_on(64, 1.0);
         allocator.all_notes_off();
         // All voices should be in releasing state
-        assert!(allocator.voices().iter().all(|v| v.state == VoiceState::Releasing || v.state == VoiceState::Free));
+        assert!(allocator
+            .voices()
+            .iter()
+            .all(|v| v.state == VoiceState::Releasing || v.state == VoiceState::Free));
     }
 
     #[test]
