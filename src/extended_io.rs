@@ -130,8 +130,8 @@ pub struct OscPattern {
 #[derive(Debug, Clone)]
 enum PatternSegment {
     Literal(String),
-    Wildcard,         // *
-    SingleChar,       // ?
+    Wildcard,             // *
+    SingleChar,           // ?
     CharClass(Vec<char>), // [abc]
 }
 
@@ -286,7 +286,8 @@ impl OscBinding {
 pub struct OscReceiver {
     /// Registered bindings
     bindings: Vec<OscBinding>,
-    /// Message queue (lock-free)
+    /// Message queue counter (reserved for async message handling)
+    #[allow(dead_code)]
     pending_count: AtomicU32,
 }
 
@@ -311,7 +312,11 @@ impl OscReceiver {
 
     /// Create a scaled binding (e.g., 0-1 to 20-20000 Hz)
     pub fn bind_scaled(&mut self, pattern: &str, value: Arc<AtomicF64>, scale: f64, offset: f64) {
-        self.add_binding(OscBinding::new(pattern, value).with_scale(scale).with_offset(offset));
+        self.add_binding(
+            OscBinding::new(pattern, value)
+                .with_scale(scale)
+                .with_offset(offset),
+        );
     }
 
     /// Process an OSC message
@@ -890,9 +895,8 @@ mod tests {
         let bus = AudioBusConfig::stereo_out();
 
         let mut wrapper = PluginWrapper::new(info, bus);
-        let cutoff = wrapper.add_parameter(
-            PluginParameter::new(0, "Cutoff", 20.0, 20000.0, 1000.0),
-        );
+        let cutoff =
+            wrapper.add_parameter(PluginParameter::new(0, "Cutoff", 20.0, 20000.0, 1000.0));
 
         assert_eq!(wrapper.parameter_count(), 1);
         assert!((wrapper.get_parameter(0).unwrap() - 1000.0).abs() < 0.001);

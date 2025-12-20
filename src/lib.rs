@@ -111,8 +111,8 @@ pub mod prelude {
 
     // Phase 4: SIMD and Block Processing
     pub use crate::simd::{
-        AudioBlock, BlockProcessor, LazyBlock, LazySignal, ProcessContext, RingBuffer,
-        StereoBlock, DEFAULT_BLOCK_SIZE, SIMD_BLOCK_SIZE,
+        AudioBlock, BlockProcessor, LazyBlock, LazySignal, ProcessContext, RingBuffer, StereoBlock,
+        DEFAULT_BLOCK_SIZE, SIMD_BLOCK_SIZE,
     };
 
     // Phase 4: Extended I/O

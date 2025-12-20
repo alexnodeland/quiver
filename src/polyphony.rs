@@ -153,7 +153,8 @@ pub struct VoiceAllocator {
     num_voices: usize,
     /// Allocation mode
     mode: AllocationMode,
-    /// Round-robin index
+    /// Round-robin index (reserved for alternative allocation strategies)
+    #[allow(dead_code)]
     next_voice: usize,
     /// Voice states
     voices: Vec<Voice>,
@@ -296,12 +297,10 @@ impl VoiceAllocator {
 
     fn find_free_voice(&self) -> Option<usize> {
         // Use LRU queue for round-robin behavior
-        for &idx in &self.lru_queue {
-            if self.voices[idx].is_free() {
-                return Some(idx);
-            }
-        }
-        None
+        self.lru_queue
+            .iter()
+            .find(|&&idx| self.voices[idx].is_free())
+            .copied()
     }
 
     fn find_steal_voice(&self, note: u8) -> Option<usize> {
@@ -309,10 +308,7 @@ impl VoiceAllocator {
             AllocationMode::NoSteal => None,
             AllocationMode::RoundRobin | AllocationMode::OldestSteal => {
                 // Find oldest voice
-                self.voices
-                    .iter()
-                    .max_by_key(|v| v.age)
-                    .map(|v| v.index)
+                self.voices.iter().max_by_key(|v| v.age).map(|v| v.index)
             }
             AllocationMode::QuietestSteal => {
                 // Find voice with lowest envelope level
@@ -474,7 +470,8 @@ pub struct PolyPatch {
     voice_patches: Vec<Patch>,
     /// Unison configuration
     unison: UnisonConfig,
-    /// Sample rate
+    /// Sample rate (stored for future per-voice sample rate updates)
+    #[allow(dead_code)]
     sample_rate: f64,
     /// Output buffers (left, right)
     output_left: f64,
@@ -581,7 +578,8 @@ impl PolyPatch {
             // Process unison voices
             let unison_gain = self.unison.voice_gain();
             for u in 0..self.unison.voices {
-                let detune = self.unison.detune_offset(u);
+                // Detune offset would be applied to voice VCO in full implementation
+                let _detune = self.unison.detune_offset(u);
                 let pan = self.unison.pan_position(u);
 
                 // Get the voice patch
@@ -725,8 +723,16 @@ impl VoiceMixer {
     pub fn new(num_voices: usize) -> Self {
         let mut inputs = Vec::with_capacity(num_voices * 2);
         for i in 0..num_voices {
-            inputs.push(PortDef::new(i as u32 * 2, &format!("in{}_l", i), SignalKind::Audio));
-            inputs.push(PortDef::new(i as u32 * 2 + 1, &format!("in{}_r", i), SignalKind::Audio));
+            inputs.push(PortDef::new(
+                i as u32 * 2,
+                format!("in{}_l", i),
+                SignalKind::Audio,
+            ));
+            inputs.push(PortDef::new(
+                i as u32 * 2 + 1,
+                format!("in{}_r", i),
+                SignalKind::Audio,
+            ));
         }
 
         Self {
