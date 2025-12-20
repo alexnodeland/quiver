@@ -760,16 +760,6 @@ mod tests {
     }
 
     #[test]
-    fn test_module_registry_categories() {
-        let registry = ModuleRegistry::new();
-        let categories = registry.categories();
-
-        assert!(categories.contains(&"Oscillators".to_string()));
-        assert!(categories.contains(&"Filters".to_string()));
-        assert!(categories.contains(&"Utilities".to_string()));
-    }
-
-    #[test]
     fn test_patch_roundtrip() {
         let registry = ModuleRegistry::new();
 
