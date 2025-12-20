@@ -36,8 +36,11 @@ fn main() {
     patch.set_output(output.id());
     patch.compile().unwrap();
 
-    println!("Original patch: {} modules, {} cables\n",
-             patch.node_count(), patch.cable_count());
+    println!(
+        "Original patch: {} modules, {} cables\n",
+        patch.node_count(),
+        patch.cable_count()
+    );
 
     // Serialize to JSON
     let mut def = patch.to_def("Warm Pad");
@@ -63,11 +66,14 @@ fn main() {
 
     // Rebuild the patch using the registry
     let registry = ModuleRegistry::new();
-    let mut reloaded_patch = Patch::from_def(&loaded_def, &registry, sample_rate)
-        .expect("Failed to rebuild patch");
+    let mut reloaded_patch =
+        Patch::from_def(&loaded_def, &registry, sample_rate).expect("Failed to rebuild patch");
 
-    println!("\nRebuilt patch: {} modules, {} cables",
-             reloaded_patch.node_count(), reloaded_patch.cable_count());
+    println!(
+        "\nRebuilt patch: {} modules, {} cables",
+        reloaded_patch.node_count(),
+        reloaded_patch.cable_count()
+    );
 
     // Verify it works by generating audio
     println!("\n--- Testing reloaded patch ---");

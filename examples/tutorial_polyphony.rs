@@ -23,7 +23,9 @@ fn main() {
     }
 
     fn note_name(note: u8) -> String {
-        let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        let names = [
+            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+        ];
         let octave = (note / 12) as i32 - 1;
         format!("{}{}", names[(note % 12) as usize], octave)
     }
@@ -34,8 +36,13 @@ fn main() {
     println!("Playing Cmaj7 chord:");
     for &note in &chord {
         let voice_idx = allocator.note_on(note, 0.8);
-        println!("  {} (MIDI {}) → Voice {}, V/Oct = {:.3}V",
-                 note_name(note), note, voice_idx, midi_to_voct(note));
+        println!(
+            "  {} (MIDI {}) → Voice {}, V/Oct = {:.3}V",
+            note_name(note),
+            note,
+            voice_idx,
+            midi_to_voct(note)
+        );
     }
 
     // Show voice states
@@ -45,8 +52,12 @@ fn main() {
         match state.state {
             VoiceState::Active => {
                 if let Some(note) = state.note {
-                    println!("  Voice {}: Active, playing {} (V/Oct: {:.3}V)",
-                             i, note_name(note), state.voct);
+                    println!(
+                        "  Voice {}: Active, playing {} (V/Oct: {:.3}V)",
+                        i,
+                        note_name(note),
+                        state.voct
+                    );
                 }
             }
             VoiceState::Free => println!("  Voice {}: Free", i),
@@ -57,7 +68,10 @@ fn main() {
     // Now try to play another note - will steal!
     println!("\nPlaying D5 (MIDI 74) - all voices busy, must steal:");
     let stolen_voice = allocator.note_on(74, 0.9);
-    println!("  D5 assigned to Voice {} (stolen from previous note)", stolen_voice);
+    println!(
+        "  D5 assigned to Voice {} (stolen from previous note)",
+        stolen_voice
+    );
 
     // Show updated states
     println!("\nVoice states after steal:");
@@ -66,8 +80,12 @@ fn main() {
         match state.state {
             VoiceState::Active => {
                 if let Some(note) = state.note {
-                    println!("  Voice {}: Active, playing {} (V/Oct: {:.3}V)",
-                             i, note_name(note), state.voct);
+                    println!(
+                        "  Voice {}: Active, playing {} (V/Oct: {:.3}V)",
+                        i,
+                        note_name(note),
+                        state.voct
+                    );
                 }
             }
             VoiceState::Free => println!("  Voice {}: Free", i),

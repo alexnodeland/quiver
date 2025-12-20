@@ -44,8 +44,11 @@ fn main() {
     patch.set_output(output.id());
     patch.compile().unwrap();
 
-    println!("Patch compiled: {} modules, {} cables",
-             patch.node_count(), patch.cable_count());
+    println!(
+        "Patch compiled: {} modules, {} cables",
+        patch.node_count(),
+        patch.cable_count()
+    );
     println!();
 
     // Play a note: gate on

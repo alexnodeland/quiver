@@ -12,8 +12,8 @@ fn main() {
     let sample_rate = 44100.0;
 
     // Thread-safe communication channels
-    let pitch_cv = Arc::new(AtomicF64::new(0.0));  // V/Oct
-    let gate_cv = Arc::new(AtomicF64::new(0.0));   // Gate
+    let pitch_cv = Arc::new(AtomicF64::new(0.0)); // V/Oct
+    let gate_cv = Arc::new(AtomicF64::new(0.0)); // Gate
     let velocity_cv = Arc::new(AtomicF64::new(5.0)); // Velocity (0-10V)
     let mod_wheel_cv = Arc::new(AtomicF64::new(0.0)); // CC1 modulation
 
@@ -70,7 +70,7 @@ fn main() {
     println!("Simulating MIDI Note On: C4 (60), velocity 100");
     pitch_cv.set(midi_note_to_voct(60));
     velocity_cv.set(midi_velocity_to_cv(100));
-    gate_cv.set(5.0);  // Gate high
+    gate_cv.set(5.0); // Gate high
 
     // Process some samples during note
     let attack_samples = (sample_rate * 0.3) as usize;
@@ -90,7 +90,7 @@ fn main() {
 
     // Simulate note off
     println!("\nSimulating MIDI Note Off");
-    gate_cv.set(0.0);  // Gate low
+    gate_cv.set(0.0); // Gate low
 
     // Process release
     let release_samples = (sample_rate * 0.5) as usize;
@@ -119,8 +119,13 @@ fn main() {
             patch.tick();
         }
 
-        println!("  {} (MIDI {}): V/Oct = {:.3}V, peak = {:.2}V",
-                 name, note, midi_note_to_voct(note), peak);
+        println!(
+            "  {} (MIDI {}): V/Oct = {:.3}V, peak = {:.2}V",
+            name,
+            note,
+            midi_note_to_voct(note),
+            peak
+        );
     }
 
     println!("\nMIDI integration complete.");

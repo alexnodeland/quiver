@@ -31,7 +31,9 @@ fn main() {
     patch.connect(vcf.out("lp"), output.in_("left")).unwrap();
 
     // Modulation: LFO → Filter cutoff (with base offset)
-    patch.connect(cutoff_base.out("out"), vcf.in_("cutoff")).unwrap();
+    patch
+        .connect(cutoff_base.out("out"), vcf.in_("cutoff"))
+        .unwrap();
     patch.connect(lfo.out("sin"), vcf.in_("fm")).unwrap();
 
     patch.set_output(output.id());

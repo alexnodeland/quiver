@@ -13,7 +13,7 @@ fn main() {
     let info = PluginInfo {
         name: "QuiverSynth".to_string(),
         vendor: "Quiver Audio".to_string(),
-        unique_id: 0x51564152,  // "QVAR"
+        unique_id: 0x51564152, // "QVAR"
         version: (1, 0, 0),
         category: PluginCategory::Instrument,
         num_inputs: 0,
@@ -25,7 +25,10 @@ fn main() {
     println!("  Name: {}", info.name);
     println!("  Vendor: {}", info.vendor);
     println!("  ID: 0x{:08X}", info.unique_id);
-    println!("  Version: {}.{}.{}", info.version.0, info.version.1, info.version.2);
+    println!(
+        "  Version: {}.{}.{}",
+        info.version.0, info.version.1, info.version.2
+    );
     println!("  Category: {:?}", info.category);
     println!("  I/O: {} in, {} out", info.num_inputs, info.num_outputs);
 
@@ -63,8 +66,10 @@ fn main() {
 
     println!("\nExposed Parameters:");
     for param in &parameters {
-        println!("  {}: {} - {} {} (default: {})",
-                 param.name, param.min, param.max, param.unit, param.default);
+        println!(
+            "  {}: {} - {} {} (default: {})",
+            param.name, param.min, param.max, param.unit, param.default
+        );
     }
 
     // Create the wrapper
@@ -148,8 +153,12 @@ fn main() {
 
     // Pattern matching
     let pattern = OscPattern::new("/synth/*");
-    println!("\nPattern '{}' matches '{}': {}",
-             "/synth/*", msg.address, pattern.matches(&msg.address));
+    println!(
+        "\nPattern '{}' matches '{}': {}",
+        "/synth/*",
+        msg.address,
+        pattern.matches(&msg.address)
+    );
 
     println!("\n--- Audio Bus Configuration ---\n");
 

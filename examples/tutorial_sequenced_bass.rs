@@ -58,14 +58,14 @@ fn main() {
 
     // Our bassline: C3, D3, rest, G2, C3, rest, E3, D3
     let pattern = [
-        (48, true),   // C3
-        (50, true),   // D3
-        (0, false),   // rest
-        (43, true),   // G2
-        (48, true),   // C3
-        (0, false),   // rest
-        (52, true),   // E3
-        (50, true),   // D3
+        (48, true), // C3
+        (50, true), // D3
+        (0, false), // rest
+        (43, true), // G2
+        (48, true), // C3
+        (0, false), // rest
+        (52, true), // E3
+        (50, true), // D3
     ];
 
     println!("Bassline pattern:");
@@ -73,10 +73,19 @@ fn main() {
         if *active {
             let voct = midi_to_voct(*note);
             let note_name = match note % 12 {
-                0 => "C", 1 => "C#", 2 => "D", 3 => "D#",
-                4 => "E", 5 => "F", 6 => "F#", 7 => "G",
-                8 => "G#", 9 => "A", 10 => "A#", 11 => "B",
-                _ => "?"
+                0 => "C",
+                1 => "C#",
+                2 => "D",
+                3 => "D#",
+                4 => "E",
+                5 => "F",
+                6 => "F#",
+                7 => "G",
+                8 => "G#",
+                9 => "A",
+                10 => "A#",
+                11 => "B",
+                _ => "?",
             };
             let octave = (note / 12) - 1;
             println!("  Step {}: {}{} ({:.3}V)", i + 1, note_name, octave, voct);

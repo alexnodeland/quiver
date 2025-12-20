@@ -61,7 +61,11 @@ fn main() {
 
     println!("Sample Statistics:");
     println!("  Samples: {}", num_samples);
-    println!("  Peak: {:.3}V ({:.1} dB)", peak, 20.0 * (peak / 5.0).log10());
+    println!(
+        "  Peak: {:.3}V ({:.1} dB)",
+        peak,
+        20.0 * (peak / 5.0).log10()
+    );
     println!("  RMS: {:.3}V ({:.1} dB)", rms, 20.0 * (rms / 5.0).log10());
     println!("  DC Offset: {:.6}V", dc_offset);
 
@@ -78,7 +82,7 @@ fn main() {
     // ASCII waveform visualization
     println!("\n--- Waveform (ASCII) ---\n");
 
-    let display_samples = 80;  // Characters wide
+    let display_samples = 80; // Characters wide
     let step = samples.len() / display_samples;
 
     for row in (0..11).rev() {

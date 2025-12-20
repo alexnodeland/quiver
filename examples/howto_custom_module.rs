@@ -69,9 +69,9 @@ impl GraphModule for BitCrusher {
 
         // Bit depth reduction (quantization)
         // Normalize to 0-1, quantize, scale back
-        let normalized = (self.hold_sample + 5.0) / 10.0;  // 0 to 1
+        let normalized = (self.hold_sample + 5.0) / 10.0; // 0 to 1
         let quantized = (normalized * levels).round() / levels;
-        let output = quantized * 10.0 - 5.0;  // Back to ±5V
+        let output = quantized * 10.0 - 5.0; // Back to ±5V
 
         outputs.set("out", output);
     }
@@ -99,14 +99,20 @@ fn main() {
     let output = patch.add("output", StereoOutput::new());
 
     // CV control for the effect
-    let bits_cv = patch.add("bits_cv", Offset::new(0.0));  // Start clean
+    let bits_cv = patch.add("bits_cv", Offset::new(0.0)); // Start clean
     let rate_cv = patch.add("rate_cv", Offset::new(0.0));
 
     // Connections
     patch.connect(vco.out("sin"), crusher.in_("in")).unwrap();
-    patch.connect(bits_cv.out("out"), crusher.in_("bits")).unwrap();
-    patch.connect(rate_cv.out("out"), crusher.in_("rate")).unwrap();
-    patch.connect(crusher.out("out"), output.in_("left")).unwrap();
+    patch
+        .connect(bits_cv.out("out"), crusher.in_("bits"))
+        .unwrap();
+    patch
+        .connect(rate_cv.out("out"), crusher.in_("rate"))
+        .unwrap();
+    patch
+        .connect(crusher.out("out"), output.in_("left"))
+        .unwrap();
 
     patch.set_output(output.id());
     patch.compile().unwrap();
@@ -131,10 +137,18 @@ fn main() {
         let rate = test_patch.add("rate", Offset::new(rate_v));
         let output = test_patch.add("output", StereoOutput::new());
 
-        test_patch.connect(vco.out("sin"), crusher.in_("in")).unwrap();
-        test_patch.connect(bits.out("out"), crusher.in_("bits")).unwrap();
-        test_patch.connect(rate.out("out"), crusher.in_("rate")).unwrap();
-        test_patch.connect(crusher.out("out"), output.in_("left")).unwrap();
+        test_patch
+            .connect(vco.out("sin"), crusher.in_("in"))
+            .unwrap();
+        test_patch
+            .connect(bits.out("out"), crusher.in_("bits"))
+            .unwrap();
+        test_patch
+            .connect(rate.out("out"), crusher.in_("rate"))
+            .unwrap();
+        test_patch
+            .connect(crusher.out("out"), output.in_("left"))
+            .unwrap();
 
         test_patch.set_output(output.id());
         test_patch.compile().unwrap();
@@ -152,16 +166,18 @@ fn main() {
         let rms = (samples.iter().map(|s| s * s).sum::<f64>() / num_samples as f64).sqrt();
 
         // Count unique values (rough measure of bit reduction)
-        let mut unique: Vec<i32> = samples.iter()
-            .map(|s| (s * 1000.0) as i32)
-            .collect();
+        let mut unique: Vec<i32> = samples.iter().map(|s| (s * 1000.0) as i32).collect();
         unique.sort();
         unique.dedup();
 
         println!("{}", desc);
         println!("  Bits CV: {:.1}V, Rate CV: {:.1}V", bits_v, rate_v);
-        println!("  Peak: {:.2}V, RMS: {:.2}V, Unique levels: {}\n",
-                 peak, rms, unique.len());
+        println!(
+            "  Peak: {:.2}V, RMS: {:.2}V, Unique levels: {}\n",
+            peak,
+            rms,
+            unique.len()
+        );
     }
 
     // Show the port specification

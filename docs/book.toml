@@ -18,7 +18,7 @@ edit-url-template = "https://github.com/alexnodeland/quiver/edit/main/docs/{path
 site-url = "/quiver/"
 no-section-label = false
 additional-css = ["custom.css"]
-additional-js = ["mermaid.min.js", "mermaid-init.js"]
+additional-js = ["mermaid-init.js"]
 
 [output.html.fold]
 enable = true

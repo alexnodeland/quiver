@@ -25,12 +25,20 @@ fn main() {
     let output = patch.add("output", StereoOutput::new());
 
     // FM connection: modulator → carrier's FM input
-    patch.connect(modulator.out("sin"), mod_depth.in_("in")).unwrap();
-    patch.connect(mod_depth.out("out"), carrier.in_("fm")).unwrap();
+    patch
+        .connect(modulator.out("sin"), mod_depth.in_("in"))
+        .unwrap();
+    patch
+        .connect(mod_depth.out("out"), carrier.in_("fm"))
+        .unwrap();
 
     // Carrier to output (using sine for pure FM demonstration)
-    patch.connect(carrier.out("sin"), output.in_("left")).unwrap();
-    patch.connect(carrier.out("sin"), output.in_("right")).unwrap();
+    patch
+        .connect(carrier.out("sin"), output.in_("left"))
+        .unwrap();
+    patch
+        .connect(carrier.out("sin"), output.in_("right"))
+        .unwrap();
 
     patch.set_output(output.id());
     patch.compile().unwrap();
@@ -60,9 +68,15 @@ fn main() {
         let output = test_patch.add("output", StereoOutput::new());
 
         // Set up FM with the given parameters
-        test_patch.connect(modulator.out("sin"), mod_depth_node.in_("in")).unwrap();
-        test_patch.connect(mod_depth_node.out("out"), carrier.in_("fm")).unwrap();
-        test_patch.connect(carrier.out("sin"), output.in_("left")).unwrap();
+        test_patch
+            .connect(modulator.out("sin"), mod_depth_node.in_("in"))
+            .unwrap();
+        test_patch
+            .connect(mod_depth_node.out("out"), carrier.in_("fm"))
+            .unwrap();
+        test_patch
+            .connect(carrier.out("sin"), output.in_("left"))
+            .unwrap();
 
         test_patch.set_output(output.id());
         test_patch.compile().unwrap();

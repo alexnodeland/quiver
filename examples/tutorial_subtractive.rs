@@ -57,7 +57,9 @@ fn main() {
     let mut raw_patch = Patch::new(sample_rate);
     let raw_vco = raw_patch.add("vco", Vco::new(sample_rate));
     let raw_out = raw_patch.add("output", StereoOutput::new());
-    raw_patch.connect(raw_vco.out("saw"), raw_out.in_("left")).unwrap();
+    raw_patch
+        .connect(raw_vco.out("saw"), raw_out.in_("left"))
+        .unwrap();
     raw_patch.set_output(raw_out.id());
     raw_patch.compile().unwrap();
 
@@ -68,7 +70,8 @@ fn main() {
     }
 
     let raw_peak = raw_samples.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
-    let raw_rms = (raw_samples.iter().map(|s| s * s).sum::<f64>() / raw_samples.len() as f64).sqrt();
+    let raw_rms =
+        (raw_samples.iter().map(|s| s * s).sum::<f64>() / raw_samples.len() as f64).sqrt();
 
     println!("\nRaw Sawtooth (unfiltered)");
     println!("  Peak amplitude: {:.2}V", raw_peak);
