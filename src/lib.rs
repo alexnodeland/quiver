@@ -107,6 +107,95 @@
 //! - [`simd`] - Block processing and SIMD optimization
 //! - [`serialize`] - Patch serialization to JSON
 //! - [`mdk`] - Module Development Kit for custom modules
+//!
+//! ## Examples
+//!
+//! ### Creating a Simple VCO
+//!
+//! ```
+//! use quiver::prelude::*;
+//!
+//! // Create a patch
+//! let mut patch = Patch::new(44100.0);
+//!
+//! // Add a VCO and output
+//! let vco = patch.add("vco", Vco::new(44100.0));
+//! let output = patch.add("output", StereoOutput::new());
+//!
+//! // Connect VCO to output
+//! patch.connect(vco.out("saw"), output.in_("left")).unwrap();
+//! patch.set_output(output.id());
+//! patch.compile().unwrap();
+//!
+//! // Generate a sample
+//! let (left, right) = patch.tick();
+//! assert!(left.abs() <= 5.0); // Audio signal within ±5V
+//! ```
+//!
+//! ### V/Oct Pitch Conversion
+//!
+//! ```
+//! use quiver::prelude::*;
+//!
+//! // MIDI note to V/Oct conversion
+//! fn midi_to_voct(note: u8) -> f64 {
+//!     (note as f64 - 60.0) / 12.0
+//! }
+//!
+//! // C4 (MIDI 60) = 0V
+//! assert_eq!(midi_to_voct(60), 0.0);
+//!
+//! // C5 (MIDI 72) = +1V (one octave up)
+//! assert_eq!(midi_to_voct(72), 1.0);
+//!
+//! // C3 (MIDI 48) = -1V (one octave down)
+//! assert_eq!(midi_to_voct(48), -1.0);
+//! ```
+//!
+//! ### Signal Types
+//!
+//! ```
+//! use quiver::prelude::*;
+//!
+//! // SignalKind represents different voltage conventions
+//! let audio = SignalKind::Audio;           // ±5V audio signals
+//! let cv_uni = SignalKind::CvUnipolar;     // 0-10V control voltage
+//! let cv_bi = SignalKind::CvBipolar;       // ±5V control voltage
+//! let voct = SignalKind::VoltPerOctave;    // 1V/octave pitch
+//! let gate = SignalKind::Gate;             // 0V or +5V sustained
+//! let trig = SignalKind::Trigger;          // 0V or +5V brief pulse
+//!
+//! // Port definitions specify signal types for validation
+//! let audio_port = PortDef::new(0, "in", SignalKind::Audio);
+//! let cv_port = PortDef::new(1, "cutoff", SignalKind::CvUnipolar).with_default(5.0);
+//!
+//! assert!(matches!(audio_port.kind, SignalKind::Audio));
+//! assert!(matches!(cv_port.kind, SignalKind::CvUnipolar));
+//! assert_eq!(cv_port.default, 5.0);
+//! ```
+//!
+//! ### Serialization Round-Trip
+//!
+//! ```
+//! use quiver::prelude::*;
+//!
+//! // Create a patch
+//! let mut patch = Patch::new(44100.0);
+//! let vco = patch.add("vco", Vco::new(44100.0));
+//! let output = patch.add("output", StereoOutput::new());
+//! patch.connect(vco.out("saw"), output.in_("left")).unwrap();
+//! patch.set_output(output.id());
+//! patch.compile().unwrap();
+//!
+//! // Serialize to JSON
+//! let def = patch.to_def("Test Patch");
+//! let json = def.to_json().unwrap();
+//!
+//! // Deserialize and rebuild
+//! let loaded = PatchDef::from_json(&json).unwrap();
+//! assert_eq!(loaded.name, "Test Patch");
+//! assert_eq!(loaded.modules.len(), 2);
+//! ```
 
 pub mod analog;
 pub mod combinator;

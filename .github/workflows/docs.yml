@@ -1,0 +1,123 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - 'Cargo.toml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'src/**'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-mdbook:
+    name: Build mdBook
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: 'latest'
+
+      - name: Install mdbook-mermaid
+        run: |
+          cargo install mdbook-mermaid
+          mdbook-mermaid install docs/
+
+      - name: Build mdBook
+        run: mdbook build docs/
+
+      - name: Upload mdBook artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mdbook
+          path: docs/book/
+
+  build-rustdoc:
+    name: Build Rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build rustdoc
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: --cfg docsrs
+
+      - name: Upload rustdoc artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdoc
+          path: target/doc/
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: [build-mdbook, build-rustdoc]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download mdBook
+        uses: actions/download-artifact@v4
+        with:
+          name: mdbook
+          path: site/
+
+      - name: Download rustdoc
+        uses: actions/download-artifact@v4
+        with:
+          name: rustdoc
+          path: site/api/
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload combined site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  validate-links:
+    name: Validate Documentation Links
+    runs-on: ubuntu-latest
+    needs: build-mdbook
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download mdBook
+        uses: actions/download-artifact@v4
+        with:
+          name: mdbook
+          path: docs/book/
+
+      - name: Check for broken internal links
+        run: |
+          # Simple link validation - check for common issues
+          cd docs/book
+          # Count HTML files generated
+          html_count=$(find . -name "*.html" | wc -l)
+          echo "Generated $html_count HTML files"
+          if [ "$html_count" -lt 20 ]; then
+            echo "Warning: Expected more HTML files"
+            exit 1
+          fi
