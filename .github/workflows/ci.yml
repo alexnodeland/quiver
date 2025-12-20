@@ -64,3 +64,15 @@ jobs:
         run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+      - name: Run coverage
+        run: cargo tarpaulin --all-features --fail-under 80

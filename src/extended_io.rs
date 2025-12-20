@@ -976,4 +976,121 @@ mod tests {
         assert!((right[1] - 5.0).abs() < 0.001);
         assert!((right[2] - 6.0).abs() < 0.001);
     }
+
+    #[test]
+    fn test_osc_value_to_f64() {
+        assert!((OscValue::Int(42).to_f64().unwrap() - 42.0).abs() < 0.001);
+        assert!((OscValue::Float(3.14).to_f64().unwrap() - 3.14).abs() < 0.01);
+        assert!((OscValue::Long(100).to_f64().unwrap() - 100.0).abs() < 0.001);
+        assert!((OscValue::Double(2.71).to_f64().unwrap() - 2.71).abs() < 0.001);
+        assert!((OscValue::True.to_f64().unwrap() - 1.0).abs() < 0.001);
+        assert!((OscValue::False.to_f64().unwrap() - 0.0).abs() < 0.001);
+        assert!(OscValue::Nil.to_f64().is_none());
+    }
+
+    #[test]
+    fn test_osc_value_to_bool() {
+        assert_eq!(OscValue::Int(1).to_bool(), Some(true));
+        assert_eq!(OscValue::Int(0).to_bool(), Some(false));
+        assert_eq!(OscValue::Float(1.0).to_bool(), Some(true));
+        assert_eq!(OscValue::Float(0.0).to_bool(), Some(false));
+        assert_eq!(OscValue::True.to_bool(), Some(true));
+        assert_eq!(OscValue::False.to_bool(), Some(false));
+        assert_eq!(OscValue::Nil.to_bool(), None);
+    }
+
+    #[test]
+    fn test_osc_message_with_int() {
+        let msg = OscMessage::new("/test").with_int(42);
+        assert_eq!(msg.args.len(), 1);
+    }
+
+    #[test]
+    fn test_osc_pattern_single_char() {
+        let pattern = OscPattern::new("/a/?");
+        assert!(pattern.matches("/a/b"));
+        assert!(!pattern.matches("/a/bb"));
+    }
+
+    #[test]
+    fn test_osc_pattern_char_class() {
+        let pattern = OscPattern::new("/[abc]");
+        assert!(pattern.matches("/a"));
+        assert!(pattern.matches("/b"));
+        assert!(!pattern.matches("/d"));
+    }
+
+    #[test]
+    fn test_osc_binding_with_offset() {
+        let value = Arc::new(AtomicF64::new(0.0));
+        let binding = OscBinding::new("/test", value.clone())
+            .with_scale(2.0)
+            .with_offset(10.0);
+
+        let msg = OscMessage::new("/test").with_float(5.0);
+        binding.apply(&msg);
+        assert!((value.get() - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_osc_binding_non_matching() {
+        let value = Arc::new(AtomicF64::new(0.0));
+        let binding = OscBinding::new("/test", value.clone());
+
+        let msg = OscMessage::new("/other").with_float(5.0);
+        assert!(!binding.apply(&msg));
+    }
+
+    #[test]
+    fn test_osc_receiver_bind_scaled() {
+        let mut receiver = OscReceiver::new();
+        let value = Arc::new(AtomicF64::new(0.0));
+        receiver.bind_scaled("/test", value.clone(), 10.0, 5.0);
+
+        let msg = OscMessage::new("/test").with_float(1.0);
+        receiver.handle_message(&msg);
+        assert!((value.get() - 15.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_osc_receiver_counters() {
+        let mut receiver = OscReceiver::new();
+        let value = Arc::new(AtomicF64::new(0.0));
+        receiver.bind("/test", value.clone());
+
+        let msg = OscMessage::new("/test").with_float(1.0);
+        receiver.handle_message(&msg);
+
+        assert_eq!(receiver.message_count(), 1);
+        assert_eq!(receiver.matched_count(), 1);
+        assert_eq!(receiver.binding_count(), 1);
+
+        receiver.reset_counters();
+        assert_eq!(receiver.message_count(), 0);
+    }
+
+    #[test]
+    fn test_osc_receiver_default() {
+        let receiver = OscReceiver::default();
+        assert_eq!(receiver.binding_count(), 0);
+    }
+
+    #[test]
+    fn test_osc_input_module() {
+        let value = Arc::new(AtomicF64::new(5.0));
+        let mut input = OscInput::new("/test/param", value.clone(), SignalKind::CvUnipolar);
+
+        assert_eq!(input.address(), "/test/param");
+        assert!((input.value_ref().get() - 5.0).abs() < 0.001);
+
+        let inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        input.tick(&inputs, &mut outputs);
+
+        assert!((outputs.get(0).unwrap() - 5.0).abs() < 0.001);
+
+        input.reset();
+        input.set_sample_rate(48000.0);
+        assert_eq!(input.type_id(), "osc_input");
+    }
 }

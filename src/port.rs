@@ -469,4 +469,112 @@ mod tests {
         param.attenuverter = -1.0;
         assert!((param.value() - 30.0).abs() < 1e-10);
     }
+
+    #[test]
+    fn test_signal_kind_gate_threshold() {
+        assert!(SignalKind::Gate.gate_threshold().is_some());
+        assert!(SignalKind::Trigger.gate_threshold().is_some());
+        assert!(SignalKind::Audio.gate_threshold().is_none());
+    }
+
+    #[test]
+    fn test_port_def_with_default_and_attenuverter() {
+        let port = PortDef::new(0, "test", SignalKind::CvUnipolar)
+            .with_default(5.0)
+            .with_attenuverter();
+
+        assert!((port.default - 5.0).abs() < 0.001);
+        assert!(port.has_attenuverter);
+    }
+
+    #[test]
+    fn test_port_def_normalled_to() {
+        let port = PortDef::new(0, "test", SignalKind::CvUnipolar).normalled_to(1);
+        assert_eq!(port.normalled_to, Some(1));
+    }
+
+    #[test]
+    fn test_port_spec_lookup() {
+        let spec = PortSpec {
+            inputs: vec![
+                PortDef::new(0, "in1", SignalKind::Audio),
+                PortDef::new(1, "in2", SignalKind::CvBipolar),
+            ],
+            outputs: vec![
+                PortDef::new(10, "out1", SignalKind::Audio),
+                PortDef::new(11, "out2", SignalKind::Gate),
+            ],
+        };
+
+        assert!(spec.input_by_name("in1").is_some());
+        assert!(spec.input_by_name("nonexistent").is_none());
+        assert!(spec.output_by_name("out1").is_some());
+        assert!(spec.output_by_name("nonexistent").is_none());
+
+        assert!(spec.input_by_id(0).is_some());
+        assert!(spec.input_by_id(99).is_none());
+        assert!(spec.output_by_id(10).is_some());
+        assert!(spec.output_by_id(99).is_none());
+    }
+
+    #[test]
+    fn test_port_values_has() {
+        let mut pv = PortValues::new();
+        assert!(!pv.has(0));
+        pv.set(0, 1.0);
+        assert!(pv.has(0));
+    }
+
+    #[test]
+    fn test_port_values_clear() {
+        let mut pv = PortValues::new();
+        pv.set(0, 1.0);
+        pv.set(1, 2.0);
+        pv.clear();
+        assert!(!pv.has(0));
+        assert!(!pv.has(1));
+    }
+
+    #[test]
+    fn test_block_port_values() {
+        let mut bpv = BlockPortValues::new(64);
+        assert_eq!(bpv.block_size(), 64);
+
+        // Get mutable buffer (creates buffer for port 0)
+        let buf_mut = bpv.get_buffer_mut(0);
+        assert_eq!(buf_mut.len(), 64);
+        buf_mut[0] = 1.0;
+
+        // Now we can read it
+        assert_eq!(bpv.get_buffer(0).unwrap()[0], 1.0);
+
+        // Frame operations
+        let mut frame_vals = PortValues::new();
+        frame_vals.set(0, 99.0);
+        bpv.set_frame(1, frame_vals);
+
+        // Clear
+        bpv.clear();
+    }
+
+    #[test]
+    fn test_signal_kind_clock() {
+        let range = SignalKind::Clock.voltage_range();
+        assert_eq!(range, (0.0, 5.0));
+        assert!(!SignalKind::Clock.is_summable());
+    }
+
+    #[test]
+    fn test_param_range_exponential_clamped() {
+        let range = ParamRange::Exponential {
+            min: 20.0,
+            max: 20000.0,
+        };
+        // Test with values outside 0-1
+        let below = range.apply(-0.5);
+        assert!((below - 20.0).abs() < 1e-10);
+
+        let above = range.apply(1.5);
+        assert!((above - 20000.0).abs() < 1e-10);
+    }
 }

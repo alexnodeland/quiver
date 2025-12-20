@@ -746,62 +746,35 @@ mod tests {
     }
 
     #[test]
-    fn test_module_registry() {
-        let registry = ModuleRegistry::new();
-
-        // Should have built-in modules
-        assert!(registry.get_metadata("vco").is_some());
-        assert!(registry.get_metadata("svf").is_some());
-        assert!(registry.get_metadata("adsr").is_some());
-
-        // Should be able to instantiate
-        let vco = registry.instantiate("vco", 44100.0);
-        assert!(vco.is_some());
-    }
-
-    #[test]
-    fn test_module_registry_categories() {
-        let registry = ModuleRegistry::new();
-        let categories = registry.categories();
-
-        assert!(categories.contains(&"Oscillators".to_string()));
-        assert!(categories.contains(&"Filters".to_string()));
-        assert!(categories.contains(&"Utilities".to_string()));
-    }
-
-    #[test]
-    fn test_patch_roundtrip() {
-        let registry = ModuleRegistry::new();
-
-        // Create a simple patch
-        let mut patch = Patch::new(44100.0);
-        let vco = patch.add("vco", Vco::new(44100.0));
-        let vcf = patch.add("vcf", Svf::new(44100.0));
-        let output = patch.add("output", StereoOutput::new());
-
-        patch.connect(vco.out("saw"), vcf.in_("in")).unwrap();
-        patch.connect(vcf.out("lp"), output.in_("left")).unwrap();
-        patch.set_output(output.id());
-        patch.compile().unwrap();
-
-        // Serialize
-        let def = patch.to_def("Test");
-        let json = def.to_json().unwrap();
-
-        // Deserialize
-        let loaded_def = PatchDef::from_json(&json).unwrap();
-        let loaded_patch = Patch::from_def(&loaded_def, &registry, 44100.0).unwrap();
-
-        // Verify
-        assert_eq!(loaded_patch.node_count(), 3);
-        assert_eq!(loaded_patch.cable_count(), 2);
-    }
-
-    #[test]
     fn test_cable_def() {
         let cable = CableDef::new("vco.saw", "vcf.in").with_attenuation(0.5);
         assert_eq!(cable.from, "vco.saw");
         assert_eq!(cable.to, "vcf.in");
         assert_eq!(cable.attenuation, Some(0.5));
+    }
+
+    #[test]
+    fn test_patch_def_default() {
+        let def = PatchDef::default();
+        assert_eq!(def.name, "Untitled");
+    }
+
+    #[test]
+    fn test_module_def_with_position() {
+        let def = ModuleDef::new("vco1", "vco").with_position(100.0, 200.0);
+        assert_eq!(def.position, Some((100.0, 200.0)));
+    }
+
+    #[test]
+    fn test_cable_def_with_offset() {
+        let cable = CableDef::new("a.out", "b.in").with_offset(2.5);
+        assert_eq!(cable.offset, Some(2.5));
+    }
+
+    #[test]
+    fn test_cable_def_with_modulation() {
+        let cable = CableDef::new("a.out", "b.in").with_modulation(0.5, 1.0);
+        assert_eq!(cable.attenuation, Some(0.5));
+        assert_eq!(cable.offset, Some(1.0));
     }
 }

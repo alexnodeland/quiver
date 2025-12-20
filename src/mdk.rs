@@ -1611,4 +1611,235 @@ mod tests {
         assert_eq!(to_pascal_case("diode_ladder_filter"), "DiodeLadderFilter");
         assert_eq!(to_pascal_case("vco"), "Vco");
     }
+
+    #[test]
+    fn test_module_template_builder() {
+        let template = ModuleTemplate::new("TestModule", ModuleCategory::Effect)
+            .with_doc("A test module")
+            .with_type_id("test_module")
+            .with_inputs(vec![PortTemplate::new("in", SignalKind::Audio, 0.0)])
+            .with_outputs(vec![PortTemplate::new("out", SignalKind::Audio, 0.0)])
+            .with_sample_rate(true);
+
+        assert_eq!(template.name, "TestModule");
+        assert_eq!(template.doc, "A test module");
+        assert_eq!(template.type_id, "test_module");
+        assert!(template.needs_sample_rate);
+    }
+
+    #[test]
+    fn test_module_template_add_input_output() {
+        let initial = ModuleTemplate::new("Test", ModuleCategory::Utility);
+        let initial_inputs = initial.inputs.len();
+        let initial_outputs = initial.outputs.len();
+
+        let template = initial.add_input(PortTemplate::new("in", SignalKind::Audio, 0.0));
+        assert_eq!(template.inputs.len(), initial_inputs + 1);
+
+        let template = template.add_output(PortTemplate::new("out", SignalKind::Audio, 0.0));
+        assert_eq!(template.outputs.len(), initial_outputs + 1);
+    }
+
+    #[test]
+    fn test_module_template_add_state_field() {
+        let mut template = ModuleTemplate::new("Test", ModuleCategory::Utility);
+        template = template.add_state_field(StateFieldTemplate::new("counter", "u32", "0"));
+
+        assert_eq!(template.state_fields.len(), 1);
+    }
+
+    #[test]
+    fn test_state_field_template() {
+        let field =
+            StateFieldTemplate::new("level", "f64", "0.0").with_description("Current level");
+
+        assert_eq!(field.name, "level");
+        assert_eq!(field.field_type, "f64");
+        assert_eq!(field.initial_value, "0.0");
+        assert_eq!(field.description, "Current level");
+    }
+
+    #[test]
+    fn test_module_presets_filter() {
+        let template = ModulePresets::filter("MyFilter");
+        assert_eq!(template.name, "MyFilter");
+        assert_eq!(template.category, ModuleCategory::Filter);
+    }
+
+    #[test]
+    fn test_module_presets_envelope() {
+        let template = ModulePresets::envelope("MyEnv");
+        assert_eq!(template.name, "MyEnv");
+        assert_eq!(template.category, ModuleCategory::Modulation);
+    }
+
+    #[test]
+    fn test_module_presets_utility() {
+        let template = ModulePresets::utility("MyUtil");
+        assert_eq!(template.name, "MyUtil");
+        assert_eq!(template.category, ModuleCategory::Utility);
+    }
+
+    #[test]
+    fn test_module_presets_effect() {
+        let template = ModulePresets::effect("MyEffect");
+        assert_eq!(template.name, "MyEffect");
+        assert_eq!(template.category, ModuleCategory::Effect);
+    }
+
+    #[test]
+    fn test_module_presets_io() {
+        let template = ModulePresets::io("MyIO");
+        assert_eq!(template.name, "MyIO");
+        assert_eq!(template.category, ModuleCategory::InputOutput);
+    }
+
+    #[test]
+    fn test_modulation_category_ports() {
+        let inputs = ModuleCategory::Modulation.typical_inputs();
+        let outputs = ModuleCategory::Modulation.typical_outputs();
+        assert!(!outputs.is_empty());
+        let _ = inputs;
+    }
+
+    #[test]
+    fn test_utility_category_ports() {
+        let inputs = ModuleCategory::Utility.typical_inputs();
+        let outputs = ModuleCategory::Utility.typical_outputs();
+        assert!(!inputs.is_empty());
+        assert!(!outputs.is_empty());
+    }
+
+    #[test]
+    fn test_effect_category_ports() {
+        let inputs = ModuleCategory::Effect.typical_inputs();
+        let outputs = ModuleCategory::Effect.typical_outputs();
+        assert!(!inputs.is_empty());
+        assert!(!outputs.is_empty());
+    }
+
+    #[test]
+    fn test_io_category_ports() {
+        let inputs = ModuleCategory::InputOutput.typical_inputs();
+        let outputs = ModuleCategory::InputOutput.typical_outputs();
+        let _ = (inputs, outputs);
+    }
+
+    #[test]
+    fn test_test_result_with_measurement() {
+        let result = TestResult::pass("test")
+            .with_measurement("value1", 1.0)
+            .with_measurement("value2", 2.0);
+
+        assert_eq!(result.measurements.len(), 2);
+    }
+
+    #[test]
+    fn test_test_suite_failed_count() {
+        let results = TestSuiteResult {
+            module_type: "test".to_string(),
+            results: vec![
+                TestResult::pass("test1"),
+                TestResult::fail("test2", "error"),
+            ],
+        };
+
+        assert_eq!(results.passed_count(), 1);
+        assert_eq!(results.failed_count(), 1);
+        assert!(!results.all_passed());
+    }
+
+    #[test]
+    fn test_harness_test_reset() {
+        let vco = Vco::new(44100.0);
+        let mut harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let result = harness.test_reset();
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_harness_test_sample_rate() {
+        let vco = Vco::new(44100.0);
+        let mut harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let result = harness.test_sample_rate();
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_harness_test_zero_input() {
+        let vco = Vco::new(44100.0);
+        let mut harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let result = harness.test_zero_input();
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_harness_test_stability() {
+        let vco = Vco::new(44100.0);
+        let mut harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let result = harness.test_stability();
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_harness_test_nan_inf() {
+        let vco = Vco::new(44100.0);
+        let mut harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let result = harness.test_nan_inf();
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_harness_test_output_range() {
+        let vco = Vco::new(44100.0);
+        let mut harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let result = harness.test_output_range();
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_harness_test_with_inputs() {
+        let vco = Vco::new(44100.0);
+        let mut harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let mut input_seq = vec![];
+        for _ in 0..10 {
+            let mut pv = PortValues::new();
+            pv.set(0, 0.0);
+            input_seq.push(pv);
+        }
+
+        let result = harness.test_with_inputs("custom", &input_seq, |_outputs| Ok(()));
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_harness_module_access() {
+        let vco = Vco::new(44100.0);
+        let mut harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let _module = harness.module();
+        let _module_mut = harness.module_mut();
+    }
+
+    #[test]
+    fn test_doc_from_template_plain_text() {
+        let template = ModulePresets::vco("TestVco");
+        let doc = DocGenerator::generate_from_template(&template, DocFormat::PlainText);
+        assert!(doc.contains("TestVco"));
+        assert!(doc.contains("Type ID:"));
+    }
+
+    #[test]
+    fn test_doc_from_template_html() {
+        let template = ModulePresets::vco("TestVco");
+        let doc = DocGenerator::generate_from_template(&template, DocFormat::Html);
+        assert!(doc.contains("<h1>TestVco</h1>"));
+    }
 }

@@ -712,4 +712,199 @@ mod tests {
         assert_eq!(ctx.sample_position, 64);
         assert!((ctx.time_seconds() - 64.0 / 44100.0).abs() < 0.0001);
     }
+
+    #[test]
+    fn test_audio_block_constant() {
+        let block = AudioBlock::constant(8, 5.0);
+        assert_eq!(block.get(0), 5.0);
+        assert_eq!(block.get(7), 5.0);
+    }
+
+    #[test]
+    fn test_audio_block_from_samples() {
+        let samples = vec![1.0, 2.0, 3.0, 4.0];
+        let block = AudioBlock::from_samples(samples);
+        assert_eq!(block.len(), 4);
+        assert_eq!(block.get(0), 1.0);
+        assert_eq!(block.get(3), 4.0);
+    }
+
+    #[test]
+    fn test_audio_block_is_empty() {
+        let empty = AudioBlock::new(0);
+        assert!(empty.is_empty());
+
+        let non_empty = AudioBlock::new(4);
+        assert!(!non_empty.is_empty());
+    }
+
+    #[test]
+    fn test_audio_block_as_slice() {
+        let mut block = AudioBlock::new(4);
+        block.fill(2.0);
+
+        let slice = block.as_slice();
+        assert_eq!(slice.len(), 4);
+        assert_eq!(slice[0], 2.0);
+
+        let mut_slice = block.as_mut_slice();
+        mut_slice[0] = 99.0;
+        assert_eq!(block.get(0), 99.0);
+    }
+
+    #[test]
+    fn test_audio_block_add_scalar() {
+        let mut block = AudioBlock::from_samples(vec![1.0, 2.0, 3.0, 4.0]);
+        block.add_scalar(10.0);
+        assert_eq!(block.get(0), 11.0);
+        assert_eq!(block.get(3), 14.0);
+    }
+
+    #[test]
+    fn test_audio_block_add_block() {
+        let mut block1 = AudioBlock::from_samples(vec![1.0, 2.0, 3.0, 4.0]);
+        let block2 = AudioBlock::from_samples(vec![10.0, 20.0, 30.0, 40.0]);
+        block1.add_block(&block2);
+        assert_eq!(block1.get(0), 11.0);
+        assert_eq!(block1.get(3), 44.0);
+    }
+
+    #[test]
+    fn test_audio_block_mul_block() {
+        let mut block1 = AudioBlock::from_samples(vec![1.0, 2.0, 3.0, 4.0]);
+        let block2 = AudioBlock::from_samples(vec![2.0, 2.0, 2.0, 2.0]);
+        block1.mul_block(&block2);
+        assert_eq!(block1.get(0), 2.0);
+        assert_eq!(block1.get(3), 8.0);
+    }
+
+    #[test]
+    fn test_audio_block_map() {
+        let mut block = AudioBlock::from_samples(vec![1.0, 2.0, 3.0, 4.0]);
+        block.map(|x| x * 2.0);
+        assert_eq!(block.get(0), 2.0);
+        assert_eq!(block.get(3), 8.0);
+    }
+
+    #[test]
+    fn test_audio_block_hard_clip() {
+        let mut block = AudioBlock::from_samples(vec![-10.0, -1.0, 0.0, 1.0, 10.0]);
+        block.hard_clip(5.0);
+        assert_eq!(block.get(0), -5.0);
+        assert_eq!(block.get(4), 5.0);
+    }
+
+    #[test]
+    fn test_audio_block_copy_from() {
+        let source = AudioBlock::from_samples(vec![1.0, 2.0, 3.0, 4.0]);
+        let mut dest = AudioBlock::new(4);
+        dest.copy_from(&source);
+        assert_eq!(dest.get(0), 1.0);
+        assert_eq!(dest.get(3), 4.0);
+    }
+
+    #[test]
+    fn test_stereo_block_default() {
+        let stereo = StereoBlock::default();
+        assert_eq!(stereo.len(), DEFAULT_BLOCK_SIZE);
+    }
+
+    #[test]
+    fn test_stereo_block_get_set_sample() {
+        let mut stereo = StereoBlock::new(4);
+        stereo.set_sample(0, 1.0, 2.0);
+        let (l, r) = stereo.get_sample(0);
+        assert_eq!(l, 1.0);
+        assert_eq!(r, 2.0);
+    }
+
+    #[test]
+    fn test_stereo_block_apply_pan() {
+        let mut stereo = StereoBlock::new(4);
+        stereo.left.fill(1.0);
+        stereo.right.fill(1.0);
+
+        stereo.apply_pan(-1.0); // Full left
+        assert!(stereo.left.peak() > stereo.right.peak());
+    }
+
+    #[test]
+    fn test_stereo_block_mix() {
+        let mut stereo1 = StereoBlock::new(4);
+        stereo1.left.fill(1.0);
+        stereo1.right.fill(1.0);
+
+        let mut stereo2 = StereoBlock::new(4);
+        stereo2.left.fill(2.0);
+        stereo2.right.fill(2.0);
+
+        stereo1.mix(&stereo2);
+        assert_eq!(stereo1.left.get(0), 3.0);
+        assert_eq!(stereo1.right.get(0), 3.0);
+    }
+
+    #[test]
+    fn test_ring_buffer_is_empty() {
+        let buf = RingBuffer::new(4);
+        assert!(!buf.is_empty());
+
+        let empty_buf = RingBuffer::new(0);
+        assert!(empty_buf.is_empty());
+    }
+
+    #[test]
+    fn test_ring_buffer_read_interp() {
+        let mut buf = RingBuffer::new(4);
+        buf.write(1.0);
+        buf.write(3.0);
+
+        // Interpolated read at 0.5 should be between 1.0 and 3.0
+        let interp = buf.read_interp(0.5);
+        assert!(interp > 1.0 && interp < 3.0);
+    }
+
+    #[test]
+    fn test_ring_buffer_clear() {
+        let mut buf = RingBuffer::new(4);
+        buf.write(10.0);
+        buf.write(20.0);
+
+        buf.clear();
+        assert_eq!(buf.read(0), 0.0);
+        assert_eq!(buf.read(1), 0.0);
+    }
+
+    #[test]
+    fn test_block_processor_process_samples() {
+        use crate::modules::Vco;
+        use crate::port::{BlockPortValues, GraphModule};
+
+        let processor = BlockProcessor::new(64, 44100.0);
+
+        let mut vco = Vco::new(44100.0);
+        let inputs = BlockPortValues::new(64);
+        let mut outputs = BlockPortValues::new(64);
+
+        processor.process_samples(&mut vco, &inputs, &mut outputs);
+        assert_eq!(processor.block_size(), 64);
+    }
+
+    #[test]
+    fn test_lazy_block_get_mut() {
+        let mut lazy = LazyBlock::new(4);
+        let block = lazy.get_mut();
+        block.fill(42.0);
+        assert!(lazy.is_computed());
+        assert_eq!(lazy.get(|_| {}).get(0), 42.0);
+    }
+
+    #[test]
+    fn test_process_context_reset() {
+        let mut ctx = ProcessContext::new(44100.0, 64);
+        ctx.advance();
+        ctx.advance();
+
+        ctx.reset();
+        assert_eq!(ctx.sample_position, 0);
+    }
 }

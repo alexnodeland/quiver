@@ -881,4 +881,216 @@ mod tests {
         // Sync ramp should be taking effect (output increasing toward full amplitude)
         assert!(out1.abs() <= out2.abs() || (out1.abs() < 5.0 && out2.abs() < 5.0));
     }
+
+    // Additional tests for 100% coverage
+
+    #[test]
+    fn test_diode_clip() {
+        // Test diode clip saturation
+        let result = saturation::diode_clip(1.0, 0.7);
+        assert!(result > 0.7);
+
+        let result_neg = saturation::diode_clip(-1.0, 0.7);
+        assert!(result_neg < -0.7);
+
+        // Within forward voltage - unchanged
+        let within = saturation::diode_clip(0.5, 0.7);
+        assert!((within - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cubic_sat() {
+        // Below threshold
+        let low = saturation::cubic_sat(0.5);
+        assert!(low > 0.0);
+        assert!(low < 0.5);
+
+        // Above threshold (2/3)
+        let high = saturation::cubic_sat(1.0);
+        assert!((high - 2.0 / 3.0).abs() < 0.001);
+
+        // Negative value above threshold
+        let high_neg = saturation::cubic_sat(-1.0);
+        assert!((high_neg - (-2.0 / 3.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_asym_sat() {
+        let pos = saturation::asym_sat(0.5, 1.0, 0.8);
+        assert!(pos > 0.0);
+
+        let neg = saturation::asym_sat(-0.5, 1.0, 0.8);
+        assert!(neg < 0.0);
+    }
+
+    #[test]
+    fn test_component_model_capacitor() {
+        let cap = ComponentModel::capacitor_5pct();
+        assert!(cap.tolerance == 0.05);
+        assert!(cap.factor() >= 0.95 && cap.factor() <= 1.05);
+    }
+
+    #[test]
+    fn test_component_model_default() {
+        let comp = ComponentModel::default();
+        assert!((comp.factor() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_component_model_temperature() {
+        let mut comp = ComponentModel::new(0.01, 0.001);
+        comp.set_temperature(10.0);
+        assert!(comp.temp_offset == 10.0);
+
+        let applied = comp.apply(100.0);
+        assert!(applied != 100.0); // Should have some variation
+    }
+
+    #[test]
+    fn test_thermal_model_default() {
+        let thermal = ThermalModel::default();
+        assert!((thermal.temperature() - 25.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_pink_noise_default() {
+        let mut pink = noise::PinkNoise::default();
+        let _sample = pink.sample();
+    }
+
+    #[test]
+    fn test_power_supply_noise() {
+        let mut psn = noise::PowerSupplyNoise::new(44100.0, 60.0, 0.01);
+        let sample1 = psn.sample();
+        assert!(sample1.abs() <= 0.02);
+
+        // Test 60Hz constructor
+        let mut psn60 = noise::PowerSupplyNoise::hz_60(44100.0, 0.01);
+        let _ = psn60.sample();
+
+        // Test 50Hz constructor
+        let mut psn50 = noise::PowerSupplyNoise::hz_50(44100.0, 0.01);
+        let _ = psn50.sample();
+
+        // Test set_sample_rate
+        psn.set_sample_rate(48000.0);
+    }
+
+    #[test]
+    fn test_voct_tracking_default() {
+        let tracking = VoctTrackingModel::default();
+        assert!(tracking.center_octave == 4.0);
+    }
+
+    #[test]
+    fn test_hf_rolloff_default() {
+        let rolloff = HighFrequencyRolloff::default();
+        assert!(rolloff.cutoff_hz == 12000.0);
+    }
+
+    #[test]
+    fn test_analog_vco_default() {
+        let vco = AnalogVco::default();
+        assert!(vco.sample_rate == 44100.0);
+    }
+
+    #[test]
+    fn test_analog_vco_reset_set_sample_rate() {
+        let mut vco = AnalogVco::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 0.0);
+        for _ in 0..100 {
+            vco.tick(&inputs, &mut outputs);
+        }
+
+        vco.reset();
+        assert!(vco.phase == 0.0);
+
+        vco.set_sample_rate(48000.0);
+        assert!(vco.sample_rate == 48000.0);
+
+        assert_eq!(vco.type_id(), "analog_vco");
+    }
+
+    #[test]
+    fn test_analog_vco_negative_phase() {
+        // Test negative phase wraparound in tick - we need negative FM
+        let mut vco = AnalogVco::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, -10.0); // Very low pitch (negative V/Oct)
+        inputs.set(1, -5.0); // Negative FM to make frequency negative
+
+        // Run enough samples to potentially go negative
+        for _ in 0..1000 {
+            vco.tick(&inputs, &mut outputs);
+        }
+        // Just ensure it doesn't crash
+        assert!(vco.phase >= 0.0);
+    }
+
+    #[test]
+    fn test_saturator_module() {
+        let mut sat = Saturator::new(1.5);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 5.0); // Input signal
+
+        sat.tick(&inputs, &mut outputs);
+        let out = outputs.get(10).unwrap_or(0.0);
+        assert!(out.abs() <= 5.0);
+
+        // Test soft constructor
+        let sat_soft = Saturator::soft(2.0);
+        assert!(sat_soft.drive == 2.0);
+
+        // Test default
+        let sat_default = Saturator::default();
+        assert!(sat_default.drive == 1.0);
+
+        // Test reset/set_sample_rate/type_id
+        sat.reset();
+        sat.set_sample_rate(48000.0);
+        assert_eq!(sat.type_id(), "saturator");
+    }
+
+    #[test]
+    fn test_wavefolder_module() {
+        let mut wf = Wavefolder::new(0.5);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 5.0); // Input signal beyond threshold
+
+        wf.tick(&inputs, &mut outputs);
+        let out = outputs.get(10).unwrap_or(0.0);
+        assert!(out.abs() <= 5.0);
+
+        // Test default
+        let wf_default = Wavefolder::default();
+        assert!(wf_default.threshold == 1.0);
+
+        // Test reset/set_sample_rate/type_id
+        wf.reset();
+        wf.set_sample_rate(48000.0);
+        assert_eq!(wf.type_id(), "wavefolder");
+    }
+
+    #[test]
+    fn test_voct_tracking_reset() {
+        let mut tracking = VoctTrackingModel::new();
+
+        // Apply some drift
+        for _ in 0..1000 {
+            tracking.apply(0.0, 1.0 / 44100.0);
+        }
+
+        // Reset should clear drift
+        tracking.reset();
+        assert!(tracking.drift_state == 0.0);
+    }
 }
