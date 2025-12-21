@@ -3204,7 +3204,7 @@ mod tests {
         lfo.set_sample_rate(48000.0);
         assert!(lfo.sample_rate == 48000.0);
 
-        let mut inputs = PortValues::new();
+        let inputs = PortValues::new();
         let mut outputs = PortValues::new();
         for _ in 0..100 {
             lfo.tick(&inputs, &mut outputs);
@@ -3391,7 +3391,7 @@ mod tests {
         let mut clock = Clock::default();
         assert!(clock.sample_rate == 44100.0);
 
-        let mut inputs = PortValues::new();
+        let inputs = PortValues::new();
         let mut outputs = PortValues::new();
         for _ in 0..100 {
             clock.tick(&inputs, &mut outputs);
@@ -3585,7 +3585,7 @@ mod tests {
 
         // Initial step
         seq.tick(&inputs, &mut outputs);
-        let out = outputs.get(10).unwrap_or(0.0);
+        let _out = outputs.get(10).unwrap_or(0.0);
 
         // Clock to next step
         inputs.set(0, 5.0);
