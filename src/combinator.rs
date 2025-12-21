@@ -59,7 +59,7 @@
 //! let effects = signal.fanout(reverb, delay);
 //! ```
 
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 
 /// A signal processing module with typed input and output.
 ///

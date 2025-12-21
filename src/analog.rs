@@ -3,17 +3,22 @@
 //! This module provides primitives for modeling analog circuit behavior:
 //! saturation, soft clipping, component variation, thermal drift, and noise.
 
+use alloc::vec;
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
-use std::f64::consts::TAU;
+use crate::rng;
+use core::f64::consts::TAU;
+use libm::Libm;
 
 /// Saturation and soft clipping functions
 pub mod saturation {
+    use libm::Libm;
+
     /// Hyperbolic tangent saturation (tube-like warmth)
     ///
     /// Higher drive values increase harmonic content.
     pub fn tanh_sat(x: f64, drive: f64) -> f64 {
-        let denominator = drive.tanh().max(0.001);
-        (x * drive).tanh() / denominator
+        let denominator = Libm::<f64>::tanh(drive).max(0.001);
+        Libm::<f64>::tanh(x * drive) / denominator
     }
 
     /// Soft clipping with adjustable knee
@@ -21,11 +26,11 @@ pub mod saturation {
     /// Signals below threshold pass through unchanged;
     /// signals above are compressed.
     pub fn soft_clip(x: f64, threshold: f64) -> f64 {
-        if x.abs() < threshold {
+        if Libm::<f64>::fabs(x) < threshold {
             x
         } else {
-            let sign = x.signum();
-            let excess = x.abs() - threshold;
+            let sign = if x >= 0.0 { 1.0 } else { -1.0 };
+            let excess = Libm::<f64>::fabs(x) - threshold;
             sign * (threshold + excess / (1.0 + excess))
         }
     }
@@ -36,9 +41,9 @@ pub mod saturation {
     /// creates even harmonics, giving a warmer, tube-like character.
     pub fn asym_sat(x: f64, pos_drive: f64, neg_drive: f64) -> f64 {
         if x >= 0.0 {
-            (x * pos_drive).tanh()
+            Libm::<f64>::tanh(x * pos_drive)
         } else {
-            (x * neg_drive).tanh()
+            Libm::<f64>::tanh(x * neg_drive)
         }
     }
 
@@ -65,7 +70,7 @@ pub mod saturation {
         let max_iterations = 10; // Prevent infinite loops
         let mut iterations = 0;
 
-        while y.abs() > threshold && iterations < max_iterations {
+        while Libm::<f64>::fabs(y) > threshold && iterations < max_iterations {
             if y > threshold {
                 y = 2.0 * threshold - y;
             } else if y < -threshold {
@@ -80,10 +85,11 @@ pub mod saturation {
     ///
     /// A simple polynomial saturation curve.
     pub fn cubic_sat(x: f64) -> f64 {
-        if x.abs() < 2.0 / 3.0 {
-            x - x.powi(3) / 3.0
+        if Libm::<f64>::fabs(x) < 2.0 / 3.0 {
+            x - x * x * x / 3.0
         } else {
-            x.signum() * 2.0 / 3.0
+            let sign = if x >= 0.0 { 1.0 } else { -1.0 };
+            sign * 2.0 / 3.0
         }
     }
 }
@@ -111,7 +117,7 @@ impl ComponentModel {
             tolerance,
             temp_coef,
             temp_offset: 0.0,
-            instance_offset: (rand::random::<f64>() * 2.0 - 1.0) * tolerance,
+            instance_offset: rng::random_bipolar() * tolerance,
         }
     }
 
@@ -222,9 +228,13 @@ impl Default for ThermalModel {
 
 /// Noise generation utilities
 pub mod noise {
+    use crate::rng;
+    use core::f64::consts::TAU;
+    use libm::Libm;
+
     /// White noise (flat spectrum)
     pub fn white() -> f64 {
-        rand::random::<f64>() * 2.0 - 1.0
+        rng::random_bipolar()
     }
 
     /// Pink noise generator (1/f spectrum) using Voss-McCartney algorithm
@@ -251,7 +261,7 @@ pub mod noise {
 
             for i in 0..changed_bits.min(16) {
                 self.running_sum -= self.rows[i];
-                self.rows[i] = rand::random::<f64>() * 2.0 - 1.0;
+                self.rows[i] = rng::random_bipolar();
                 self.running_sum += self.rows[i];
             }
 
@@ -296,8 +306,9 @@ pub mod noise {
 
         /// Generate the next power supply noise sample
         pub fn sample(&mut self) -> f64 {
-            let out = (self.phase * std::f64::consts::TAU).sin() * self.amplitude;
-            self.phase = (self.phase + self.frequency / self.sample_rate).fract();
+            let out = Libm::<f64>::sin(self.phase * TAU) * self.amplitude;
+            let new_phase = self.phase + self.frequency / self.sample_rate;
+            self.phase = new_phase - Libm::<f64>::floor(new_phase);
             out + white() * self.amplitude * 0.1
         }
 
@@ -333,8 +344,8 @@ impl VoctTrackingModel {
     /// Create a new tracking model with typical analog characteristics
     pub fn new() -> Self {
         Self {
-            base_error_cents: (rand::random::<f64>() * 2.0 - 1.0) * 5.0, // ±5 cents base
-            octave_error_coef: 1.0 + rand::random::<f64>() * 2.0,        // 1-3 cents/octave
+            base_error_cents: rng::random_bipolar() * 5.0, // ±5 cents base
+            octave_error_coef: 1.0 + rng::random() * 2.0,  // 1-3 cents/octave
             center_octave: 4.0,
             drift_state: 0.0,
             drift_rate: 0.0001,
@@ -355,7 +366,7 @@ impl VoctTrackingModel {
     /// Apply tracking error to a V/Oct value, returning the modified V/Oct
     pub fn apply(&mut self, voct: f64, dt: f64) -> f64 {
         // Update drift (slow random walk)
-        self.drift_state += (rand::random::<f64>() * 2.0 - 1.0) * self.drift_rate * dt * 1000.0;
+        self.drift_state += rng::random_bipolar() * self.drift_rate * dt * 1000.0;
         self.drift_state = self.drift_state.clamp(-10.0, 10.0);
 
         // Calculate octave distance from center
@@ -488,7 +499,7 @@ impl AnalogVco {
             sample_rate,
             freq_component: ComponentModel::new(0.02, 0.0001), // 2% tolerance
             thermal: ThermalModel::new(25.0, 0.01, 0.001),
-            dc_offset: (rand::random::<f64>() * 2.0 - 1.0) * 0.01,
+            dc_offset: rng::random_bipolar() * 0.01,
             voct_tracking: VoctTrackingModel::new(),
             hf_rolloff: HighFrequencyRolloff::default_analog(sample_rate),
             last_output: 0.0,
@@ -535,13 +546,13 @@ impl GraphModule for AnalogVco {
         let voct_with_error = self.voct_tracking.apply(voct, dt);
 
         // Apply component tolerance and thermal drift to frequency
-        let base_freq = 261.63 * 2.0_f64.powf(voct_with_error);
+        let base_freq = 261.63 * Libm::<f64>::pow(2.0, voct_with_error);
         let freq = self.freq_component.apply(base_freq);
         let freq = freq * (1.0 + self.thermal.offset() * 0.001); // Thermal detuning
-        let freq = freq * 2.0_f64.powf(fm);
+        let freq = freq * Libm::<f64>::pow(2.0, fm);
 
         // Update thermal model
-        self.thermal.update(self.last_output.powi(2), dt);
+        self.thermal.update(self.last_output * self.last_output, dt);
 
         // Phase 3: Improved oscillator sync with soft ramp
         if sync > 2.5 && self.last_sync <= 2.5 {
@@ -558,8 +569,8 @@ impl GraphModule for AnalogVco {
         }
 
         // Generate waveforms with slight analog imperfections
-        let sin = (self.phase * TAU).sin();
-        let tri = 1.0 - 4.0 * (self.phase - 0.5).abs();
+        let sin = Libm::<f64>::sin(self.phase * TAU);
+        let tri = 1.0 - 4.0 * Libm::<f64>::fabs(self.phase - 0.5);
         let saw = 2.0 * self.phase - 1.0;
         let sqr = if self.phase < pw { 1.0 } else { -1.0 };
 
@@ -576,7 +587,8 @@ impl GraphModule for AnalogVco {
         let sin = self.hf_rolloff.apply(sin, freq);
 
         self.last_output = saw;
-        self.phase = (self.phase + freq / self.sample_rate).fract();
+        let new_phase = self.phase + freq / self.sample_rate;
+        self.phase = new_phase - Libm::<f64>::floor(new_phase);
         if self.phase < 0.0 {
             self.phase += 1.0;
         }

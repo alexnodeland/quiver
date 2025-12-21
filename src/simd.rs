@@ -10,7 +10,11 @@
 //! - Lazy evaluation framework
 //! - SIMD-optimized common operations (when `simd` feature enabled)
 
+use alloc::vec;
+use alloc::vec::Vec;
 use crate::port::{BlockPortValues, GraphModule, PortValues};
+use core::f64::consts::PI;
+use libm::Libm;
 
 /// Block size for SIMD operations (typically 4 or 8 for SSE/AVX)
 pub const SIMD_BLOCK_SIZE: usize = 4;
@@ -221,7 +225,7 @@ impl AudioBlock {
     /// Apply soft clipping (tanh saturation)
     pub fn soft_clip(&mut self, drive: f64) {
         for sample in &mut self.samples {
-            *sample = (*sample * drive).tanh() / drive.tanh().max(0.001);
+            *sample = Libm::<f64>::tanh(*sample * drive) / Libm::<f64>::tanh(drive).max(0.001);
         }
     }
 
@@ -243,7 +247,7 @@ impl AudioBlock {
             return 0.0;
         }
         let sum_sq: f64 = self.samples.iter().map(|s| s * s).sum();
-        (sum_sq / self.size as f64).sqrt()
+        Libm::<f64>::sqrt(sum_sq / self.size as f64)
     }
 
     /// Copy from another block
@@ -441,9 +445,9 @@ impl StereoBlock {
     /// Apply stereo panning
     /// pan: -1.0 (full left) to 1.0 (full right)
     pub fn apply_pan(&mut self, pan: f64) {
-        let pan_angle = (pan + 1.0) * std::f64::consts::PI / 4.0;
-        let left_gain = pan_angle.cos();
-        let right_gain = pan_angle.sin();
+        let pan_angle = (pan + 1.0) * PI / 4.0;
+        let left_gain = Libm::<f64>::cos(pan_angle);
+        let right_gain = Libm::<f64>::sin(pan_angle);
 
         self.left.mul_scalar(left_gain);
         self.right.mul_scalar(right_gain);
@@ -524,8 +528,9 @@ impl RingBuffer {
 
     /// Read with fractional delay using linear interpolation
     pub fn read_interp(&self, delay: f64) -> f64 {
-        let delay_int = delay.floor() as usize;
-        let frac = delay - delay.floor();
+        let delay_floor = Libm::<f64>::floor(delay);
+        let delay_int = delay_floor as usize;
+        let frac = delay - delay_floor;
 
         let s1 = self.read(delay_int);
         let s2 = self.read(delay_int + 1);

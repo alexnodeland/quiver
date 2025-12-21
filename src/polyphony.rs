@@ -10,9 +10,13 @@
 //! - `PolyPatch` - A polyphonic patch containing multiple voice instances
 //! - `UnisonVoice` - Stacked voices with detuning for thick unison sounds
 
+use alloc::collections::VecDeque;
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
 use crate::graph::{Patch, PatchError};
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
-use std::collections::VecDeque;
+use libm::Libm;
 
 /// Voice allocation algorithm
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -143,7 +147,7 @@ pub fn midi_note_to_voct(note: u8) -> f64 {
 /// Convert V/Oct to MIDI note number
 #[inline]
 pub fn voct_to_midi_note(voct: f64) -> u8 {
-    (voct * 12.0 + 60.0).round().clamp(0.0, 127.0) as u8
+    Libm::<f64>::round(voct * 12.0 + 60.0).clamp(0.0, 127.0) as u8
 }
 
 /// Voice allocator for polyphonic patches
@@ -313,7 +317,7 @@ impl VoiceAllocator {
                     .min_by(|a, b| {
                         a.envelope_level
                             .partial_cmp(&b.envelope_level)
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .unwrap_or(core::cmp::Ordering::Equal)
                     })
                     .map(|v| v.index)
             }
@@ -409,7 +413,7 @@ impl UnisonConfig {
 
     /// Get the gain multiplier per voice to maintain consistent output level
     pub fn voice_gain(&self) -> f64 {
-        1.0 / (self.voices as f64).sqrt()
+        1.0 / Libm::<f64>::sqrt(self.voices as f64)
     }
 }
 
@@ -622,9 +626,9 @@ impl PolyPatch {
                     let (l, r) = patch.tick();
 
                     // Apply pan law (constant power)
-                    let pan_angle = (pan + 1.0) * std::f64::consts::PI / 4.0;
-                    let left_gain = pan_angle.cos();
-                    let right_gain = pan_angle.sin();
+                    let pan_angle = (pan + 1.0) * core::f64::consts::PI / 4.0;
+                    let left_gain = Libm::<f64>::cos(pan_angle);
+                    let right_gain = Libm::<f64>::sin(pan_angle);
 
                     left += l * left_gain * unison_gain;
                     right += r * right_gain * unison_gain;

@@ -3,8 +3,12 @@
 //! This module defines the signal types, port definitions, and type-erased interfaces
 //! that bridge the typed combinator layer with the graph-based patching system.
 
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use libm::Libm;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Unique identifier for a port within a module
 pub type PortId = u32;
@@ -156,7 +160,7 @@ impl PortSpec {
 /// Runtime port values container
 #[derive(Debug, Clone, Default)]
 pub struct PortValues {
-    pub values: HashMap<PortId, f64>,
+    pub values: BTreeMap<PortId, f64>,
 }
 
 impl PortValues {
@@ -192,14 +196,14 @@ impl PortValues {
 
 /// Block-oriented port values for efficient processing
 pub struct BlockPortValues {
-    buffers: HashMap<PortId, Vec<f64>>,
+    buffers: BTreeMap<PortId, Vec<f64>>,
     block_size: usize,
 }
 
 impl BlockPortValues {
     pub fn new(block_size: usize) -> Self {
         Self {
-            buffers: HashMap::new(),
+            buffers: BTreeMap::new(),
             block_size,
         }
     }
@@ -267,10 +271,10 @@ impl ParamRange {
                     // Handle edge case where min is zero or negative
                     clamped * max
                 } else {
-                    min * (max / min).powf(clamped)
+                    min * Libm::<f64>::pow(max / min, clamped)
                 }
             }
-            ParamRange::VoltPerOctave { base_freq } => base_freq * 2.0_f64.powf(normalized),
+            ParamRange::VoltPerOctave { base_freq } => base_freq * Libm::<f64>::pow(2.0, normalized),
         }
     }
 }
@@ -376,12 +380,14 @@ pub trait GraphModule: Send + Sync {
         "unknown"
     }
 
-    /// Serialize module state
+    /// Serialize module state (std feature only)
+    #[cfg(feature = "std")]
     fn serialize_state(&self) -> Option<serde_json::Value> {
         None
     }
 
-    /// Deserialize module state
+    /// Deserialize module state (std feature only)
+    #[cfg(feature = "std")]
     fn deserialize_state(&mut self, _state: &serde_json::Value) -> Result<(), String> {
         Ok(())
     }
