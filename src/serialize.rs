@@ -730,6 +730,262 @@ fn parse_port_ref(s: &str) -> Result<(&str, &str), PatchError> {
     Ok((parts[0], parts[1]))
 }
 
+// =============================================================================
+// Patch Validation
+// =============================================================================
+
+/// A validation error with path and message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationError {
+    /// JSON path to the error location (e.g., "modules[0].name")
+    pub path: String,
+    /// Human-readable error message
+    pub message: String,
+}
+
+impl ValidationError {
+    pub fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl core::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}: {}", self.path, self.message)
+    }
+}
+
+/// Result of patch validation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationResult {
+    /// Whether the patch is valid
+    pub valid: bool,
+    /// List of validation errors (empty if valid)
+    pub errors: Vec<ValidationError>,
+}
+
+impl ValidationResult {
+    pub fn ok() -> Self {
+        Self {
+            valid: true,
+            errors: Vec::new(),
+        }
+    }
+
+    pub fn with_errors(errors: Vec<ValidationError>) -> Self {
+        Self {
+            valid: errors.is_empty(),
+            errors,
+        }
+    }
+}
+
+impl PatchDef {
+    /// Validate the patch definition without loading it
+    ///
+    /// This performs structural validation to catch errors early before
+    /// attempting to instantiate modules. For full semantic validation
+    /// (e.g., checking that port names exist), use `validate_with_registry`.
+    pub fn validate(&self) -> ValidationResult {
+        let mut errors = Vec::new();
+
+        // Validate version
+        if self.version < 1 {
+            errors.push(ValidationError::new(
+                "version",
+                "Version must be a positive integer",
+            ));
+        }
+
+        // Validate name
+        if self.name.is_empty() {
+            errors.push(ValidationError::new("name", "Name must be a non-empty string"));
+        }
+
+        // Collect module names for duplicate checking
+        let mut module_names = alloc::collections::BTreeSet::new();
+
+        // Validate modules
+        for (i, module) in self.modules.iter().enumerate() {
+            let path = format!("modules[{}]", i);
+
+            if module.name.is_empty() {
+                errors.push(ValidationError::new(
+                    format!("{}.name", path),
+                    "Module name must be a non-empty string",
+                ));
+            } else if !module_names.insert(&module.name) {
+                errors.push(ValidationError::new(
+                    format!("{}.name", path),
+                    format!("Duplicate module name: {}", module.name),
+                ));
+            }
+
+            if module.module_type.is_empty() {
+                errors.push(ValidationError::new(
+                    format!("{}.module_type", path),
+                    "Module type must be a non-empty string",
+                ));
+            }
+        }
+
+        // Validate cables
+        for (i, cable) in self.cables.iter().enumerate() {
+            let path = format!("cables[{}]", i);
+
+            // Validate port reference format
+            if !is_valid_port_ref(&cable.from) {
+                errors.push(ValidationError::new(
+                    format!("{}.from", path),
+                    "From must be a port reference in format 'module_name.port_name'",
+                ));
+            }
+
+            if !is_valid_port_ref(&cable.to) {
+                errors.push(ValidationError::new(
+                    format!("{}.to", path),
+                    "To must be a port reference in format 'module_name.port_name'",
+                ));
+            }
+
+            // Validate attenuation range
+            if let Some(attenuation) = cable.attenuation {
+                if !(-2.0..=2.0).contains(&attenuation) {
+                    errors.push(ValidationError::new(
+                        format!("{}.attenuation", path),
+                        "Attenuation must be between -2.0 and 2.0",
+                    ));
+                }
+            }
+
+            // Validate offset range
+            if let Some(offset) = cable.offset {
+                if !(-10.0..=10.0).contains(&offset) {
+                    errors.push(ValidationError::new(
+                        format!("{}.offset", path),
+                        "Offset must be between -10.0 and 10.0",
+                    ));
+                }
+            }
+        }
+
+        ValidationResult::with_errors(errors)
+    }
+
+    /// Validate the patch definition with registry context
+    ///
+    /// This performs full semantic validation including checking that:
+    /// - All module types exist in the registry
+    /// - All port references point to existing modules
+    /// - All port names exist on their respective modules
+    pub fn validate_with_registry(&self, registry: &ModuleRegistry) -> ValidationResult {
+        // First do structural validation
+        let mut result = self.validate();
+        if !result.valid {
+            return result;
+        }
+
+        let mut errors = Vec::new();
+
+        // Collect module names for reference checking
+        let module_names: alloc::collections::BTreeSet<_> =
+            self.modules.iter().map(|m| m.name.as_str()).collect();
+
+        // Validate module types exist
+        for (i, module) in self.modules.iter().enumerate() {
+            if registry.get_metadata(&module.module_type).is_none() {
+                errors.push(ValidationError::new(
+                    format!("modules[{}].module_type", i),
+                    format!("Unknown module type: {}", module.module_type),
+                ));
+            }
+        }
+
+        // Validate cable references
+        for (i, cable) in self.cables.iter().enumerate() {
+            let path = format!("cables[{}]", i);
+
+            // Check source module exists
+            if let Ok((from_module, from_port)) = parse_port_ref(&cable.from) {
+                if !module_names.contains(from_module) {
+                    errors.push(ValidationError::new(
+                        format!("{}.from", path),
+                        format!("Unknown module: {}", from_module),
+                    ));
+                } else {
+                    // Check source port exists
+                    if let Some(module_def) = self.modules.iter().find(|m| m.name == from_module) {
+                        if let Some(metadata) = registry.get_metadata(&module_def.module_type) {
+                            if metadata.port_spec.output_by_name(from_port).is_none() {
+                                errors.push(ValidationError::new(
+                                    format!("{}.from", path),
+                                    format!(
+                                        "Unknown output port '{}' on module '{}'",
+                                        from_port, from_module
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check destination module exists
+            if let Ok((to_module, to_port)) = parse_port_ref(&cable.to) {
+                if !module_names.contains(to_module) {
+                    errors.push(ValidationError::new(
+                        format!("{}.to", path),
+                        format!("Unknown module: {}", to_module),
+                    ));
+                } else {
+                    // Check destination port exists
+                    if let Some(module_def) = self.modules.iter().find(|m| m.name == to_module) {
+                        if let Some(metadata) = registry.get_metadata(&module_def.module_type) {
+                            if metadata.port_spec.input_by_name(to_port).is_none() {
+                                errors.push(ValidationError::new(
+                                    format!("{}.to", path),
+                                    format!(
+                                        "Unknown input port '{}' on module '{}'",
+                                        to_port, to_module
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            result
+        } else {
+            result.valid = false;
+            result.errors.extend(errors);
+            result
+        }
+    }
+}
+
+/// Check if a string is a valid port reference (module.port format)
+fn is_valid_port_ref(s: &str) -> bool {
+    let parts: Vec<&str> = s.splitn(2, '.').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+
+    // Check that both parts are non-empty and contain valid characters
+    let valid_chars = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    };
+
+    valid_chars(parts[0]) && valid_chars(parts[1])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,5 +1035,149 @@ mod tests {
         let cable = CableDef::new("a.out", "b.in").with_modulation(0.5, 1.0);
         assert_eq!(cable.attenuation, Some(0.5));
         assert_eq!(cable.offset, Some(1.0));
+    }
+
+    // =============================================================================
+    // Validation Tests
+    // =============================================================================
+
+    #[test]
+    fn test_valid_patch_validation() {
+        let mut def = PatchDef::new("Test Patch");
+        def.modules.push(ModuleDef::new("vco1", "vco"));
+        def.modules.push(ModuleDef::new("output", "stereo_output"));
+        def.cables.push(CableDef::new("vco1.saw", "output.left"));
+
+        let result = def.validate();
+        assert!(result.valid, "Expected valid patch, got errors: {:?}", result.errors);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_empty_name_validation() {
+        let mut def = PatchDef::new("");
+        def.modules.push(ModuleDef::new("vco1", "vco"));
+
+        let result = def.validate();
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.path == "name"));
+    }
+
+    #[test]
+    fn test_duplicate_module_name_validation() {
+        let mut def = PatchDef::new("Test");
+        def.modules.push(ModuleDef::new("vco1", "vco"));
+        def.modules.push(ModuleDef::new("vco1", "vco")); // Duplicate!
+
+        let result = def.validate();
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.message.contains("Duplicate")));
+    }
+
+    #[test]
+    fn test_invalid_port_reference_validation() {
+        let mut def = PatchDef::new("Test");
+        def.modules.push(ModuleDef::new("vco1", "vco"));
+        def.cables.push(CableDef::new("invalid", "also_invalid")); // Missing dots
+
+        let result = def.validate();
+        assert!(!result.valid);
+        assert!(result.errors.len() >= 2);
+    }
+
+    #[test]
+    fn test_attenuation_range_validation() {
+        let mut def = PatchDef::new("Test");
+        def.modules.push(ModuleDef::new("vco1", "vco"));
+        def.cables.push(CableDef::new("a.out", "b.in").with_attenuation(5.0)); // Out of range
+
+        let result = def.validate();
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.path.contains("attenuation")));
+    }
+
+    #[test]
+    fn test_offset_range_validation() {
+        let mut def = PatchDef::new("Test");
+        def.modules.push(ModuleDef::new("vco1", "vco"));
+        def.cables.push(CableDef::new("a.out", "b.in").with_offset(15.0)); // Out of range
+
+        let result = def.validate();
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.path.contains("offset")));
+    }
+
+    #[test]
+    fn test_validate_with_registry_unknown_module_type() {
+        let registry = ModuleRegistry::new();
+
+        let mut def = PatchDef::new("Test");
+        def.modules.push(ModuleDef::new("foo", "nonexistent_type"));
+
+        let result = def.validate_with_registry(&registry);
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.message.contains("Unknown module type")));
+    }
+
+    #[test]
+    fn test_validate_with_registry_unknown_module_reference() {
+        let registry = ModuleRegistry::new();
+
+        let mut def = PatchDef::new("Test");
+        def.modules.push(ModuleDef::new("vco1", "vco"));
+        def.cables.push(CableDef::new("nonexistent.out", "vco1.voct"));
+
+        let result = def.validate_with_registry(&registry);
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.message.contains("Unknown module")));
+    }
+
+    #[test]
+    fn test_validate_with_registry_unknown_port() {
+        let registry = ModuleRegistry::new();
+
+        let mut def = PatchDef::new("Test");
+        def.modules.push(ModuleDef::new("vco1", "vco"));
+        def.modules.push(ModuleDef::new("output", "stereo_output"));
+        def.cables.push(CableDef::new("vco1.nonexistent_port", "output.left"));
+
+        let result = def.validate_with_registry(&registry);
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.message.contains("Unknown output port")));
+    }
+
+    #[test]
+    fn test_validate_with_registry_valid_patch() {
+        let registry = ModuleRegistry::new();
+
+        let mut def = PatchDef::new("Valid Patch");
+        def.modules.push(ModuleDef::new("vco1", "vco"));
+        def.modules.push(ModuleDef::new("output", "stereo_output"));
+        def.cables.push(CableDef::new("vco1.saw", "output.left"));
+        def.cables.push(CableDef::new("vco1.sin", "output.right"));
+
+        let result = def.validate_with_registry(&registry);
+        assert!(result.valid, "Expected valid patch, got errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn test_is_valid_port_ref() {
+        assert!(is_valid_port_ref("vco1.out"));
+        assert!(is_valid_port_ref("module_name.port_name"));
+        assert!(is_valid_port_ref("a.b"));
+        assert!(is_valid_port_ref("my-module.my-port"));
+
+        assert!(!is_valid_port_ref("nodot"));
+        assert!(!is_valid_port_ref(".startswithdot"));
+        assert!(!is_valid_port_ref("endswithdot."));
+        assert!(!is_valid_port_ref(""));
+        assert!(!is_valid_port_ref("has spaces.port"));
+    }
+
+    #[test]
+    fn test_validation_error_display() {
+        let error = ValidationError::new("modules[0].name", "Name is empty");
+        let display = format!("{}", error);
+        assert_eq!(display, "modules[0].name: Name is empty");
     }
 }

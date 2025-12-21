@@ -1,0 +1,219 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://quiver.audio/schemas/patch.schema.json",
+  "title": "Quiver Patch",
+  "description": "A Quiver modular synthesizer patch definition",
+  "type": "object",
+  "required": ["version", "name", "modules", "cables"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Schema version for forward compatibility"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Patch name"
+    },
+    "author": {
+      "type": "string",
+      "description": "Patch author"
+    },
+    "description": {
+      "type": "string",
+      "description": "Patch description"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [],
+      "description": "Tags for categorization and search"
+    },
+    "modules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ModuleDef"
+      },
+      "description": "Module instances in the patch"
+    },
+    "cables": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CableDef"
+      },
+      "description": "Cable connections between modules"
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number"
+      },
+      "default": {},
+      "description": "Parameter values keyed by 'module_name.param_id'"
+    }
+  },
+  "$defs": {
+    "ModuleDef": {
+      "type": "object",
+      "required": ["name", "module_type"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique instance name within the patch"
+        },
+        "module_type": {
+          "type": "string",
+          "description": "Module type identifier from the registry",
+          "enum": [
+            "vco",
+            "analog_vco",
+            "lfo",
+            "svf",
+            "diode_ladder",
+            "adsr",
+            "vca",
+            "mixer",
+            "offset",
+            "unit_delay",
+            "multiple",
+            "attenuverter",
+            "slew_limiter",
+            "sample_and_hold",
+            "precision_adder",
+            "vc_switch",
+            "noise",
+            "step_sequencer",
+            "clock",
+            "saturator",
+            "wavefolder",
+            "ring_mod",
+            "crossfader",
+            "rectifier",
+            "crosstalk",
+            "ground_loop",
+            "logic_and",
+            "logic_or",
+            "logic_xor",
+            "logic_not",
+            "comparator",
+            "bernoulli_gate",
+            "min",
+            "max",
+            "stereo_output",
+            "quantizer"
+          ]
+        },
+        "position": {
+          "type": "array",
+          "items": [
+            { "type": "number" },
+            { "type": "number" }
+          ],
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "UI position as [x, y] coordinates"
+        },
+        "state": {
+          "type": "object",
+          "description": "Module-specific state for serialization"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CableDef": {
+      "type": "object",
+      "required": ["from", "to"],
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+$",
+          "description": "Source port reference as 'module_name.port_name'"
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+$",
+          "description": "Destination port reference as 'module_name.port_name'"
+        },
+        "attenuation": {
+          "type": "number",
+          "minimum": -2.0,
+          "maximum": 2.0,
+          "description": "Optional attenuation/gain (-2.0 to 2.0, unity = 1.0)"
+        },
+        "offset": {
+          "type": "number",
+          "minimum": -10.0,
+          "maximum": 10.0,
+          "description": "Optional DC offset in volts (-10.0 to 10.0V)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SignalKind": {
+      "type": "string",
+      "enum": [
+        "audio",
+        "cv_bipolar",
+        "cv_unipolar",
+        "volt_per_octave",
+        "gate",
+        "trigger",
+        "clock"
+      ],
+      "description": "Semantic signal type classification"
+    },
+    "PortDef": {
+      "type": "object",
+      "required": ["id", "name", "kind"],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Unique port identifier within the module"
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable port name"
+        },
+        "kind": {
+          "$ref": "#/$defs/SignalKind"
+        },
+        "default": {
+          "type": "number",
+          "description": "Default value when no cable is connected"
+        },
+        "normalled_to": {
+          "type": "integer",
+          "description": "Port ID this input is normalled to when unpatched"
+        },
+        "has_attenuverter": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this input has an associated attenuverter control"
+        }
+      }
+    },
+    "PortSpec": {
+      "type": "object",
+      "required": ["inputs", "outputs"],
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PortDef"
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PortDef"
+          }
+        }
+      }
+    }
+  }
+}
