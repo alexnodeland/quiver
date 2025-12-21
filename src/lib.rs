@@ -63,8 +63,9 @@ pub mod prelude {
 
     // Layer 2: Port System
     pub use crate::port::{
-        BlockPortValues, GraphModule, ModulatedParam, ParamDef, ParamId, ParamRange, PortDef,
-        PortId, PortSpec, PortValues, SignalKind,
+        ports_compatible, BlockPortValues, Compatibility, GraphModule, ModulatedParam, ParamDef,
+        ParamId, ParamRange, PortDef, PortId, PortInfo, PortSpec, PortValues, SignalColors,
+        SignalKind,
     };
 
     // Layer 3: Patch Graph

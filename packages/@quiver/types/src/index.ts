@@ -183,6 +183,40 @@ export interface PortDef {
 }
 
 /**
+ * Enhanced port information for GUI display
+ * Corresponds to Rust: PortInfo in src/port.rs
+ */
+export interface PortInfo {
+  /** Unique identifier within the module */
+  id: number;
+
+  /** Human-readable name */
+  name: string;
+
+  /** Signal type */
+  kind: SignalKind;
+
+  /** Port this is normalled to (by name, for UI display) */
+  normalled_to?: string;
+
+  /** Optional description for tooltips */
+  description?: string;
+}
+
+/**
+ * Convert a PortDef to PortInfo
+ */
+export function portDefToInfo(def: PortDef): PortInfo {
+  return {
+    id: def.id,
+    name: def.name,
+    kind: def.kind,
+    normalled_to: undefined, // PortDef uses ID, PortInfo uses name
+    description: undefined,
+  };
+}
+
+/**
  * Specification of all ports for a module
  * Corresponds to Rust: PortSpec in src/port.rs
  */
