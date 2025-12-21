@@ -44,14 +44,35 @@ jobs:
         run: cargo clippy --all-features -- -D warnings
 
   test:
-    name: Test
+    name: Test Suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run tests
+      - name: Run unit tests
         run: cargo test --all-features
+      - name: Run doc tests
+        run: cargo test --doc --all-features
+
+  examples:
+    name: Examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build all examples
+        run: cargo build --examples --all-features
+      - name: Run quick_taste example
+        run: cargo run --example quick_taste
+      - name: Run first_patch example
+        run: cargo run --example first_patch
+      - name: Run tutorial examples
+        run: |
+          cargo run --example tutorial_subtractive
+          cargo run --example tutorial_envelope
+          cargo run --example tutorial_filter_mod
 
   doc:
     name: Documentation
@@ -64,6 +85,11 @@ jobs:
         run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+      - name: Upload rustdoc
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdoc
+          path: target/doc/
 
   coverage:
     name: Coverage

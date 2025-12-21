@@ -1,22 +1,50 @@
 //! # Quiver: Modular Audio Synthesis Library
 //!
-//! `quiver` is a Rust library for building modular audio synthesis systems using a hybrid
-//! architecture that combines type-safe Arrow-style combinators for DSP construction with
-//! a flexible graph-based patching system for arbitrary signal routing.
+//! > *"A quiver is a directed graph—nodes connected by arrows. In audio, our nodes are
+//! > modules, our arrows are patch cables, and signal flows through their composition."*
 //!
-//! ## Architecture
+//! `quiver` is a Rust library for building modular audio synthesis systems. It combines
+//! the mathematical elegance of category theory with the tactile joy of patching a
+//! hardware modular synthesizer.
 //!
-//! The library is organized in three layers:
+//! ## Design Philosophy
 //!
-//! - **Layer 1: Typed Combinators** - Arrow-style DSP composition with compile-time type checking
-//! - **Layer 2: Port System** - Signal conventions, port definitions, and type-erased graph interface
-//! - **Layer 3: Patch Graph** - Runtime-configurable topology with arbitrary signal routing
+//! Quiver bridges two worlds:
 //!
-//! ## Phase 4 Features
+//! - **Mathematical Rigor**: Arrow-style functional combinators with compile-time type safety
+//! - **Hardware Semantics**: Voltage standards from Eurorack (±5V audio, 1V/octave, gates)
 //!
-//! - **Polyphony Support** - Voice allocation, per-voice modules, unison/spread
-//! - **Performance Optimization** - SIMD vectorization, block processing, lazy evaluation
-//! - **Extended I/O** - OSC protocol, plugin wrapper infrastructure, Web Audio interface
+//! The name comes from **category theory**, where a quiver is a directed graph forming
+//! the foundation for morphisms and composition—exactly what a modular synthesizer is.
+//!
+//! ## Three-Layer Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────┐
+//! │  Layer 3: Patch Graph                   │  Runtime topology
+//! │  - Dynamic patching at runtime          │  "Eurorack in software"
+//! │  - Topological sort for processing      │
+//! ├─────────────────────────────────────────┤
+//! │  Layer 2: Port System                   │  Signal conventions
+//! │  - SignalKind (Audio, CV, V/Oct, Gate)  │  "Hardware semantics"
+//! │  - PortDef, PortSpec, GraphModule       │
+//! ├─────────────────────────────────────────┤
+//! │  Layer 1: Typed Combinators             │  Type-safe composition
+//! │  - Module trait with associated types   │  "Arrow category"
+//! │  - Chain, Parallel, Fanout, Feedback    │
+//! └─────────────────────────────────────────┘
+//! ```
+//!
+//! ## Signal Conventions (Eurorack-inspired)
+//!
+//! | Signal Type | Range | Description |
+//! |-------------|-------|-------------|
+//! | Audio | ±5V | AC-coupled audio signals |
+//! | CV Unipolar | 0-10V | Filter cutoff, LFO rate |
+//! | CV Bipolar | ±5V | Pan, FM depth |
+//! | V/Oct | ±10V | Pitch (0V = C4 = 261.63 Hz) |
+//! | Gate | 0V or 5V | Sustained on/off |
+//! | Trigger | 0V or 5V | Brief pulse (1-10ms) |
 //!
 //! ## Quick Start
 //!
@@ -26,23 +54,147 @@
 //! // Create a patch at 44.1kHz sample rate
 //! let mut patch = Patch::new(44100.0);
 //!
-//! // Add modules
+//! // Add modules (classic subtractive: VCO → VCF → VCA → Output)
 //! let vco = patch.add("vco", Vco::new(44100.0));
 //! let vcf = patch.add("vcf", Svf::new(44100.0));
 //! let vca = patch.add("vca", Vca::new());
 //! let output = patch.add("output", StereoOutput::new());
 //!
-//! // Connect them
+//! // Patch cables (like a real modular synthesizer)
 //! patch.connect(vco.out("saw"), vcf.in_("in")).unwrap();
 //! patch.connect(vcf.out("lp"), vca.in_("in")).unwrap();
 //! patch.connect(vca.out("out"), output.in_("left")).unwrap();
 //!
-//! // Compile and run
+//! // Compile (performs topological sort) and process
 //! patch.set_output(output.id());
 //! patch.compile().unwrap();
 //!
-//! // Process audio
+//! // Generate audio sample by sample
 //! let (left, right) = patch.tick();
+//! ```
+//!
+//! ## Key Features
+//!
+//! - **50+ DSP Modules**: VCO, VCF, ADSR, LFO, Mixer, Sequencer, Ring Mod, and more
+//! - **Type-Safe Composition**: Layer 1 combinators catch errors at compile time
+//! - **Polyphony**: Voice allocation with multiple steal modes, unison, detune
+//! - **Analog Modeling**: Saturation curves, component tolerance, thermal drift
+//! - **Performance**: SIMD vectorization, block processing, lazy evaluation
+//! - **Serialization**: Save/load patches as JSON with ModuleRegistry
+//! - **Extended I/O**: OSC protocol, plugin wrappers, Web Audio integration
+//!
+//! ## Mathematical Foundations
+//!
+//! Layer 1 implements **Arrow** semantics from category theory:
+//!
+//! ```text
+//! chain:    (A → B) → (B → C) → (A → C)         // Sequential: f >>> g
+//! parallel: (A → B) → (C → D) → ((A,C) → (B,D)) // Parallel:   f *** g
+//! fanout:   (A → B) → (A → C) → (A → (B,C))     // Split:      f &&& g
+//! first:    (A → B) → ((A,C) → (B,C))           // First element only
+//! ```
+//!
+//! These combinators satisfy the Arrow laws, ensuring predictable composition.
+//!
+//! ## Module Documentation
+//!
+//! - [`combinator`] - Layer 1: Type-safe Arrow combinators
+//! - [`port`] - Layer 2: Signal types and port definitions
+//! - [`graph`] - Layer 3: Runtime patch graph
+//! - [`modules`] - Core DSP modules (VCO, VCF, ADSR, etc.)
+//! - [`analog`] - Analog modeling (saturation, drift, noise)
+//! - [`polyphony`] - Voice allocation and management
+//! - [`simd`] - Block processing and SIMD optimization
+//! - [`serialize`] - Patch serialization to JSON
+//! - [`mdk`] - Module Development Kit for custom modules
+//!
+//! ## Examples
+//!
+//! ### Creating a Simple VCO
+//!
+//! ```
+//! use quiver::prelude::*;
+//!
+//! // Create a patch
+//! let mut patch = Patch::new(44100.0);
+//!
+//! // Add a VCO and output
+//! let vco = patch.add("vco", Vco::new(44100.0));
+//! let output = patch.add("output", StereoOutput::new());
+//!
+//! // Connect VCO to output
+//! patch.connect(vco.out("saw"), output.in_("left")).unwrap();
+//! patch.set_output(output.id());
+//! patch.compile().unwrap();
+//!
+//! // Generate a sample
+//! let (left, right) = patch.tick();
+//! assert!(left.abs() <= 5.0); // Audio signal within ±5V
+//! ```
+//!
+//! ### V/Oct Pitch Conversion
+//!
+//! ```
+//! use quiver::prelude::*;
+//!
+//! // MIDI note to V/Oct conversion
+//! fn midi_to_voct(note: u8) -> f64 {
+//!     (note as f64 - 60.0) / 12.0
+//! }
+//!
+//! // C4 (MIDI 60) = 0V
+//! assert_eq!(midi_to_voct(60), 0.0);
+//!
+//! // C5 (MIDI 72) = +1V (one octave up)
+//! assert_eq!(midi_to_voct(72), 1.0);
+//!
+//! // C3 (MIDI 48) = -1V (one octave down)
+//! assert_eq!(midi_to_voct(48), -1.0);
+//! ```
+//!
+//! ### Signal Types
+//!
+//! ```
+//! use quiver::prelude::*;
+//!
+//! // SignalKind represents different voltage conventions
+//! let audio = SignalKind::Audio;           // ±5V audio signals
+//! let cv_uni = SignalKind::CvUnipolar;     // 0-10V control voltage
+//! let cv_bi = SignalKind::CvBipolar;       // ±5V control voltage
+//! let voct = SignalKind::VoltPerOctave;    // 1V/octave pitch
+//! let gate = SignalKind::Gate;             // 0V or +5V sustained
+//! let trig = SignalKind::Trigger;          // 0V or +5V brief pulse
+//!
+//! // Port definitions specify signal types for validation
+//! let audio_port = PortDef::new(0, "in", SignalKind::Audio);
+//! let cv_port = PortDef::new(1, "cutoff", SignalKind::CvUnipolar).with_default(5.0);
+//!
+//! assert!(matches!(audio_port.kind, SignalKind::Audio));
+//! assert!(matches!(cv_port.kind, SignalKind::CvUnipolar));
+//! assert_eq!(cv_port.default, 5.0);
+//! ```
+//!
+//! ### Serialization Round-Trip
+//!
+//! ```
+//! use quiver::prelude::*;
+//!
+//! // Create a patch
+//! let mut patch = Patch::new(44100.0);
+//! let vco = patch.add("vco", Vco::new(44100.0));
+//! let output = patch.add("output", StereoOutput::new());
+//! patch.connect(vco.out("saw"), output.in_("left")).unwrap();
+//! patch.set_output(output.id());
+//! patch.compile().unwrap();
+//!
+//! // Serialize to JSON
+//! let def = patch.to_def("Test Patch");
+//! let json = def.to_json().unwrap();
+//!
+//! // Deserialize and rebuild
+//! let loaded = PatchDef::from_json(&json).unwrap();
+//! assert_eq!(loaded.name, "Test Patch");
+//! assert_eq!(loaded.modules.len(), 2);
 //! ```
 
 pub mod analog;

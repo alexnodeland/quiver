@@ -1,0 +1,44 @@
+[book]
+title = "Quiver: Modular Audio Synthesis"
+authors = ["Quiver Contributors"]
+description = "A comprehensive guide to building modular audio synthesis systems with mathematical elegance"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = true
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/alexnodeland/quiver"
+edit-url-template = "https://github.com/alexnodeland/quiver/edit/main/docs/{path}"
+site-url = "/quiver/"
+no-section-label = false
+additional-css = ["custom.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.playground]
+editable = true
+line-numbers = true
+runnable = true
+
+[output.html.code]
+hidelines = { rust = "#" }
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+copy-js = true
+
+[rust]
+edition = "2021"
