@@ -69,13 +69,14 @@ jobs:
         run: cargo test --doc --all-features
 
   # MSRV - Minimum Supported Rust Version
+  # Note: Cargo.lock v4 format requires Rust 1.78+
   msrv:
-    name: MSRV (1.70)
+    name: MSRV (1.78)
     needs: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.70.0
+      - uses: dtolnay/rust-toolchain@1.78.0
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV compatibility
         run: cargo check --all-features
