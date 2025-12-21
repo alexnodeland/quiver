@@ -1,0 +1,58 @@
+# Configuration for probot/stale - https://github.com/probot/stale
+# Automatically marks issues and PRs as stale after a period of inactivity
+
+# Number of days of inactivity before an issue becomes stale
+daysUntilStale: 60
+
+# Number of days of inactivity before a stale issue is closed
+daysUntilClose: 14
+
+# Only issues or PRs with all of these labels are checked
+# Leave empty to check all issues and PRs
+onlyLabels: []
+
+# Issues or PRs with these labels will never be considered stale
+exemptLabels:
+  - pinned
+  - security
+  - bug
+  - good first issue
+  - help wanted
+  - in progress
+  - blocked
+
+# Set to true to ignore issues in a project
+exemptProjects: true
+
+# Set to true to ignore issues in a milestone
+exemptMilestones: true
+
+# Set to true to ignore issues with an assignee
+exemptAssignees: false
+
+# Label to use when marking as stale
+staleLabel: stale
+
+# Comment to post when marking an issue as stale
+markComment: >
+  This issue has been automatically marked as stale because it has not had
+  recent activity. It will be closed in 14 days if no further activity occurs.
+
+  If this issue is still relevant:
+  - Add a comment explaining the current status
+  - Remove the `stale` label
+
+  Thank you for your contributions!
+
+# Comment to post when closing a stale issue
+closeComment: >
+  This issue has been automatically closed due to inactivity.
+
+  If you believe this issue is still relevant, please:
+  1. Open a new issue with updated information
+  2. Reference this issue for context
+
+  Thank you for your understanding!
+
+# Limit the number of actions per run (0 = no limit)
+limitPerRun: 30

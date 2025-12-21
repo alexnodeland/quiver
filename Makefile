@@ -91,6 +91,8 @@ setup: install-hooks
 	cargo install cargo-tarpaulin || true
 	@echo "Installing mdbook for documentation..."
 	cargo install mdbook mdbook-mermaid || true
+	@echo "Installing git-cliff for changelog generation..."
+	cargo install git-cliff || true
 	@echo "Development environment ready!"
 
 # Install git hooks
@@ -106,9 +108,10 @@ install-hooks:
 pre-commit: fmt-check lint
 	@echo "Pre-commit checks passed!"
 
-# Generate changelog from git history
+# Generate changelog from git history using git-cliff
 changelog:
-	@./scripts/generate-changelog.sh
+	git cliff --output .github/CHANGELOG.md
+	@echo "Changelog updated: .github/CHANGELOG.md"
 
 # Build and run all examples
 examples:
@@ -167,7 +170,7 @@ help:
 	@echo "Setup:"
 	@echo "  make setup        - Setup development environment"
 	@echo "  make install-hooks- Install git hooks"
-	@echo "  make changelog    - Generate changelog"
+	@echo "  make changelog    - Generate changelog (requires git-cliff)"
 	@echo ""
 	@echo "Watching:"
 	@echo "  make watch        - Watch and run tests on changes"
