@@ -224,7 +224,7 @@ The following priorities have been identified for future development:
 
 | Priority | Description | Effort | Impact |
 |----------|-------------|--------|--------|
-| **Real-Time Latency Documentation** | Document latency constraints using existing benchmarks | Low | High |
+| ~~**Real-Time Latency Documentation**~~ | ✅ Documented in `docs/src/concepts/latency.md` | Low | High |
 | **GUI Integration Framework** | Position serialization is complete - add visual patching patterns | Medium | High |
 
 ### Medium Priority
@@ -247,7 +247,7 @@ The following priorities have been identified for future development:
 - DSP algorithm tutorials and deep dives
 - Analog modeling techniques guide
 - Performance optimization guide
-- Real-time audio constraints documentation
+- ~~Real-time audio constraints documentation~~ ✅ See `docs/src/concepts/latency.md`
 
 ### Future Architectural Considerations
 
