@@ -16,11 +16,10 @@ use crate::introspection::{ControlType, ModuleIntrospection, ParamCurve, ParamIn
 
 // Import all modules
 use crate::modules::{
-    Adsr, Attenuverter, BernoulliGate, Clock, Comparator, Crossfader, Crosstalk,
-    DiodeLadderFilter, GroundLoop, Lfo, LogicAnd, LogicNot, LogicOr, LogicXor, Max, Min, Mixer,
-    Multiple, NoiseGenerator, Offset, PrecisionAdder, Quantizer, Rectifier, RingModulator,
-    SampleAndHold, Scale, SlewLimiter, StepSequencer, StereoOutput, Svf, UnitDelay, Vca,
-    VcSwitch, Vco,
+    Adsr, Attenuverter, BernoulliGate, Clock, Comparator, Crossfader, Crosstalk, DiodeLadderFilter,
+    GroundLoop, Lfo, LogicAnd, LogicNot, LogicOr, LogicXor, Max, Min, Mixer, Multiple,
+    NoiseGenerator, Offset, PrecisionAdder, Quantizer, Rectifier, RingModulator, SampleAndHold,
+    Scale, SlewLimiter, StepSequencer, StereoOutput, Svf, UnitDelay, VcSwitch, Vca, Vco,
 };
 
 // Import analog modules
