@@ -188,6 +188,49 @@ The library now includes all Phase 1 (Core Foundation), Phase 2 (Hardware Fideli
 
 ---
 
+## Next Priorities
+
+The following priorities have been identified for future development:
+
+### High Priority
+
+| Priority | Description | Effort | Impact |
+|----------|-------------|--------|--------|
+| **`no_std` Support** | Add feature flag for embedded use (replace HashMap→BTreeMap, seedable RNG) | Medium | High |
+| **Real-Time Latency Documentation** | Document latency constraints using existing benchmarks | Low | High |
+| **GUI Integration Framework** | Position serialization is complete - add visual patching patterns | Medium | High |
+
+### Medium Priority
+
+| Priority | Description | Effort | Impact |
+|----------|-------------|--------|--------|
+| **Advanced Filter Models** | Moog ladder, Steiner-Parker, additional classic filters | Medium | High |
+| **Extended Modules** | Delay lines with feedback/saturation, reverbs, spectral processing | High | Medium |
+| **Plugin Integration Examples** | VST/AU wrapper examples, JACK/ALSA binding examples | Medium | Medium |
+
+### Technical Improvements
+
+- **Edge Case Testing**: Expand tests for NaN handling, extreme values, boundary conditions
+- **SIMD Coverage**: Broader testing of SIMD feature across different architectures
+- **Performance Profiling**: Profile and optimize hot paths at various buffer sizes
+- **Audio Comparison Tests**: Frequency response validation, regression test suite
+
+### Documentation Expansion
+
+- DSP algorithm tutorials and deep dives
+- Analog modeling techniques guide
+- Performance optimization guide
+- Real-time audio constraints documentation
+
+### Future Architectural Considerations
+
+- GUI reflection/introspection APIs for visual patching
+- Module browsing/discovery system
+- Plugin sandboxing patterns
+- Multi-threaded voice processing
+
+---
+
 ## Contributing
 
 Contributions are welcome! Here are areas where help is particularly appreciated:
