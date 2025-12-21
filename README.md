@@ -51,6 +51,7 @@ patch.connect(vco, "out", vcf, "input");
 - 🎹 **Polyphony**: Built-in voice allocation with multiple algorithms
 - ⚡ **SIMD Optimization**: Optional vectorized processing for performance-critical applications
 - 💾 **Serialization**: Save and load patches as JSON
+- 🔧 **`no_std` Support**: Run on embedded systems and WebAssembly targets
 
 ## 🏗️ Architecture
 
@@ -91,6 +92,28 @@ Add Quiver to your `Cargo.toml`:
 [dependencies]
 quiver = "0.1"
 ```
+
+### Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `std` | Yes | Full functionality with I/O, serialization, and visualization |
+| `simd` | No | SIMD vectorization for block processing |
+
+### `no_std` Support
+
+Quiver supports `no_std` environments for embedded systems and WebAssembly:
+
+```toml
+[dependencies]
+quiver = { version = "0.1", default-features = false }
+```
+
+In `no_std` mode, core DSP modules are available using `alloc` and `libm`. The following modules require `std`:
+- I/O modules (MIDI, external inputs)
+- Serialization (JSON save/load)
+- Visualization tools (Scope, Spectrum Analyzer)
+- Preset library and Module Development Kit
 
 Build a simple synthesizer patch:
 
