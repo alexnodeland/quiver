@@ -43,6 +43,7 @@
 - [Signal Conventions](./concepts/signals.md)
 - [Analog Modeling](./concepts/analog-modeling.md)
 - [Block Processing & SIMD](./concepts/performance.md)
+- [Real-Time Latency](./concepts/latency.md)
 
 ---
 
