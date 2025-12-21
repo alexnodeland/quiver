@@ -10,9 +10,9 @@
 //! - Lazy evaluation framework
 //! - SIMD-optimized common operations (when `simd` feature enabled)
 
+use crate::port::{BlockPortValues, GraphModule, PortValues};
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::port::{BlockPortValues, GraphModule, PortValues};
 use core::f64::consts::PI;
 use libm::Libm;
 

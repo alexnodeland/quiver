@@ -10,12 +10,12 @@
 //! - `PolyPatch` - A polyphonic patch containing multiple voice instances
 //! - `UnisonVoice` - Stacked voices with detuning for thick unison sounds
 
+use crate::graph::{Patch, PatchError};
+use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::graph::{Patch, PatchError};
-use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use libm::Libm;
 
 /// Voice allocation algorithm

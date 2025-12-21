@@ -197,9 +197,7 @@ pub fn random() -> f64 {
     #[cfg(not(feature = "std"))]
     {
         // Safety: Single-threaded no_std contexts only
-        unsafe {
-            RNG_STATE.next_f64()
-        }
+        unsafe { RNG_STATE.next_f64() }
     }
 }
 

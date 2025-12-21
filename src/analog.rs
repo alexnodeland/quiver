@@ -3,9 +3,9 @@
 //! This module provides primitives for modeling analog circuit behavior:
 //! saturation, soft clipping, component variation, thermal drift, and noise.
 
-use alloc::vec;
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use crate::rng;
+use alloc::vec;
 use core::f64::consts::TAU;
 use libm::Libm;
 

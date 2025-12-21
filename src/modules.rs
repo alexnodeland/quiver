@@ -3,10 +3,10 @@
 //! This module provides the essential building blocks for synthesis:
 //! oscillators, filters, envelopes, amplifiers, and utilities.
 
-use alloc::format;
-use alloc::vec;
 use crate::port::{GraphModule, ParamDef, ParamId, PortDef, PortSpec, PortValues, SignalKind};
 use crate::rng;
+use alloc::format;
+use alloc::vec;
 use core::f64::consts::{PI, TAU};
 use libm::Libm;
 

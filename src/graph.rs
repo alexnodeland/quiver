@@ -4,13 +4,13 @@
 //! arbitrary signal routing between modules. It handles topological sorting,
 //! execution ordering, and signal propagation.
 
+use crate::port::{GraphModule, ParamId, PortId, PortSpec, PortValues, SignalKind};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::port::{GraphModule, ParamId, PortId, PortSpec, PortValues, SignalKind};
 use serde::{Deserialize, Serialize};
 use slotmap::{DefaultKey, SlotMap};
 

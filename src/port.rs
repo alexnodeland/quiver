@@ -274,7 +274,9 @@ impl ParamRange {
                     min * Libm::<f64>::pow(max / min, clamped)
                 }
             }
-            ParamRange::VoltPerOctave { base_freq } => base_freq * Libm::<f64>::pow(2.0, normalized),
+            ParamRange::VoltPerOctave { base_freq } => {
+                base_freq * Libm::<f64>::pow(2.0, normalized)
+            }
         }
     }
 }
