@@ -1,4 +1,4 @@
-# Quiver
+# 🏹 Quiver
 
 [![CI](https://github.com/alexnodeland/quiver/actions/workflows/ci.yml/badge.svg)](https://github.com/alexnodeland/quiver/actions/workflows/ci.yml)
 [![Documentation](https://github.com/alexnodeland/quiver/actions/workflows/docs.yml/badge.svg)](https://github.com/alexnodeland/quiver/actions/workflows/docs.yml)
@@ -10,17 +10,17 @@ A modular audio synthesis library using Arrow-style combinators and graph-based 
 
 ## Table of Contents
 
-- [Why Quiver?](#why-quiver)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Quick Start](#quick-start)
-- [Documentation](#documentation)
-- [Examples](#examples)
-- [Development](#development)
-- [Contributing](#contributing)
-- [License](#license)
+- [Why Quiver?](#-why-quiver)
+- [Features](#-features)
+- [Architecture](#-architecture)
+- [Quick Start](#-quick-start)
+- [Documentation](#-documentation)
+- [Examples](#-examples)
+- [Development](#-development)
+- [Contributing](#-contributing)
+- [License](#-license)
 
-## Why Quiver?
+## 🤔 Why Quiver?
 
 Traditional audio synthesis libraries often force you to choose between:
 - **Low-level control** with verbose, error-prone code
@@ -30,10 +30,10 @@ Quiver gives you both. Inspired by category theory and modular synthesizers, it 
 
 | Approach | Benefit |
 |----------|---------|
-| **Arrow Combinators** | Compose modules like functions with type-safe operators |
-| **Patch Graph** | Visual, intuitive signal routing like hardware modular synths |
-| **Analog Modeling** | Authentic warmth with component drift and saturation |
-| **Zero Allocation** | Real-time safe with predictable performance |
+| 🔗 **Arrow Combinators** | Compose modules like functions with type-safe operators |
+| 🎛️ **Patch Graph** | Visual, intuitive signal routing like hardware modular synths |
+| 🎚️ **Analog Modeling** | Authentic warmth with component drift and saturation |
+| ⚡ **Zero Allocation** | Real-time safe with predictable performance |
 
 ```rust
 // Compose modules functionally
@@ -43,16 +43,16 @@ let synth = oscillator >>> filter >>> amplifier;
 patch.connect(vco, "out", vcf, "input");
 ```
 
-## Features
+## ✨ Features
 
-- **Typed Combinators**: Compose audio modules using category-theory-inspired operators (`>>>`, `***`, `&&&`)
-- **Graph-Based Patching**: Build complex synthesizer patches with a flexible node/cable system
-- **Analog Modeling**: Realistic VCO drift, filter saturation, and component tolerances
-- **Polyphony**: Built-in voice allocation with multiple algorithms
-- **SIMD Optimization**: Optional vectorized processing for performance-critical applications
-- **Serialization**: Save and load patches as JSON
+- 🔗 **Typed Combinators**: Compose audio modules using category-theory-inspired operators (`>>>`, `***`, `&&&`)
+- 🎛️ **Graph-Based Patching**: Build complex synthesizer patches with a flexible node/cable system
+- 🎚️ **Analog Modeling**: Realistic VCO drift, filter saturation, and component tolerances
+- 🎹 **Polyphony**: Built-in voice allocation with multiple algorithms
+- ⚡ **SIMD Optimization**: Optional vectorized processing for performance-critical applications
+- 💾 **Serialization**: Save and load patches as JSON
 
-## Architecture
+## 🏗️ Architecture
 
 Quiver is built in three composable layers:
 
@@ -83,7 +83,7 @@ graph TD
 **Layer 2 - Ports**: Rich metadata for inputs/outputs with modulation support
 **Layer 3 - Graph**: Visual patching with cables, mixing, and normalled connections
 
-## Quick Start
+## 🚀 Quick Start
 
 Add Quiver to your `Cargo.toml`:
 
@@ -117,16 +117,16 @@ fn main() {
 }
 ```
 
-## Documentation
+## 📚 Documentation
 
 | Resource | Description |
 |----------|-------------|
-| [User Guide](https://alexnodeland.github.io/quiver/) | Comprehensive tutorials and concepts |
-| [API Reference](https://alexnodeland.github.io/quiver/api/quiver/) | Rustdoc documentation |
-| [Examples](./examples/) | Runnable example patches |
-| [DEVELOPMENT.md](./DEVELOPMENT.md) | Architecture decisions and roadmap |
+| 📖 [User Guide](https://alexnodeland.github.io/quiver/) | Comprehensive tutorials and concepts |
+| 📋 [API Reference](https://alexnodeland.github.io/quiver/api/quiver/) | Rustdoc documentation |
+| 💡 [Examples](./examples/) | Runnable example patches |
+| 🗺️ [DEVELOPMENT.md](./DEVELOPMENT.md) | Architecture decisions and roadmap |
 
-## Examples
+## 🎵 Examples
 
 Run the examples to hear Quiver in action:
 
@@ -154,7 +154,7 @@ cargo run --example
 | `tutorial_subtractive` | Classic subtractive synthesis |
 | `howto_midi` | MIDI input handling |
 
-## Development
+## 🛠️ Development
 
 ```bash
 # Setup development environment (installs tools and git hooks)
@@ -178,7 +178,7 @@ make help
 
 See [DEVELOPMENT.md](./DEVELOPMENT.md) for the development roadmap and architecture decisions.
 
-## Contributing
+## 🤝 Contributing
 
 Contributions are welcome! Please read our [Contributing Guidelines](./.github/CONTRIBUTING.md) before submitting a PR.
 
@@ -186,10 +186,10 @@ Contributions are welcome! Please read our [Contributing Guidelines](./.github/C
 
 | Area | Examples |
 |------|----------|
-| **DSP Algorithms** | Filter models, oscillator antialiasing, effects |
-| **Testing** | Audio comparison tests, performance benchmarks |
-| **Documentation** | Tutorials, examples, API docs |
-| **Modules** | Classic hardware module implementations |
+| 🔊 **DSP Algorithms** | Filter models, oscillator antialiasing, effects |
+| 🧪 **Testing** | Audio comparison tests, performance benchmarks |
+| 📝 **Documentation** | Tutorials, examples, API docs |
+| 🎛️ **Modules** | Classic hardware module implementations |
 
 ### Quick Contribution Guide
 
@@ -202,6 +202,6 @@ Contributions are welcome! Please read our [Contributing Guidelines](./.github/C
 
 Look for issues labeled [`good first issue`](https://github.com/alexnodeland/quiver/labels/good%20first%20issue) to get started!
 
-## License
+## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
