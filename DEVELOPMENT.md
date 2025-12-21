@@ -186,6 +186,34 @@ The library now includes all Phase 1 (Core Foundation), Phase 2 (Hardware Fideli
    - [x] `SpectrumAnalyzer` - FFT-based frequency analysis
    - [x] `LevelMeter` - RMS/peak level monitoring with hold
 
+#### `no_std` Support (Complete)
+
+The library now supports `no_std` environments for embedded and WASM targets:
+
+- [x] Feature flag based opt-in (`std` feature enabled by default)
+- [x] `BTreeMap` used instead of `HashMap` for `no_std` compatibility
+- [x] Seedable `Xorshift128+` RNG module for deterministic random generation
+- [x] `libm` integration for math functions (sin, cos, pow, sqrt, etc.)
+- [x] `alloc` crate usage for heap allocations (Vec, Box, String)
+- [x] `core::` primitives instead of `std::` (PhantomData, Ordering, f64::consts)
+
+**Usage**:
+```toml
+# Default (with std)
+quiver = "0.1"
+
+# For no_std (embedded/WASM)
+quiver = { version = "0.1", default-features = false }
+```
+
+**Note**: The following modules require `std` and are not available in `no_std` mode:
+- `io` - External I/O (AtomicF64, MidiState)
+- `extended_io` - OSC, plugin wrapper, Web Audio interfaces
+- `serialize` - JSON serialization
+- `visual` - Visualization tools (Scope, Spectrum, etc.)
+- `mdk` - Module Development Kit
+- `presets` - Preset library
+
 ---
 
 ## Next Priorities
@@ -196,7 +224,6 @@ The following priorities have been identified for future development:
 
 | Priority | Description | Effort | Impact |
 |----------|-------------|--------|--------|
-| **`no_std` Support** | Add feature flag for embedded use (replace HashMap→BTreeMap, seedable RNG) | Medium | High |
 | **Real-Time Latency Documentation** | Document latency constraints using existing benchmarks | Low | High |
 | **GUI Integration Framework** | Position serialization is complete - add visual patching patterns | Medium | High |
 
@@ -258,13 +285,35 @@ All audio processing uses `f64` for:
 - Consistent with scientific computing conventions
 - Down-convert to f32 only at I/O boundaries
 
-### Why No `no_std`?
-Current implementation requires `std` for:
-- `HashMap` in `PortValues` and serialization
-- Random number generation
-- Potential future threading support
+### `no_std` Support
 
-Consider adding a `no_std` feature in the future with alternative implementations.
+The library supports three feature tiers for different environments:
+
+| Tier | Feature | Use Case |
+|------|---------|----------|
+| Core | `default-features = false` | Bare-metal embedded, no heap |
+| Alloc | `features = ["alloc"]` | WASM web apps, embedded with heap |
+| Std | default | Desktop apps, DAW plugins |
+
+**Tier 1 (Core)**: All DSP modules using `alloc`, `libm`, and `BTreeMap`
+**Tier 2 (Alloc)**: Adds serialization, presets, and I/O modules
+**Tier 3 (Std)**: Adds OSC, plugin wrappers, visualization, and MDK
+
+Key adaptations for non-std modes:
+- `BTreeMap` replaces `HashMap` for ordered, `alloc`-compatible collections
+- Seedable `Xorshift128+` RNG replaces `rand` crate
+- `libm` provides math functions (sin, cos, pow, sqrt, etc.)
+- `core::` primitives replace `std::` equivalents
+
+For WASM web apps with save/load support:
+```toml
+quiver = { version = "0.1", default-features = false, features = ["alloc"] }
+```
+
+For embedded without heap:
+```toml
+quiver = { version = "0.1", default-features = false }
+```
 
 ---
 

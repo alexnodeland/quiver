@@ -51,6 +51,7 @@ patch.connect(vco, "out", vcf, "input");
 - 🎹 **Polyphony**: Built-in voice allocation with multiple algorithms
 - ⚡ **SIMD Optimization**: Optional vectorized processing for performance-critical applications
 - 💾 **Serialization**: Save and load patches as JSON
+- 🔧 **`no_std` Support**: Run on embedded systems and WebAssembly targets
 
 ## 🏗️ Architecture
 
@@ -91,6 +92,35 @@ Add Quiver to your `Cargo.toml`:
 [dependencies]
 quiver = "0.1"
 ```
+
+### Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `std` | Yes | Full functionality including OSC, plugins, visualization (implies `alloc`) |
+| `alloc` | No | Serialization, presets, and I/O for `no_std` + heap environments |
+| `simd` | No | SIMD vectorization for block processing (works with any tier) |
+
+### `no_std` Support
+
+Quiver supports three tiers for different environments:
+
+```toml
+# Tier 1: Core DSP only (embedded, no heap)
+quiver = { version = "0.1", default-features = false }
+
+# Tier 2: With serialization & presets (WASM web apps)
+quiver = { version = "0.1", default-features = false, features = ["alloc"] }
+
+# Tier 3: Full std (desktop apps, default)
+quiver = "0.1"
+```
+
+| Tier | DSP | Serialize | Presets | I/O | OSC/Plugins | Visual |
+|------|-----|-----------|---------|-----|-------------|--------|
+| Core | ✓ | | | | | |
+| `alloc` | ✓ | ✓ | ✓ | ✓ | | |
+| `std` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 Build a simple synthesizer patch:
 

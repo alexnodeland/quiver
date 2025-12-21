@@ -4,8 +4,10 @@
 //! external systems: MIDI controllers, audio interfaces, etc.
 
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Atomic f64 for lock-free communication between threads
 ///
@@ -373,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "std")]
     fn test_atomic_f64_thread_safe() {
         let a = Arc::new(AtomicF64::new(0.0));
         let a2 = Arc::clone(&a);
@@ -476,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_atomic_f64_load_store() {
-        use std::sync::atomic::Ordering;
+        use core::sync::atomic::Ordering;
         let a = AtomicF64::new(1.0);
         assert!((a.load(Ordering::SeqCst) - 1.0).abs() < 0.001);
 

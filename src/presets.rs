@@ -6,6 +6,9 @@
 //! - Tutorial patches for learning
 
 use crate::serialize::{CableDef, ModuleDef, PatchDef};
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// Preset category for organization
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

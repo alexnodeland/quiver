@@ -4,7 +4,11 @@
 //! oscillators, filters, envelopes, amplifiers, and utilities.
 
 use crate::port::{GraphModule, ParamDef, ParamId, PortDef, PortSpec, PortValues, SignalKind};
-use std::f64::consts::{PI, TAU};
+use crate::rng;
+use alloc::format;
+use alloc::vec;
+use core::f64::consts::{PI, TAU};
+use libm::Libm;
 
 /// Voltage-Controlled Oscillator (VCO)
 ///
@@ -61,8 +65,8 @@ impl GraphModule for Vco {
         let sync = inputs.get_or(3, 0.0);
 
         // V/Oct to frequency: 0V = C4 (261.63 Hz)
-        let base_freq = 261.63 * 2.0_f64.powf(voct);
-        let freq = base_freq * 2.0_f64.powf(fm);
+        let base_freq = 261.63 * Libm::<f64>::pow(2.0, voct);
+        let freq = base_freq * Libm::<f64>::pow(2.0, fm);
 
         // Hard sync on rising edge
         if sync > 2.5 && self.last_sync <= 2.5 {
@@ -71,8 +75,8 @@ impl GraphModule for Vco {
         self.last_sync = sync;
 
         // Generate waveforms (±5V range)
-        let sin = (self.phase * TAU).sin() * 5.0;
-        let tri = (1.0 - 4.0 * (self.phase - 0.5).abs()) * 5.0;
+        let sin = Libm::<f64>::sin(self.phase * TAU) * 5.0;
+        let tri = (1.0 - 4.0 * Libm::<f64>::fabs(self.phase - 0.5)) * 5.0;
         let saw = (2.0 * self.phase - 1.0) * 5.0;
         let sqr = if self.phase < pw { 5.0 } else { -5.0 };
 
@@ -82,7 +86,8 @@ impl GraphModule for Vco {
         outputs.set(13, sqr);
 
         // Advance phase
-        self.phase = (self.phase + freq / self.sample_rate).fract();
+        let new_phase = self.phase + freq / self.sample_rate;
+        self.phase = new_phase - Libm::<f64>::floor(new_phase);
         if self.phase < 0.0 {
             self.phase += 1.0;
         }
@@ -156,7 +161,7 @@ impl GraphModule for Lfo {
         let reset = inputs.get_or(2, 0.0);
 
         // Map rate CV (0-1) to frequency (0.01 Hz - 30 Hz, exponential)
-        let freq = 0.01 * (3000.0_f64).powf(rate_cv.clamp(0.0, 1.0));
+        let freq = 0.01 * Libm::<f64>::pow(3000.0, rate_cv.clamp(0.0, 1.0));
 
         // Reset on trigger
         if reset > 2.5 && self.last_reset <= 2.5 {
@@ -166,11 +171,11 @@ impl GraphModule for Lfo {
 
         // Generate waveforms scaled by depth (±5V * depth)
         let scale = 5.0 * depth;
-        let sin = (self.phase * TAU).sin() * scale;
-        let tri = (1.0 - 4.0 * (self.phase - 0.5).abs()) * scale;
+        let sin = Libm::<f64>::sin(self.phase * TAU) * scale;
+        let tri = (1.0 - 4.0 * Libm::<f64>::fabs(self.phase - 0.5)) * scale;
         let saw = (2.0 * self.phase - 1.0) * scale;
         let sqr = if self.phase < 0.5 { scale } else { -scale };
-        let sin_uni = ((self.phase * TAU).sin() * 0.5 + 0.5) * depth * 10.0;
+        let sin_uni = (Libm::<f64>::sin(self.phase * TAU) * 0.5 + 0.5) * depth * 10.0;
 
         outputs.set(10, sin);
         outputs.set(11, tri);
@@ -178,7 +183,8 @@ impl GraphModule for Lfo {
         outputs.set(13, sqr);
         outputs.set(14, sin_uni);
 
-        self.phase = (self.phase + freq / self.sample_rate).fract();
+        let new_phase = self.phase + freq / self.sample_rate;
+        self.phase = new_phase - Libm::<f64>::floor(new_phase);
     }
 
     fn reset(&mut self) {
@@ -264,14 +270,14 @@ impl GraphModule for Svf {
         let keytrack_amt = inputs.get_or(5, 0.0).clamp(0.0, 1.0);
 
         // Calculate base cutoff frequency
-        let base_cutoff_hz = 20.0 * (1000.0_f64).powf(cutoff_cv.clamp(0.0, 1.0));
+        let base_cutoff_hz = 20.0 * Libm::<f64>::pow(1000.0, cutoff_cv.clamp(0.0, 1.0));
 
         // Apply keyboard tracking: each octave of V/Oct doubles the cutoff
-        let keytrack_multiplier = 2.0_f64.powf(keytrack_voct * keytrack_amt);
+        let keytrack_multiplier = Libm::<f64>::pow(2.0, keytrack_voct * keytrack_amt);
         let cutoff_hz = (base_cutoff_hz * keytrack_multiplier).clamp(20.0, 20000.0);
 
-        let f = 2.0 * (PI * cutoff_hz / self.sample_rate).sin();
-        let f = f.min(0.99); // Prevent instability
+        let f = 2.0 * Libm::<f64>::sin(PI * cutoff_hz / self.sample_rate);
+        let f = Libm::<f64>::fmin(f, 0.99); // Prevent instability
 
         // Phase 3: Self-oscillation at high resonance
         // When res > 0.95, allow Q to go below zero for self-oscillation
@@ -291,7 +297,7 @@ impl GraphModule for Svf {
 
         // Soft clip to prevent runaway in self-oscillation mode
         let band_out = if res > 0.95 {
-            (self.band * 0.5).tanh() * 2.0
+            Libm::<f64>::tanh(self.band * 0.5) * 2.0
         } else {
             self.band
         };
@@ -374,9 +380,9 @@ impl DiodeLadderFilter {
     fn diode_sat(x: f64) -> f64 {
         // Asymmetric tanh-like saturation mimicking diode behavior
         if x >= 0.0 {
-            (x * 1.2).tanh()
+            Libm::<f64>::tanh(x * 1.2)
         } else {
-            (x * 0.8).tanh()
+            Libm::<f64>::tanh(x * 0.8)
         }
     }
 }
@@ -401,15 +407,15 @@ impl GraphModule for DiodeLadderFilter {
         let drive = inputs.get_or(6, 0.0).clamp(0.0, 1.0);
 
         // Calculate base cutoff frequency (20 Hz - 20 kHz)
-        let base_cutoff_hz = 20.0 * (1000.0_f64).powf(cutoff_cv.clamp(0.0, 1.0));
+        let base_cutoff_hz = 20.0 * Libm::<f64>::pow(1000.0, cutoff_cv.clamp(0.0, 1.0));
 
         // Apply keyboard tracking
-        let keytrack_multiplier = 2.0_f64.powf(keytrack_voct * keytrack_amt);
+        let keytrack_multiplier = Libm::<f64>::pow(2.0, keytrack_voct * keytrack_amt);
         let cutoff_hz = (base_cutoff_hz * keytrack_multiplier).clamp(20.0, 20000.0);
 
         // Calculate filter coefficient (using bilinear transform approximation)
         let wc = PI * cutoff_hz / self.sample_rate;
-        let g = wc.tan();
+        let g = Libm::<f64>::tan(wc);
         let g1 = g / (1.0 + g);
 
         // Resonance with self-oscillation capability
@@ -521,7 +527,7 @@ impl Adsr {
 
     fn cv_to_time(&self, cv: f64) -> f64 {
         // Map 0-1 CV to 1ms - 10s (exponential)
-        0.001 * (10000.0_f64).powf(cv.clamp(0.0, 1.0))
+        0.001 * Libm::<f64>::pow(10000.0, cv.clamp(0.0, 1.0))
     }
 }
 
@@ -859,7 +865,7 @@ impl PinkNoiseState {
 
         for i in 0..changed_bits.min(16) {
             self.running_sum -= self.rows[i];
-            self.rows[i] = rand::random::<f64>() * 2.0 - 1.0;
+            self.rows[i] = rng::random_bipolar();
             self.running_sum += self.rows[i];
         }
 
@@ -931,11 +937,11 @@ impl GraphModule for NoiseGenerator {
         let correlation = inputs.get_or(0, self.correlation).clamp(0.0, 1.0);
 
         // Primary white noise
-        let white1 = rand::random::<f64>() * 2.0 - 1.0;
+        let white1 = rng::random_bipolar();
 
         // Phase 3: Correlated white noise for second channel
         // Mix between independent noise and correlated (shared) noise
-        let independent = rand::random::<f64>() * 2.0 - 1.0;
+        let independent = rng::random_bipolar();
         let white2 = white1 * correlation + independent * (1.0 - correlation);
 
         // Primary pink noise
@@ -1126,20 +1132,21 @@ impl GraphModule for GroundLoop {
         let freq = if freq_select > 0.5 { 60.0 } else { 50.0 };
 
         // Update thermal state based on signal energy (slow integration)
-        let signal_energy = (input / 5.0).powi(2);
+        let signal_energy = Libm::<f64>::pow(input / 5.0, 2.0);
         self.thermal_state += (signal_energy - self.thermal_state) * 0.0001;
 
         // Modulated hum level based on signal activity
         let modulated_level = level * (1.0 + self.thermal_state * modulation * 10.0);
 
         // Generate hum with harmonics (fundamental + 2nd + 3rd harmonic)
-        let fundamental = (self.phase * TAU).sin();
-        let second_harmonic = (self.phase * 2.0 * TAU).sin() * 0.5;
-        let third_harmonic = (self.phase * 3.0 * TAU).sin() * 0.25;
+        let fundamental = Libm::<f64>::sin(self.phase * TAU);
+        let second_harmonic = Libm::<f64>::sin(self.phase * 2.0 * TAU) * 0.5;
+        let third_harmonic = Libm::<f64>::sin(self.phase * 3.0 * TAU) * 0.25;
         let hum = (fundamental + second_harmonic + third_harmonic) * modulated_level * 5.0;
 
         // Advance phase
-        self.phase = (self.phase + freq / self.sample_rate).fract();
+        let new_phase = self.phase + freq / self.sample_rate;
+        self.phase = new_phase - Libm::<f64>::floor(new_phase);
 
         outputs.set(10, input + hum);
     }
@@ -1411,7 +1418,7 @@ impl SlewLimiter {
     fn cv_to_rate(&self, cv: f64) -> f64 {
         // Map 0-1 CV to rate: 0 = instant, 1 = very slow (~10 seconds)
         // Rate is in units per sample
-        let time = 0.001 + cv.clamp(0.0, 1.0).powi(2) * 10.0; // 1ms to 10s
+        let time = 0.001 + Libm::<f64>::pow(cv.clamp(0.0, 1.0), 2.0) * 10.0; // 1ms to 10s
         1.0 / (time * self.sample_rate)
     }
 }
@@ -1437,11 +1444,11 @@ impl GraphModule for SlewLimiter {
         if diff > 0.0 {
             // Rising
             let rate = self.cv_to_rate(rise_cv);
-            self.current += diff.min(rate * 10.0); // Scale for voltage range
+            self.current += Libm::<f64>::fmin(diff, rate * 10.0); // Scale for voltage range
         } else if diff < 0.0 {
             // Falling
             let rate = self.cv_to_rate(fall_cv);
-            self.current += diff.max(-rate * 10.0);
+            self.current += Libm::<f64>::fmax(diff, -rate * 10.0);
         }
 
         outputs.set(10, self.current);
@@ -1532,7 +1539,7 @@ impl Quantizer {
         let total_semitones = voltage * 12.0;
 
         // Find octave and position within octave
-        let octave = (total_semitones / 12.0).floor();
+        let octave = Libm::<f64>::floor(total_semitones / 12.0);
         let within_octave = total_semitones - octave * 12.0;
 
         // Find nearest scale degree
@@ -1616,7 +1623,7 @@ impl Clock {
 
     fn cv_to_bpm(cv: f64) -> f64 {
         // Map 0-10V to 20-300 BPM (exponential)
-        20.0 * (15.0_f64).powf(cv / 10.0)
+        20.0 * Libm::<f64>::pow(15.0, cv / 10.0)
     }
 }
 
@@ -1649,8 +1656,10 @@ impl GraphModule for Clock {
 
         // Divided outputs (using integer phase counting would be cleaner,
         // but this works for demonstration)
-        let div2_phase = (self.phase * 0.5).fract();
-        let div4_phase = (self.phase * 0.25).fract();
+        let div2_raw = self.phase * 0.5;
+        let div4_raw = self.phase * 0.25;
+        let div2_phase = div2_raw - Libm::<f64>::floor(div2_raw);
+        let div4_phase = div4_raw - Libm::<f64>::floor(div4_raw);
         let div2_out = if div2_phase < pulse_width { 5.0 } else { 0.0 };
         let div4_out = if div4_phase < pulse_width { 5.0 } else { 0.0 };
 
@@ -1659,7 +1668,8 @@ impl GraphModule for Clock {
         outputs.set(12, div4_out);
 
         // Advance phase
-        self.phase = (self.phase + freq / self.sample_rate).fract();
+        let new_phase = self.phase + freq / self.sample_rate;
+        self.phase = new_phase - Libm::<f64>::floor(new_phase);
     }
 
     fn reset(&mut self) {
@@ -1881,8 +1891,8 @@ impl GraphModule for Crossfader {
         let mix = mix.clamp(0.0, 1.0);
 
         // Equal-power crossfade for smoother transitions
-        let a_gain = (1.0 - mix).sqrt();
-        let b_gain = mix.sqrt();
+        let a_gain = Libm::<f64>::sqrt(1.0 - mix);
+        let b_gain = Libm::<f64>::sqrt(mix);
 
         // Main output: crossfade between A and B
         let out = a * a_gain + b * b_gain;
@@ -2192,16 +2202,16 @@ impl GraphModule for Rectifier {
         let input = inputs.get_or(0, 0.0);
 
         // Full-wave rectification: absolute value, keeps ±5V range as 0-5V
-        outputs.set(10, input.abs());
+        outputs.set(10, Libm::<f64>::fabs(input));
 
         // Half-wave positive: pass positive, block negative
-        outputs.set(11, input.max(0.0));
+        outputs.set(11, Libm::<f64>::fmax(input, 0.0));
 
         // Half-wave negative: pass negative inverted, block positive
-        outputs.set(12, (-input).max(0.0));
+        outputs.set(12, Libm::<f64>::fmax(-input, 0.0));
 
         // Absolute value scaled to 0-10V unipolar (input ±5V -> output 0-10V)
-        outputs.set(13, input.abs() * 2.0);
+        outputs.set(13, Libm::<f64>::fabs(input) * 2.0);
     }
 
     fn reset(&mut self) {}
@@ -2391,8 +2401,8 @@ impl GraphModule for BernoulliGate {
 
         if rising_edge {
             // Random decision based on probability
-            let rand: f64 = rand::random();
-            if rand < prob {
+            let rand_val: f64 = rng::random();
+            if rand_val < prob {
                 trig_a = 5.0;
             } else {
                 trig_b = 5.0;
@@ -2470,7 +2480,7 @@ impl GraphModule for Min {
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
         let a = inputs.get_or(0, 0.0);
         let b = inputs.get_or(1, 0.0);
-        outputs.set(10, a.min(b));
+        outputs.set(10, Libm::<f64>::fmin(a, b));
     }
 
     fn reset(&mut self) {}
@@ -2517,7 +2527,7 @@ impl GraphModule for Max {
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
         let a = inputs.get_or(0, 0.0);
         let b = inputs.get_or(1, 0.0);
-        outputs.set(10, a.max(b));
+        outputs.set(10, Libm::<f64>::fmax(a, b));
     }
 
     fn reset(&mut self) {}

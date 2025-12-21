@@ -34,10 +34,69 @@ quiver = { git = "https://github.com/alexnodeland/quiver", features = ["simd"] }
 
 ### Available Features
 
-| Feature | Description |
-|---------|-------------|
-| `default` | Core functionality |
-| `simd` | SIMD vectorization for block processing |
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `std` | Yes | Full functionality including OSC, plugins, visualization (implies `alloc`) |
+| `alloc` | No | Serialization, presets, and I/O for `no_std` + heap environments |
+| `simd` | No | SIMD vectorization for block processing (works with any tier) |
+
+### Feature Tiers
+
+Quiver supports three tiers for different environments:
+
+#### Tier 1: Core Only (`default-features = false`)
+
+For bare-metal embedded systems without heap allocation:
+
+```toml
+[dependencies]
+quiver = { git = "https://github.com/alexnodeland/quiver", default-features = false }
+```
+
+Includes all core DSP modules: oscillators, filters, envelopes, amplifiers, mixers, utilities, logic modules, analog modeling, polyphony, and the patch graph.
+
+#### Tier 2: With Alloc (`features = ["alloc"]`)
+
+For WASM web apps and embedded systems with heap:
+
+```toml
+[dependencies]
+quiver = { git = "https://github.com/alexnodeland/quiver", default-features = false, features = ["alloc"] }
+```
+
+Adds:
+- **Serialization** - JSON save/load for patches (`PatchDef`, `ModuleDef`, `CableDef`)
+- **Presets** - Ready-to-use patch presets (`ClassicPresets`, `PresetLibrary`)
+- **I/O Modules** - External inputs/outputs, MIDI state (`AtomicF64`, `MidiState`)
+
+#### Tier 3: Full Std (default)
+
+For desktop applications and DAW plugins:
+
+```toml
+[dependencies]
+quiver = { git = "https://github.com/alexnodeland/quiver" }
+```
+
+Adds:
+- **Extended I/O** - OSC protocol, plugin wrappers, Web Audio interfaces
+- **Visual Tools** - Scope, Spectrum Analyzer, Level Meter, Automation Recorder
+- **MDK** - Module Development Kit for creating custom modules
+
+#### Feature Matrix
+
+| Tier | DSP | Serialize | Presets | I/O | OSC/Plugins | Visual | MDK |
+|------|-----|-----------|---------|-----|-------------|--------|-----|
+| Core | ✓ | | | | | | |
+| `alloc` | ✓ | ✓ | ✓ | ✓ | | | |
+| `std` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+#### Implementation Notes
+
+- Uses `BTreeMap` instead of `HashMap` in non-std modes (no hashing required)
+- Includes a seedable Xorshift128+ RNG for deterministic random generation
+- Math functions provided by `libm` (sin, cos, pow, sqrt, exp, log, etc.)
+- Heap allocations via `alloc` crate (Vec, Box, String)
 
 ## Verifying Installation
 

@@ -5,9 +5,15 @@
 //! execution ordering, and signal propagation.
 
 use crate::port::{GraphModule, ParamId, PortId, PortSpec, PortValues, SignalKind};
+use crate::StdMap;
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 use slotmap::{DefaultKey, SlotMap};
-use std::collections::{HashMap, VecDeque};
 
 /// Signal validation strictness level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -128,7 +134,7 @@ pub type NodeId = DefaultKey;
 pub type CableId = usize;
 
 /// Reference to a specific port on a specific node
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PortRef {
     pub node: NodeId,
     pub port: PortId,
@@ -171,8 +177,8 @@ pub enum PatchError {
     },
 }
 
-impl std::fmt::Display for PatchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for PatchError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             PatchError::InvalidNode => write!(f, "Invalid node"),
             PatchError::InvalidPort => write!(f, "Invalid port"),
@@ -194,6 +200,7 @@ impl std::fmt::Display for PatchError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for PatchError {}
 
 /// Handle to a node for ergonomic port references
@@ -245,7 +252,7 @@ pub struct Patch {
 
     // Execution state
     execution_order: Vec<NodeId>,
-    buffers: HashMap<PortRef, f64>,
+    buffers: StdMap<PortRef, f64>,
 
     // Configuration
     sample_rate: f64,
@@ -265,7 +272,7 @@ impl Patch {
             nodes: SlotMap::new(),
             cables: Vec::new(),
             execution_order: Vec::new(),
-            buffers: HashMap::new(),
+            buffers: StdMap::new(),
             sample_rate,
             output_node: None,
             validation_mode: ValidationMode::None,
@@ -604,8 +611,8 @@ impl Patch {
     }
 
     fn topological_sort(&self) -> Result<Vec<NodeId>, PatchError> {
-        let mut in_degree: HashMap<NodeId, usize> = self.nodes.keys().map(|k| (k, 0)).collect();
-        let mut successors: HashMap<NodeId, Vec<NodeId>> =
+        let mut in_degree: StdMap<NodeId, usize> = self.nodes.keys().map(|k| (k, 0)).collect();
+        let mut successors: StdMap<NodeId, Vec<NodeId>> =
             self.nodes.keys().map(|k| (k, vec![])).collect();
 
         for cable in &self.cables {
