@@ -1,311 +1,76 @@
 # GUI Integration Framework Plan
 
-This document outlines the implementation plan for adding visual patching support to Quiver. The goal is to provide framework-agnostic primitives that enable GUI frontends (egui, iced, web canvas, etc.) to implement visual modular patching.
+This document outlines Quiver's approach to GUI integration. Rather than reimplementing graph editor functionality, we focus on providing the **audio-domain primitives** that graph libraries (React Flow, xyflow, etc.) need to build a modular synth UI.
 
-## Overview
+## Philosophy
 
-**Current State**: Position serialization is complete (`ModuleDef.position`, `Patch::set_position/get_position`)
+**What React Flow / xyflow already handles well:**
+- Node positioning and dragging
+- Edge/cable rendering (bezier curves)
+- Hit testing and selection
+- Pan/zoom
+- Undo/redo
+- Copy/paste
+- Layout algorithms (dagre integration)
+- Keyboard shortcuts
 
-**Goal**: Provide a complete toolkit for building visual patch editors without dictating rendering technology
-
-**Location**: New module `src/gui.rs` (feature-gated with `gui` feature)
-
----
-
-## Phase 1: Core Geometry
-
-Foundation types for spatial reasoning about patches.
-
-### 1.1 Basic Types
-
-```rust
-/// 2D point
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Point {
-    pub x: f32,
-    pub y: f32,
-}
-
-/// Rectangle (axis-aligned bounding box)
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    pub fn contains(&self, point: Point) -> bool;
-    pub fn intersects(&self, other: &Rect) -> bool;
-    pub fn center(&self) -> Point;
-    pub fn expand(&self, margin: f32) -> Rect;
-}
-```
-
-### 1.2 Module Geometry
-
-```rust
-/// Standard module sizing based on port count
-pub struct ModuleSizing {
-    /// Base width for modules
-    pub base_width: f32,
-    /// Height per port row
-    pub row_height: f32,
-    /// Header height (for module name)
-    pub header_height: f32,
-    /// Port radius for hit detection
-    pub port_radius: f32,
-    /// Padding around ports
-    pub port_padding: f32,
-}
-
-impl Default for ModuleSizing {
-    fn default() -> Self {
-        Self {
-            base_width: 120.0,
-            row_height: 24.0,
-            header_height: 32.0,
-            port_radius: 8.0,
-            port_padding: 12.0,
-        }
-    }
-}
-
-/// Computed geometry for a module instance
-pub struct ModuleGeometry {
-    /// Bounding rectangle
-    pub bounds: Rect,
-    /// Input port positions (relative to bounds origin)
-    pub input_ports: Vec<PortGeometry>,
-    /// Output port positions (relative to bounds origin)
-    pub output_ports: Vec<PortGeometry>,
-}
-
-pub struct PortGeometry {
-    pub port_id: u32,
-    pub name: String,
-    pub kind: SignalKind,
-    /// Center position relative to module origin
-    pub position: Point,
-    /// Hit detection radius
-    pub radius: f32,
-}
-```
-
-### 1.3 Geometry Calculator
-
-```rust
-/// Calculates module geometry from port specifications
-pub struct GeometryCalculator {
-    pub sizing: ModuleSizing,
-}
-
-impl GeometryCalculator {
-    pub fn new(sizing: ModuleSizing) -> Self;
-
-    /// Calculate geometry for a module at a given position
-    pub fn calculate(&self, spec: &PortSpec, position: Point) -> ModuleGeometry;
-
-    /// Calculate minimum bounds for a module
-    pub fn minimum_bounds(&self, spec: &PortSpec) -> (f32, f32);
-}
-```
-
-**Deliverables**:
-- [ ] `Point`, `Rect` types with standard operations
-- [ ] `ModuleSizing` configuration
-- [ ] `ModuleGeometry`, `PortGeometry` types
-- [ ] `GeometryCalculator` implementation
-- [ ] Unit tests for geometry calculations
+**What Quiver must provide:**
+- Module introspection (parameters, ports, metadata)
+- Signal semantics (port types, compatibility, colors)
+- Real-time state bridge (parameter values, meters, scopes)
+- Serialization contract (JSON schema for patches)
 
 ---
 
-## Phase 2: Cable Routing
+## Architecture Overview
 
-Visual cable path generation for connecting modules.
-
-### 2.1 Cable Path
-
-```rust
-/// Bezier curve representation for a cable
-pub struct CablePath {
-    /// Start point (output port)
-    pub start: Point,
-    /// End point (input port)
-    pub end: Point,
-    /// Control points for cubic bezier
-    pub control1: Point,
-    pub control2: Point,
-}
-
-impl CablePath {
-    /// Create a cable path between two points
-    /// Uses horizontal flow (left-to-right) heuristics
-    pub fn new(start: Point, end: Point) -> Self;
-
-    /// Create with custom tension (0.0 = straight, 1.0 = very curved)
-    pub fn with_tension(start: Point, end: Point, tension: f32) -> Self;
-
-    /// Sample points along the curve for rendering
-    pub fn sample(&self, segments: usize) -> Vec<Point>;
-
-    /// Get point at parameter t (0.0 to 1.0)
-    pub fn point_at(&self, t: f32) -> Point;
-
-    /// Get tangent direction at parameter t
-    pub fn tangent_at(&self, t: f32) -> Point;
-
-    /// Find closest point on curve to a given point
-    /// Returns (t, distance)
-    pub fn closest_point(&self, point: Point) -> (f32, f32);
-
-    /// Check if point is within distance of cable
-    pub fn hit_test(&self, point: Point, threshold: f32) -> bool;
-}
 ```
-
-### 2.2 Cable Styles
-
-```rust
-/// Visual style for cables
-#[derive(Debug, Clone)]
-pub struct CableStyle {
-    /// Base thickness
-    pub thickness: f32,
-    /// Whether to show signal flow animation direction
-    pub animated: bool,
-    /// Sag factor (gravity simulation)
-    pub sag: f32,
-}
-
-/// Color scheme for signal types
-pub struct SignalColors {
-    pub audio: Color,
-    pub cv_bipolar: Color,
-    pub cv_unipolar: Color,
-    pub volt_per_octave: Color,
-    pub gate: Color,
-    pub trigger: Color,
-    pub clock: Color,
-}
-
-impl Default for SignalColors {
-    fn default() -> Self {
-        Self {
-            audio: Color::rgb(0.91, 0.27, 0.38),        // #e94560
-            cv_bipolar: Color::rgb(0.06, 0.20, 0.38),   // #0f3460
-            cv_unipolar: Color::rgb(0.0, 0.71, 0.85),   // #00b4d8
-            volt_per_octave: Color::rgb(0.56, 0.75, 0.43), // #90be6d
-            gate: Color::rgb(0.98, 0.78, 0.31),         // #f9c74f
-            trigger: Color::rgb(0.97, 0.59, 0.12),      // #f8961e
-            clock: Color::rgb(0.62, 0.31, 0.87),        // #9d4edd
-        }
-    }
-}
+┌─────────────────────────────────────────────────────────────┐
+│                     React Frontend                          │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │ React Flow  │  │  Knobs/UI   │  │  Meters/Scopes      │ │
+│  │  (graph)    │  │  (params)   │  │  (real-time)        │ │
+│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘ │
+│         │                │                     │            │
+│         └────────────────┼─────────────────────┘            │
+│                          │                                  │
+│  ┌───────────────────────┴───────────────────────────────┐ │
+│  │                  quiver-web bridge                     │ │
+│  │  • Patch JSON ←→ React Flow nodes/edges               │ │
+│  │  • Module catalog endpoint                            │ │
+│  │  • Parameter get/set                                  │ │
+│  │  • WebSocket for real-time values                     │ │
+│  └───────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              │ HTTP/WebSocket
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Rust Backend (Quiver)                    │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │   Patch     │  │  Module     │  │  Audio Thread       │ │
+│  │   Graph     │  │  Registry   │  │  (real-time DSP)    │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
 ```
-
-**Deliverables**:
-- [ ] `CablePath` with cubic bezier implementation
-- [ ] Point sampling for polyline rendering
-- [ ] Hit testing for cable selection
-- [ ] `CableStyle` and `SignalColors` defaults
-- [ ] Unit tests for bezier math
 
 ---
 
-## Phase 3: Hit Testing
+## Phase 1: Introspection API
 
-Determine what UI element is at a given coordinate.
+Expose module metadata so the UI can render appropriate controls.
 
-### 3.1 Hit Results
-
-```rust
-/// Result of a hit test query
-#[derive(Debug, Clone, PartialEq)]
-pub enum HitResult {
-    /// Hit empty background
-    Background,
-    /// Hit a module body
-    Module(NodeId),
-    /// Hit a module's header/title bar (for dragging)
-    ModuleHeader(NodeId),
-    /// Hit an input port
-    InputPort(NodeId, u32),
-    /// Hit an output port
-    OutputPort(NodeId, u32),
-    /// Hit a cable (includes position along cable 0.0-1.0)
-    Cable(CableId, f32),
-}
-
-/// Unique identifier for cables in the GUI layer
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CableId(pub usize);
-```
-
-### 3.2 Hit Tester
+### 1.1 Parameter Information
 
 ```rust
-/// Performs hit testing on a patch layout
-pub struct HitTester {
-    geometry_calc: GeometryCalculator,
-    /// Cached module geometries
-    module_geometries: HashMap<NodeId, ModuleGeometry>,
-    /// Cached cable paths
-    cable_paths: Vec<(CableId, CablePath, SignalKind)>,
-}
-
-impl HitTester {
-    pub fn new(sizing: ModuleSizing) -> Self;
-
-    /// Rebuild geometry cache from patch
-    pub fn rebuild(&mut self, patch: &Patch);
-
-    /// Update single module position (for drag operations)
-    pub fn update_module_position(&mut self, node: NodeId, position: Point);
-
-    /// Perform hit test at a point
-    /// Returns hits in front-to-back order (cables on top)
-    pub fn hit_test(&self, point: Point) -> Vec<HitResult>;
-
-    /// Get the topmost hit at a point
-    pub fn hit_test_top(&self, point: Point) -> HitResult;
-
-    /// Find all modules in a selection rectangle
-    pub fn modules_in_rect(&self, rect: Rect) -> Vec<NodeId>;
-
-    /// Get geometry for a specific module
-    pub fn module_geometry(&self, node: NodeId) -> Option<&ModuleGeometry>;
-
-    /// Get all cable paths
-    pub fn cable_paths(&self) -> &[(CableId, CablePath, SignalKind)];
-}
-```
-
-**Deliverables**:
-- [ ] `HitResult` enum with all interactive elements
-- [ ] `HitTester` with geometry caching
-- [ ] Rectangle selection for multi-select
-- [ ] Efficient rebuilding on patch changes
-- [ ] Unit tests for hit detection
-
----
-
-## Phase 4: Introspection API
-
-Runtime querying of module capabilities for dynamic UIs.
-
-### 4.1 Parameter Introspection
-
-```rust
-/// Information about a controllable parameter
-#[derive(Debug, Clone)]
+/// Complete parameter descriptor for UI generation
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParamInfo {
-    /// Parameter identifier
+    /// Unique identifier within module
     pub id: String,
     /// Display name
     pub name: String,
-    /// Current value
+    /// Current value (normalized 0.0-1.0 or actual)
     pub value: f64,
     /// Minimum value
     pub min: f64,
@@ -313,682 +78,514 @@ pub struct ParamInfo {
     pub max: f64,
     /// Default value
     pub default: f64,
-    /// Value curve type
+    /// Value scaling
     pub curve: ParamCurve,
-    /// Suggested UI control type
+    /// Suggested control type
     pub control: ControlType,
-    /// Unit label (Hz, ms, dB, etc.)
+    /// Unit for display (Hz, ms, dB, %, etc.)
     pub unit: Option<String>,
+    /// Value formatting hint
+    pub format: ValueFormat,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ParamCurve {
     Linear,
     Exponential,
     Logarithmic,
-    Stepped(u32), // Number of steps
+    /// Stepped/quantized values
+    Stepped { steps: u32 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ControlType {
     Knob,
     Slider,
     Toggle,
-    Dropdown,
-    TextInput,
+    /// Dropdown with named options
+    Select { options: &'static [&'static str] },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueFormat {
+    /// Show raw number with N decimal places
+    Decimal { places: u8 },
+    /// Format as frequency (20 Hz, 1.5 kHz, etc.)
+    Frequency,
+    /// Format as time (5 ms, 1.2 s, etc.)
+    Time,
+    /// Format as dB
+    Decibels,
+    /// Format as percentage
+    Percent,
+    /// Format as note name (C4, A#3, etc.)
+    NoteName,
+    /// Format as ratio (1:4, 2:1)
+    Ratio,
 }
 ```
 
-### 4.2 Module Introspection Trait
+### 1.2 Module Introspection Trait
 
 ```rust
-/// Extended introspection for GUI display
+/// Trait for modules to expose their parameters to UIs
 pub trait ModuleIntrospection: GraphModule {
-    /// Get information about all tweakable parameters
+    /// Get parameter descriptors
     fn parameters(&self) -> Vec<ParamInfo> {
-        Vec::new() // Default: no exposed parameters
+        Vec::new()
     }
 
-    /// Suggested minimum size for this module
-    fn suggested_size(&self) -> Option<(f32, f32)> {
-        None // Use default sizing
+    /// Get parameter by id (for batch queries)
+    fn get_param_info(&self, id: &str) -> Option<ParamInfo> {
+        self.parameters().into_iter().find(|p| p.id == id)
     }
-
-    /// Custom port layout hints
-    fn port_layout_hints(&self) -> PortLayoutHints {
-        PortLayoutHints::default()
-    }
-
-    /// Category for module browser
-    fn category(&self) -> &'static str {
-        "Uncategorized"
-    }
-
-    /// Keywords for search
-    fn keywords(&self) -> &[&'static str] {
-        &[]
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct PortLayoutHints {
-    /// Group related ports together
-    pub port_groups: Vec<PortGroup>,
-    /// Ports that should be visually emphasized
-    pub primary_ports: Vec<u32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PortGroup {
-    pub name: String,
-    pub ports: Vec<u32>,
 }
 ```
 
-### 4.3 Module Browser Data
+### 1.3 JSON Endpoint Schema
 
-```rust
-/// Data structure for module browser/palette
-pub struct ModuleBrowserEntry {
-    pub type_id: String,
-    pub name: String,
-    pub category: String,
-    pub description: String,
-    pub keywords: Vec<String>,
-    pub port_summary: PortSummary,
+```typescript
+// GET /api/modules/:node_id/params
+interface ModuleParams {
+  node_id: string;
+  module_type: string;
+  params: ParamInfo[];
 }
 
+// GET /api/modules/:node_id/params/:param_id
+// PUT /api/modules/:node_id/params/:param_id  { value: number }
+interface ParamValue {
+  id: string;
+  value: number;
+}
+```
+
+**Deliverables:**
+- [ ] `ParamInfo` struct with serde derives
+- [ ] `ParamCurve`, `ControlType`, `ValueFormat` enums
+- [ ] `ModuleIntrospection` trait
+- [ ] Implement for all built-in modules (VCO, VCF, ADSR, etc.)
+- [ ] Unit tests
+
+---
+
+## Phase 2: Signal Semantics
+
+Provide port type information for cable coloring and compatibility validation.
+
+### 2.1 Enhanced Port Information
+
+```rust
+/// Extended port info for UI display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortInfo {
+    pub id: u32,
+    pub name: String,
+    pub kind: SignalKind,
+    /// Normalled connection (what this defaults to when unpatched)
+    pub normalled_to: Option<String>,
+    /// Port description for tooltips
+    pub description: Option<String>,
+}
+
+/// Color scheme for signal types (CSS hex colors)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalColors {
+    pub audio: String,         // "#e94560"
+    pub cv_bipolar: String,    // "#0f3460"
+    pub cv_unipolar: String,   // "#00b4d8"
+    pub volt_per_octave: String, // "#90be6d"
+    pub gate: String,          // "#f9c74f"
+    pub trigger: String,       // "#f8961e"
+    pub clock: String,         // "#9d4edd"
+}
+
+impl Default for SignalColors {
+    fn default() -> Self {
+        Self {
+            audio: "#e94560".into(),
+            cv_bipolar: "#0f3460".into(),
+            cv_unipolar: "#00b4d8".into(),
+            volt_per_octave: "#90be6d".into(),
+            gate: "#f9c74f".into(),
+            trigger: "#f8961e".into(),
+            clock: "#9d4edd".into(),
+        }
+    }
+}
+```
+
+### 2.2 Port Compatibility Matrix
+
+```rust
+/// Check if connecting these port types makes sense
+pub fn ports_compatible(from: SignalKind, to: SignalKind) -> Compatibility {
+    use SignalKind::*;
+    match (from, to) {
+        // Exact matches
+        (a, b) if a == b => Compatibility::Exact,
+
+        // Audio can go anywhere (it's just numbers)
+        (Audio, _) => Compatibility::Allowed,
+
+        // CV is generally interchangeable
+        (CvBipolar, CvUnipolar) | (CvUnipolar, CvBipolar) => Compatibility::Allowed,
+
+        // V/Oct to CV is fine
+        (VoltPerOctave, CvBipolar) | (VoltPerOctave, CvUnipolar) => Compatibility::Allowed,
+
+        // Gate/Trigger are similar
+        (Gate, Trigger) | (Trigger, Gate) => Compatibility::Allowed,
+        (Clock, Gate) | (Clock, Trigger) => Compatibility::Allowed,
+
+        // Mismatches that work but may be unintentional
+        (Gate, Audio) | (Trigger, Audio) => Compatibility::Warning("Gate→Audio may cause clicks"),
+        (CvBipolar, VoltPerOctave) => Compatibility::Warning("CV→V/Oct may cause tuning issues"),
+
+        // Everything else is allowed (modular = no rules)
+        _ => Compatibility::Allowed,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum Compatibility {
+    Exact,
+    Allowed,
+    Warning { message: String },
+}
+```
+
+### 2.3 JSON Endpoint Schema
+
+```typescript
+// GET /api/signal-colors
+interface SignalColorsResponse {
+  colors: Record<SignalKind, string>;
+}
+
+// GET /api/compatibility?from=audio&to=gate
+interface CompatibilityResponse {
+  status: "exact" | "allowed" | "warning";
+  message?: string;
+}
+
+// GET /api/modules/:type_id/ports
+interface ModulePorts {
+  inputs: PortInfo[];
+  outputs: PortInfo[];
+}
+```
+
+**Deliverables:**
+- [ ] `PortInfo` with serde derives
+- [ ] `SignalColors` with CSS hex defaults
+- [ ] `ports_compatible()` function
+- [ ] `Compatibility` enum
+- [ ] Endpoint schemas documented
+
+---
+
+## Phase 3: Module Catalog
+
+Provide searchable module list for the "add module" UI.
+
+### 3.1 Catalog Entry
+
+```rust
+/// Module catalog entry for browser/search
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleCatalogEntry {
+    /// Type identifier (for instantiation)
+    pub type_id: String,
+    /// Display name
+    pub name: String,
+    /// Category (Oscillators, Filters, etc.)
+    pub category: String,
+    /// Short description
+    pub description: String,
+    /// Search keywords
+    pub keywords: Vec<String>,
+    /// Port summary for quick preview
+    pub ports: PortSummary,
+    /// Tags for filtering
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortSummary {
-    pub input_count: usize,
-    pub output_count: usize,
+    pub inputs: u8,
+    pub outputs: u8,
     pub has_audio_in: bool,
     pub has_audio_out: bool,
-    pub has_cv_in: bool,
-    pub has_cv_out: bool,
 }
+```
 
+### 3.2 Registry Extensions
+
+```rust
 impl ModuleRegistry {
-    /// Get browser entries for all registered modules
-    pub fn browser_entries(&self) -> Vec<ModuleBrowserEntry>;
+    /// Get full catalog for UI
+    pub fn catalog(&self) -> Vec<ModuleCatalogEntry>;
 
-    /// Search modules by query string
-    pub fn search(&self, query: &str) -> Vec<ModuleBrowserEntry>;
+    /// Search by query (matches name, description, keywords)
+    pub fn search(&self, query: &str) -> Vec<ModuleCatalogEntry>;
 
-    /// Get modules in a category
-    pub fn by_category(&self, category: &str) -> Vec<ModuleBrowserEntry>;
+    /// Filter by category
+    pub fn by_category(&self, category: &str) -> Vec<ModuleCatalogEntry>;
+
+    /// Get all categories
+    pub fn categories(&self) -> Vec<String>;
 }
 ```
 
-**Deliverables**:
-- [ ] `ParamInfo` and related types
-- [ ] `ModuleIntrospection` trait
-- [ ] Default implementations for built-in modules
-- [ ] `ModuleBrowserEntry` for module palette
-- [ ] Search functionality in `ModuleRegistry`
+### 3.3 JSON Endpoint Schema
+
+```typescript
+// GET /api/catalog
+interface CatalogResponse {
+  modules: ModuleCatalogEntry[];
+  categories: string[];
+}
+
+// GET /api/catalog/search?q=filter
+interface SearchResponse {
+  query: string;
+  results: ModuleCatalogEntry[];
+}
+```
+
+**Deliverables:**
+- [ ] `ModuleCatalogEntry` struct
+- [ ] `PortSummary` struct
+- [ ] `ModuleRegistry::catalog()`, `search()`, `by_category()`
+- [ ] Populate keywords for all built-in modules
+- [ ] Unit tests for search
 
 ---
 
-## Phase 5: Patch Operations & Undo/Redo
+## Phase 4: Real-Time State Bridge
 
-Command pattern for reversible patch editing.
+Stream live values from the audio thread to the UI.
 
-### 5.1 Patch Commands
+### 4.1 Observable Values
 
 ```rust
-/// Reversible patch operation
-#[derive(Debug, Clone)]
-pub enum PatchCommand {
-    /// Add a new module
-    AddModule {
-        name: String,
-        module_type: String,
-        position: Point,
-    },
+/// Values that can be observed in real-time
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ObservableValue {
+    /// Current parameter value
+    Param { node_id: String, param_id: String, value: f64 },
 
-    /// Remove a module (stores full state for undo)
-    RemoveModule {
-        node_id: NodeId,
-        /// Stored for undo
-        module_def: ModuleDef,
-        /// Cables that were connected (stored for undo)
-        connected_cables: Vec<CableDef>,
-    },
+    /// Output level (RMS dB)
+    Level { node_id: String, port_id: u32, rms_db: f64, peak_db: f64 },
 
-    /// Move module(s)
-    MoveModules {
-        moves: Vec<(NodeId, Point, Point)>, // (id, from, to)
-    },
+    /// Gate state
+    Gate { node_id: String, port_id: u32, active: bool },
 
-    /// Connect two ports
-    Connect {
-        from_node: NodeId,
-        from_port: u32,
-        to_node: NodeId,
-        to_port: u32,
-        attenuation: Option<f64>,
-        offset: Option<f64>,
-    },
+    /// Scope buffer snapshot
+    Scope { node_id: String, port_id: u32, samples: Vec<f32> },
 
-    /// Disconnect a cable
-    Disconnect {
-        cable_id: CableId,
-        /// Stored for undo
-        cable_def: CableDef,
-    },
-
-    /// Change a parameter value
-    SetParameter {
-        node_id: NodeId,
-        param_id: String,
-        old_value: f64,
-        new_value: f64,
-    },
-
-    /// Batch multiple commands (for undo as single operation)
-    Batch {
-        commands: Vec<PatchCommand>,
-        description: String,
-    },
+    /// Spectrum data
+    Spectrum { node_id: String, port_id: u32, bins: Vec<f32>, freq_range: (f32, f32) },
 }
 
-impl PatchCommand {
-    /// Get the inverse command (for undo)
-    pub fn inverse(&self) -> PatchCommand;
+/// Subscription request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subscription {
+    pub id: String,
+    pub target: SubscriptionTarget,
+    /// Update rate in Hz (capped at 60)
+    pub rate_hz: u8,
+}
 
-    /// Human-readable description
-    pub fn description(&self) -> String;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum SubscriptionTarget {
+    Param { node_id: String, param_id: String },
+    Level { node_id: String, port_id: u32 },
+    Gate { node_id: String, port_id: u32 },
+    Scope { node_id: String, port_id: u32, buffer_size: usize },
+    Spectrum { node_id: String, port_id: u32, fft_size: usize },
 }
 ```
 
-### 5.2 Patch History
+### 4.2 WebSocket Protocol
 
-```rust
-/// Undo/redo history manager
-pub struct PatchHistory {
-    /// Commands that can be undone
-    undo_stack: Vec<PatchCommand>,
-    /// Commands that can be redone
-    redo_stack: Vec<PatchCommand>,
-    /// Maximum history size
-    max_size: usize,
-    /// Whether history is currently recording
-    recording: bool,
+```typescript
+// Client → Server
+interface SubscribeMessage {
+  action: "subscribe";
+  subscriptions: Subscription[];
 }
 
-impl PatchHistory {
-    pub fn new(max_size: usize) -> Self;
+interface UnsubscribeMessage {
+  action: "unsubscribe";
+  ids: string[];
+}
 
-    /// Execute a command and add to history
-    pub fn execute(&mut self, patch: &mut Patch, command: PatchCommand) -> Result<(), PatchError>;
+// Server → Client (streaming)
+interface ValueUpdate {
+  subscription_id: string;
+  timestamp_ms: number;
+  value: ObservableValue;
+}
 
-    /// Undo the last command
-    pub fn undo(&mut self, patch: &mut Patch) -> Result<Option<String>, PatchError>;
-
-    /// Redo the last undone command
-    pub fn redo(&mut self, patch: &mut Patch) -> Result<Option<String>, PatchError>;
-
-    /// Check if undo is available
-    pub fn can_undo(&self) -> bool;
-
-    /// Check if redo is available
-    pub fn can_redo(&self) -> bool;
-
-    /// Get description of next undo
-    pub fn undo_description(&self) -> Option<&str>;
-
-    /// Get description of next redo
-    pub fn redo_description(&self) -> Option<&str>;
-
-    /// Begin a batch operation (groups commands until end_batch)
-    pub fn begin_batch(&mut self, description: &str);
-
-    /// End batch operation
-    pub fn end_batch(&mut self);
-
-    /// Clear all history
-    pub fn clear(&mut self);
+// Batched updates (sent at subscription rate)
+interface BatchUpdate {
+  updates: ValueUpdate[];
 }
 ```
 
-### 5.3 Clipboard Operations
+### 4.3 Implementation Notes
 
 ```rust
-/// Clipboard for copy/paste operations
-pub struct PatchClipboard {
-    /// Copied module definitions
-    modules: Vec<ModuleDef>,
-    /// Copied internal cables (between copied modules)
-    cables: Vec<CableDef>,
+/// Manages real-time value extraction from audio thread
+pub struct StateObserver {
+    /// Ring buffers for scope data (one per subscribed port)
+    scope_buffers: HashMap<(NodeId, u32), RingBuffer<f32>>,
+
+    /// Level meters
+    meters: HashMap<(NodeId, u32), LevelMeter>,
+
+    /// Active subscriptions
+    subscriptions: Vec<Subscription>,
 }
 
-impl PatchClipboard {
-    pub fn new() -> Self;
+impl StateObserver {
+    /// Called from audio thread (must be lock-free)
+    pub fn process(&mut self, patch: &Patch);
 
-    /// Copy selected modules to clipboard
-    pub fn copy(&mut self, patch: &Patch, selection: &[NodeId]);
-
-    /// Cut selected modules (copy + delete)
-    pub fn cut(&mut self, patch: &mut Patch, history: &mut PatchHistory, selection: &[NodeId]);
-
-    /// Paste clipboard contents at position
-    /// Returns handles to newly created modules
-    pub fn paste(
-        &self,
-        patch: &mut Patch,
-        history: &mut PatchHistory,
-        position: Point,
-        registry: &ModuleRegistry,
-    ) -> Result<Vec<NodeId>, PatchError>;
-
-    /// Check if clipboard has content
-    pub fn has_content(&self) -> bool;
-
-    /// Duplicate selection in place (offset by delta)
-    pub fn duplicate(
-        patch: &mut Patch,
-        history: &mut PatchHistory,
-        selection: &[NodeId],
-        offset: Point,
-        registry: &ModuleRegistry,
-    ) -> Result<Vec<NodeId>, PatchError>;
+    /// Called from network thread to get pending updates
+    pub fn drain_updates(&mut self) -> Vec<ValueUpdate>;
 }
 ```
 
-**Deliverables**:
-- [ ] `PatchCommand` enum with all operations
-- [ ] Command execution and inversion
-- [ ] `PatchHistory` with undo/redo stacks
-- [ ] Batch command grouping
-- [ ] `PatchClipboard` for copy/cut/paste
-- [ ] Duplicate functionality
-- [ ] Integration tests for command sequences
+**Deliverables:**
+- [ ] `ObservableValue` enum
+- [ ] `Subscription` and `SubscriptionTarget` types
+- [ ] `StateObserver` with lock-free audio thread interface
+- [ ] WebSocket message types
+- [ ] Rate limiting (max 60 Hz updates)
+- [ ] Example: scope visualization over WebSocket
 
 ---
 
-## Phase 6: Layout Algorithms
+## Phase 5: Serialization Contract
 
-Automatic module arrangement.
+Document the JSON schema so frontends can reliably parse/generate patches.
 
-### 6.1 Layout Trait
+### 5.1 JSON Schema Documentation
 
-```rust
-/// Auto-layout algorithm interface
-pub trait AutoLayout {
-    /// Compute positions for all modules in a patch
-    fn layout(&self, patch: &Patch, bounds: Rect) -> HashMap<NodeId, Point>;
+```typescript
+// Patch format (already implemented, documenting here)
+interface PatchDef {
+  version: number;
+  name: string;
+  author?: string;
+  description?: string;
+  tags: string[];
+  modules: ModuleDef[];
+  cables: CableDef[];
+  parameters: Record<string, number>; // "module.param" → value
+}
+
+interface ModuleDef {
+  name: string;          // Instance name (unique within patch)
+  module_type: string;   // Type ID from registry
+  position?: [number, number]; // [x, y] for UI
+  state?: object;        // Module-specific state
+}
+
+interface CableDef {
+  from: string;          // "module_name.port_name"
+  to: string;            // "module_name.port_name"
+  attenuation?: number;  // -2.0 to 2.0
+  offset?: number;       // -10.0 to 10.0
 }
 ```
 
-### 6.2 Hierarchical Layout
+### 5.2 React Flow Mapping
 
-```rust
-/// Signal-flow based layout (inputs left, outputs right)
-pub struct HierarchicalLayout {
-    /// Horizontal spacing between columns
-    pub column_spacing: f32,
-    /// Vertical spacing between modules in same column
-    pub row_spacing: f32,
-    /// Flow direction
-    pub direction: FlowDirection,
+```typescript
+// Utility functions for React Flow integration
+
+function patchToReactFlow(patch: PatchDef): { nodes: Node[], edges: Edge[] } {
+  const nodes = patch.modules.map(m => ({
+    id: m.name,
+    type: 'quiverModule',
+    position: { x: m.position?.[0] ?? 0, y: m.position?.[1] ?? 0 },
+    data: { moduleType: m.module_type, state: m.state }
+  }));
+
+  const edges = patch.cables.map((c, i) => {
+    const [fromModule, fromPort] = c.from.split('.');
+    const [toModule, toPort] = c.to.split('.');
+    return {
+      id: `cable-${i}`,
+      source: fromModule,
+      sourceHandle: fromPort,
+      target: toModule,
+      targetHandle: toPort,
+      data: { attenuation: c.attenuation, offset: c.offset }
+    };
+  });
+
+  return { nodes, edges };
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum FlowDirection {
-    LeftToRight,
-    RightToLeft,
-    TopToBottom,
-    BottomToTop,
-}
-
-impl AutoLayout for HierarchicalLayout {
-    fn layout(&self, patch: &Patch, bounds: Rect) -> HashMap<NodeId, Point> {
-        // 1. Compute topological depth for each module
-        // 2. Assign modules to columns by depth
-        // 3. Order modules within columns to minimize cable crossings
-        // 4. Compute final positions
-    }
-}
-```
-
-### 6.3 Force-Directed Layout
-
-```rust
-/// Physics-based layout using spring simulation
-pub struct ForceDirectedLayout {
-    /// Repulsion force between modules
-    pub repulsion: f32,
-    /// Spring constant for cables
-    pub spring_constant: f32,
-    /// Damping factor
-    pub damping: f32,
-    /// Maximum iterations
-    pub max_iterations: usize,
-    /// Convergence threshold
-    pub threshold: f32,
-}
-
-impl AutoLayout for ForceDirectedLayout {
-    fn layout(&self, patch: &Patch, bounds: Rect) -> HashMap<NodeId, Point> {
-        // 1. Initialize positions (random or current)
-        // 2. Iterate:
-        //    - Calculate repulsion forces between all module pairs
-        //    - Calculate spring forces along cables
-        //    - Apply forces with damping
-        //    - Check for convergence
-        // 3. Return final positions
-    }
+function reactFlowToPatch(
+  nodes: Node[],
+  edges: Edge[],
+  metadata: { name: string, author?: string }
+): PatchDef {
+  return {
+    version: 1,
+    name: metadata.name,
+    author: metadata.author,
+    tags: [],
+    modules: nodes.map(n => ({
+      name: n.id,
+      module_type: n.data.moduleType,
+      position: [n.position.x, n.position.y],
+      state: n.data.state
+    })),
+    cables: edges.map(e => ({
+      from: `${e.source}.${e.sourceHandle}`,
+      to: `${e.target}.${e.targetHandle}`,
+      attenuation: e.data?.attenuation,
+      offset: e.data?.offset
+    })),
+    parameters: {}
+  };
 }
 ```
 
-### 6.4 Grid Snap
-
-```rust
-/// Snap positions to grid
-pub struct GridSnap {
-    pub grid_size: f32,
-    pub enabled: bool,
-}
-
-impl GridSnap {
-    pub fn snap(&self, point: Point) -> Point;
-    pub fn snap_rect(&self, rect: Rect) -> Rect;
-}
-```
-
-**Deliverables**:
-- [ ] `AutoLayout` trait
-- [ ] `HierarchicalLayout` implementation
-- [ ] `ForceDirectedLayout` implementation
-- [ ] `GridSnap` utility
-- [ ] Layout quality metrics (cable crossings, etc.)
-
----
-
-## Phase 7: Event Abstractions
-
-Framework-agnostic input handling.
-
-### 7.1 Input Events
-
-```rust
-/// Abstract input event (map from framework-specific events)
-#[derive(Debug, Clone)]
-pub enum InputEvent {
-    /// Mouse/touch press
-    PointerDown {
-        position: Point,
-        button: PointerButton,
-        modifiers: Modifiers,
-    },
-
-    /// Mouse/touch release
-    PointerUp {
-        position: Point,
-        button: PointerButton,
-        modifiers: Modifiers,
-    },
-
-    /// Mouse/touch move
-    PointerMove {
-        position: Point,
-        modifiers: Modifiers,
-    },
-
-    /// Scroll/zoom
-    Scroll {
-        position: Point,
-        delta: Point,
-        modifiers: Modifiers,
-    },
-
-    /// Key press
-    KeyDown {
-        key: Key,
-        modifiers: Modifiers,
-    },
-
-    /// Key release
-    KeyUp {
-        key: Key,
-        modifiers: Modifiers,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PointerButton {
-    Primary,   // Left click
-    Secondary, // Right click
-    Middle,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Modifiers {
-    pub shift: bool,
-    pub ctrl: bool,
-    pub alt: bool,
-    pub meta: bool, // Cmd on Mac
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Key {
-    Delete,
-    Backspace,
-    Escape,
-    Enter,
-    Space,
-    Tab,
-    // Arrow keys
-    Up, Down, Left, Right,
-    // Letters (for shortcuts)
-    A, C, D, V, X, Z,
-    // Function keys
-    F1, F2, // etc.
-    // Other
-    Other(char),
-}
-```
-
-### 7.2 Interaction State Machine
-
-```rust
-/// Current interaction mode
-#[derive(Debug, Clone)]
-pub enum InteractionState {
-    /// Idle, waiting for input
-    Idle,
-
-    /// Dragging module(s)
-    DraggingModules {
-        nodes: Vec<NodeId>,
-        start_positions: Vec<Point>,
-        current_offset: Point,
-    },
-
-    /// Drawing a new cable
-    DraggingCable {
-        from_node: NodeId,
-        from_port: u32,
-        is_output: bool,
-        current_end: Point,
-    },
-
-    /// Rectangle selection
-    RectangleSelect {
-        start: Point,
-        current: Point,
-    },
-
-    /// Panning the view
-    Panning {
-        start_pan: Point,
-        start_pointer: Point,
-    },
-
-    /// Context menu open
-    ContextMenu {
-        position: Point,
-        target: HitResult,
-    },
-}
-
-/// Manages interaction state and processes events
-pub struct InteractionManager {
-    state: InteractionState,
-    selection: HashSet<NodeId>,
-    hit_tester: HitTester,
-    history: PatchHistory,
-    clipboard: PatchClipboard,
-}
-
-impl InteractionManager {
-    /// Process an input event, returns actions to perform
-    pub fn handle_event(
-        &mut self,
-        event: InputEvent,
-        patch: &mut Patch,
-    ) -> Vec<Action>;
-
-    /// Get current selection
-    pub fn selection(&self) -> &HashSet<NodeId>;
-
-    /// Set selection
-    pub fn set_selection(&mut self, nodes: impl IntoIterator<Item = NodeId>);
-
-    /// Add to selection
-    pub fn add_to_selection(&mut self, node: NodeId);
-
-    /// Clear selection
-    pub fn clear_selection(&mut self);
-
-    /// Select all
-    pub fn select_all(&mut self, patch: &Patch);
-}
-
-/// Actions that should be performed by the UI layer
-#[derive(Debug, Clone)]
-pub enum Action {
-    /// Redraw needed
-    Redraw,
-    /// Show context menu
-    ShowContextMenu { position: Point, items: Vec<MenuItem> },
-    /// Hide context menu
-    HideContextMenu,
-    /// Module added (for announcements)
-    ModuleAdded(NodeId),
-    /// Selection changed
-    SelectionChanged,
-    /// Request text input (for renaming, etc.)
-    RequestTextInput { initial: String, callback_id: u32 },
-}
-```
-
-**Deliverables**:
-- [ ] `InputEvent` abstraction
-- [ ] `InteractionState` enum
-- [ ] `InteractionManager` state machine
-- [ ] Standard keyboard shortcuts (Ctrl+Z, Ctrl+C, etc.)
-- [ ] Multi-select with Shift/Ctrl
-- [ ] Integration tests for interaction sequences
-
----
-
-## Phase 8: View Transform
-
-Pan and zoom support.
-
-### 8.1 View Transform
-
-```rust
-/// 2D view transformation (pan + zoom)
-#[derive(Debug, Clone, Copy)]
-pub struct ViewTransform {
-    /// Pan offset in screen coordinates
-    pub pan: Point,
-    /// Zoom level (1.0 = 100%)
-    pub zoom: f32,
-}
-
-impl ViewTransform {
-    pub fn new() -> Self;
-
-    /// Convert screen coordinates to world coordinates
-    pub fn screen_to_world(&self, screen: Point) -> Point;
-
-    /// Convert world coordinates to screen coordinates
-    pub fn world_to_screen(&self, world: Point) -> Point;
-
-    /// Get the visible world rect for a screen size
-    pub fn visible_rect(&self, screen_size: (f32, f32)) -> Rect;
-
-    /// Pan by a delta (in screen coordinates)
-    pub fn pan_by(&mut self, delta: Point);
-
-    /// Zoom to a level, keeping a point fixed
-    pub fn zoom_to(&mut self, zoom: f32, fixed_point: Point);
-
-    /// Zoom by a factor, keeping a point fixed
-    pub fn zoom_by(&mut self, factor: f32, fixed_point: Point);
-
-    /// Fit all content in view
-    pub fn fit_content(&mut self, content_bounds: Rect, screen_size: (f32, f32), padding: f32);
-
-    /// Reset to default view
-    pub fn reset(&mut self);
-}
-
-impl Default for ViewTransform {
-    fn default() -> Self {
-        Self {
-            pan: Point { x: 0.0, y: 0.0 },
-            zoom: 1.0,
-        }
-    }
-}
-```
-
-### 8.2 Zoom Constraints
-
-```rust
-pub struct ZoomConstraints {
-    pub min_zoom: f32,
-    pub max_zoom: f32,
-    pub zoom_step: f32, // For scroll wheel
-}
-
-impl Default for ZoomConstraints {
-    fn default() -> Self {
-        Self {
-            min_zoom: 0.1,
-            max_zoom: 4.0,
-            zoom_step: 0.1,
-        }
-    }
-}
-```
-
-**Deliverables**:
-- [ ] `ViewTransform` with pan/zoom
-- [ ] Coordinate conversion utilities
-- [ ] Fit-to-content functionality
-- [ ] Zoom constraints
-- [ ] Smooth zoom animation support
+**Deliverables:**
+- [ ] JSON Schema file (`schemas/patch.json`)
+- [ ] TypeScript type definitions (`@quiver/types` package)
+- [ ] React Flow mapping utilities (example code)
+- [ ] Validation function for patch JSON
 
 ---
 
 ## Implementation Order
 
-| Phase | Name | Priority | Dependencies | Estimated Complexity |
-|-------|------|----------|--------------|---------------------|
-| 1 | Core Geometry | High | None | Low |
-| 2 | Cable Routing | High | Phase 1 | Medium |
-| 3 | Hit Testing | High | Phase 1, 2 | Medium |
-| 4 | Introspection | Medium | None | Low |
-| 5 | Undo/Redo | High | None | Medium |
-| 6 | Layout Algorithms | Low | Phase 1 | High |
-| 7 | Event Abstractions | Medium | Phase 3, 5 | High |
-| 8 | View Transform | Medium | Phase 1 | Low |
+| Phase | Name | Priority | Effort | Notes |
+|-------|------|----------|--------|-------|
+| 1 | Introspection API | High | Medium | Enables knob/slider generation |
+| 2 | Signal Semantics | High | Low | Enables cable coloring |
+| 3 | Module Catalog | Medium | Low | Enables module browser |
+| 5 | Serialization Contract | High | Low | Documentation + types |
+| 4 | Real-Time Bridge | Medium | High | WebSocket infrastructure |
 
-**Recommended order**: 1 → 2 → 3 → 5 → 8 → 4 → 7 → 6
+**Recommended order:** 5 → 2 → 1 → 3 → 4
+
+Start with serialization contract (it's just documentation), then signal semantics (quick win for cable colors), then introspection for parameter UIs.
 
 ---
 
@@ -996,59 +593,53 @@ impl Default for ZoomConstraints {
 
 ```
 src/
-├── gui/
-│   ├── mod.rs           # Module exports, feature gate
-│   ├── geometry.rs      # Phase 1: Point, Rect, ModuleGeometry
-│   ├── cable.rs         # Phase 2: CablePath, CableStyle
-│   ├── hit_test.rs      # Phase 3: HitTester, HitResult
-│   ├── introspection.rs # Phase 4: ParamInfo, ModuleIntrospection
-│   ├── commands.rs      # Phase 5: PatchCommand, PatchHistory
-│   ├── clipboard.rs     # Phase 5: PatchClipboard
-│   ├── layout.rs        # Phase 6: AutoLayout implementations
-│   ├── events.rs        # Phase 7: InputEvent, InteractionManager
-│   └── transform.rs     # Phase 8: ViewTransform
+├── introspection.rs     # ParamInfo, ModuleIntrospection trait
+├── serialize.rs         # (existing) + JSON schema docs
+└── lib.rs               # Re-exports
+
+schemas/
+└── patch.schema.json    # JSON Schema for validation
+
+examples/
+└── react-flow-bridge/   # TypeScript example project
+    ├── src/
+    │   ├── types.ts     # Generated from Rust types
+    │   ├── mapping.ts   # patchToReactFlow, reactFlowToPatch
+    │   └── api.ts       # Fetch wrappers
+    └── package.json
 ```
 
 ---
 
-## Feature Flag
+## What We're NOT Building
 
-```toml
-[features]
-default = ["std"]
-std = []
-gui = ["std"]  # GUI support requires std
-```
+The following are explicitly **out of scope** because React Flow handles them:
 
----
-
-## Testing Strategy
-
-1. **Unit tests** for all geometry calculations
-2. **Property-based tests** for bezier math (using proptest)
-3. **Integration tests** for command sequences
-4. **Snapshot tests** for layout algorithms
-5. **Example applications** demonstrating integration with:
-   - egui (immediate mode)
-   - iced (elm architecture)
-   - Web canvas (via wasm-bindgen)
+| Feature | Use Instead |
+|---------|-------------|
+| Node dragging | React Flow `onNodeDrag` |
+| Cable bezier rendering | React Flow edges |
+| Hit testing | React Flow built-in |
+| Pan/zoom | React Flow viewport |
+| Undo/redo | React state + `use-undoable` or similar |
+| Keyboard shortcuts | React event handlers |
+| Selection | React Flow selection |
+| Copy/paste | React Flow + clipboard API |
+| Layout algorithms | React Flow + dagre |
 
 ---
 
 ## Future Considerations
 
-- **Minimap widget** - Overview of large patches
-- **Module grouping** - Visual containers for related modules
-- **Custom module skins** - Per-module visual customization
-- **Accessibility** - Keyboard navigation, screen reader support
-- **Touch support** - Multi-touch gestures for mobile/tablet
-- **Collaboration** - Multi-user editing (requires networking)
+- **MIDI learn mode** - Map MIDI CC to parameters
+- **Preset thumbnails** - Render patch preview images
+- **Module grouping** - Visual subpatches
+- **Collaborative editing** - CRDT-based sync
 
 ---
 
 ## References
 
-- [VCV Rack](https://vcvrack.com/) - Virtual modular synthesizer
-- [Pure Data](https://puredata.info/) - Visual programming for audio
-- [Max/MSP](https://cycling74.com/products/max) - Commercial visual patching
-- [Blender Node Editor](https://docs.blender.org/manual/en/latest/interface/controls/nodes/) - General node graph UI
+- [React Flow](https://reactflow.dev/) - React library for node-based UIs
+- [xyflow](https://github.com/xyflow/xyflow) - Framework-agnostic core
+- [Quiver Serialization](../src/serialize.rs) - Existing implementation
