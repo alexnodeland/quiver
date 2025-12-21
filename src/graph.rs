@@ -5,8 +5,9 @@
 //! execution ordering, and signal propagation.
 
 use crate::port::{GraphModule, ParamId, PortId, PortSpec, PortValues, SignalKind};
+use crate::StdMap;
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -251,7 +252,7 @@ pub struct Patch {
 
     // Execution state
     execution_order: Vec<NodeId>,
-    buffers: BTreeMap<PortRef, f64>,
+    buffers: StdMap<PortRef, f64>,
 
     // Configuration
     sample_rate: f64,
@@ -271,7 +272,7 @@ impl Patch {
             nodes: SlotMap::new(),
             cables: Vec::new(),
             execution_order: Vec::new(),
-            buffers: BTreeMap::new(),
+            buffers: StdMap::new(),
             sample_rate,
             output_node: None,
             validation_mode: ValidationMode::None,
@@ -610,8 +611,8 @@ impl Patch {
     }
 
     fn topological_sort(&self) -> Result<Vec<NodeId>, PatchError> {
-        let mut in_degree: BTreeMap<NodeId, usize> = self.nodes.keys().map(|k| (k, 0)).collect();
-        let mut successors: BTreeMap<NodeId, Vec<NodeId>> =
+        let mut in_degree: StdMap<NodeId, usize> = self.nodes.keys().map(|k| (k, 0)).collect();
+        let mut successors: StdMap<NodeId, Vec<NodeId>> =
             self.nodes.keys().map(|k| (k, vec![])).collect();
 
         for cable in &self.cables {

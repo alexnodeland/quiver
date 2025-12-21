@@ -3,7 +3,7 @@
 //! This module defines the signal types, port definitions, and type-erased interfaces
 //! that bridge the typed combinator layer with the graph-based patching system.
 
-use alloc::collections::BTreeMap;
+use crate::StdMap;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -160,7 +160,7 @@ impl PortSpec {
 /// Runtime port values container
 #[derive(Debug, Clone, Default)]
 pub struct PortValues {
-    pub values: BTreeMap<PortId, f64>,
+    pub values: StdMap<PortId, f64>,
 }
 
 impl PortValues {
@@ -196,14 +196,14 @@ impl PortValues {
 
 /// Block-oriented port values for efficient processing
 pub struct BlockPortValues {
-    buffers: BTreeMap<PortId, Vec<f64>>,
+    buffers: StdMap<PortId, Vec<f64>>,
     block_size: usize,
 }
 
 impl BlockPortValues {
     pub fn new(block_size: usize) -> Self {
         Self {
-            buffers: BTreeMap::new(),
+            buffers: StdMap::new(),
             block_size,
         }
     }

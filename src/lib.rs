@@ -20,6 +20,12 @@
 
 extern crate alloc;
 
+// Conditional collection types: HashMap in std mode, BTreeMap in no_std
+#[cfg(feature = "std")]
+pub(crate) type StdMap<K, V> = std::collections::HashMap<K, V>;
+#[cfg(not(feature = "std"))]
+pub(crate) type StdMap<K, V> = alloc::collections::BTreeMap<K, V>;
+
 pub mod analog;
 pub mod combinator;
 pub mod graph;
