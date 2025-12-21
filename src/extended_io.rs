@@ -980,7 +980,7 @@ mod tests {
     #[test]
     fn test_osc_value_to_f64() {
         assert!((OscValue::Int(42).to_f64().unwrap() - 42.0).abs() < 0.001);
-        assert!((OscValue::Float(3.14).to_f64().unwrap() - 3.14).abs() < 0.01);
+        assert!((OscValue::Float(2.5).to_f64().unwrap() - 2.5).abs() < 0.01);
         assert!((OscValue::Long(100).to_f64().unwrap() - 100.0).abs() < 0.001);
         assert!((OscValue::Double(2.71).to_f64().unwrap() - 2.71).abs() < 0.001);
         assert!((OscValue::True.to_f64().unwrap() - 1.0).abs() < 0.001);

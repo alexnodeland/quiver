@@ -519,6 +519,11 @@ impl Patch {
         }
     }
 
+    /// Get module position (for UI/serialization)
+    pub fn get_position(&self, node: NodeId) -> Option<(f32, f32)> {
+        self.nodes.get(node).and_then(|n| n.position)
+    }
+
     /// Get module name
     pub fn get_name(&self, node: NodeId) -> Option<&str> {
         self.nodes.get(node).map(|n| n.name.as_str())

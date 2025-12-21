@@ -569,11 +569,11 @@ impl Patch {
     pub fn to_def(&self, name: &str) -> PatchDef {
         let modules: Vec<ModuleDef> = self
             .nodes()
-            .map(|(_, node_name, module)| {
+            .map(|(node_id, node_name, module)| {
                 ModuleDef {
                     name: node_name.to_string(),
                     module_type: module.type_id().to_string(),
-                    position: None, // TODO: store positions
+                    position: self.get_position(node_id),
                     state: module.serialize_state(),
                 }
             })
