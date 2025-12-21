@@ -91,6 +91,18 @@ jobs:
           name: rustdoc
           path: target/doc/
 
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check benchmarks compile
+        run: cargo bench --no-run
+      - name: Run benchmark tests
+        run: cargo bench -- --test
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
