@@ -622,7 +622,7 @@ impl GraphModule for AnalogVco {
 
 /// Saturator module for adding warmth and harmonics
 pub struct Saturator {
-    drive: f64,
+    pub(crate) drive: f64,
     spec: PortSpec,
 }
 
@@ -677,7 +677,7 @@ impl GraphModule for Saturator {
 
 /// Wavefolder module
 pub struct Wavefolder {
-    threshold: f64,
+    pub(crate) threshold: f64,
     spec: PortSpec,
 }
 
