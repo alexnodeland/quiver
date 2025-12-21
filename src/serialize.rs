@@ -7,8 +7,13 @@ use crate::analog::{AnalogVco, Saturator, Wavefolder};
 use crate::graph::{NodeHandle, Patch, PatchError};
 use crate::modules::*;
 use crate::port::{GraphModule, PortSpec};
+use crate::StdMap;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Serializable patch definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,7 +34,7 @@ pub struct PatchDef {
     pub cables: Vec<CableDef>,
 
     /// Parameter values (key: "module_name.param_id")
-    pub parameters: HashMap<String, f64>,
+    pub parameters: StdMap<String, f64>,
 }
 
 impl PatchDef {
@@ -43,7 +48,7 @@ impl PatchDef {
             tags: vec![],
             modules: vec![],
             cables: vec![],
-            parameters: HashMap::new(),
+            parameters: StdMap::new(),
         }
     }
 
@@ -172,16 +177,16 @@ pub struct ModuleMetadata {
 
 /// Registry of available module types for instantiation
 pub struct ModuleRegistry {
-    factories: HashMap<String, ModuleFactory>,
-    metadata: HashMap<String, ModuleMetadata>,
+    factories: StdMap<String, ModuleFactory>,
+    metadata: StdMap<String, ModuleMetadata>,
 }
 
 impl ModuleRegistry {
     /// Create a new empty registry
     pub fn new() -> Self {
         let mut registry = Self {
-            factories: HashMap::new(),
-            metadata: HashMap::new(),
+            factories: StdMap::new(),
+            metadata: StdMap::new(),
         };
 
         // Register built-in modules
@@ -620,7 +625,7 @@ impl Patch {
             tags: vec![],
             modules,
             cables,
-            parameters: HashMap::new(),
+            parameters: StdMap::new(),
         }
     }
 
@@ -631,7 +636,7 @@ impl Patch {
         sample_rate: f64,
     ) -> Result<Self, PatchError> {
         let mut patch = Patch::new(sample_rate);
-        let mut name_to_handle: HashMap<String, NodeHandle> = HashMap::new();
+        let mut name_to_handle: StdMap<String, NodeHandle> = StdMap::new();
 
         // Instantiate modules
         for module_def in &def.modules {

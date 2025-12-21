@@ -9,12 +9,14 @@
 //!
 //! ## Feature Flags
 //!
-//! - `std` (default): Enables standard library support, including threading, I/O,
-//!   serialization, and random number generation.
-//! - `simd`: Enables SIMD vectorization for block processing.
+//! - `std` (default): Full standard library support including OSC, plugin wrappers,
+//!   visualization tools, and module development kit. Implies `alloc`.
+//! - `alloc`: Enables serialization (JSON save/load), presets, and basic I/O modules
+//!   for `no_std` environments with heap allocation (e.g., WASM).
+//! - `simd`: Enables SIMD vectorization for block processing (works with any tier).
 //!
-//! Without the `std` feature, the library operates in `no_std` mode with `alloc`,
-//! suitable for embedded systems and WebAssembly targets.
+//! Without any features, the library operates in `no_std` mode with `alloc`,
+//! providing core DSP modules for embedded systems and WebAssembly targets.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -35,17 +37,19 @@ pub mod port;
 pub mod rng;
 pub mod simd;
 
-// Std-only modules (require threading, I/O, or full serialization)
+// Alloc-tier modules (work with no_std + alloc)
+#[cfg(feature = "alloc")]
+pub mod io;
+#[cfg(feature = "alloc")]
+pub mod presets;
+#[cfg(feature = "alloc")]
+pub mod serialize;
+
+// Std-only modules (require full std for network, plugins, etc.)
 #[cfg(feature = "std")]
 pub mod extended_io;
 #[cfg(feature = "std")]
-pub mod io;
-#[cfg(feature = "std")]
 pub mod mdk;
-#[cfg(feature = "std")]
-pub mod presets;
-#[cfg(feature = "std")]
-pub mod serialize;
 #[cfg(feature = "std")]
 pub mod visual;
 
@@ -106,18 +110,29 @@ pub mod prelude {
     pub use crate::rng::{Rng, SeedableRng};
 
     // ========================================================================
-    // Std-only exports
+    // Alloc-tier exports (work with no_std + alloc)
     // ========================================================================
 
-    // External I/O (requires std for Arc/atomics)
-    #[cfg(feature = "std")]
-    pub use crate::io::{AtomicF64, ExternalInput, MidiState};
+    // External I/O (works with alloc via core::sync::atomic + alloc::sync::Arc)
+    #[cfg(feature = "alloc")]
+    pub use crate::io::{AtomicF64, ExternalInput, ExternalOutput, MidiState};
 
-    // Serialization (requires std for serde_json)
-    #[cfg(feature = "std")]
+    // Serialization (works with alloc via serde_json alloc feature)
+    #[cfg(feature = "alloc")]
     pub use crate::serialize::{CableDef, ModuleDef, ModuleMetadata, ModuleRegistry, PatchDef};
 
-    // Phase 4: Extended I/O (requires std for Arc/atomics)
+    // Preset Library (works with alloc - just data structures)
+    #[cfg(feature = "alloc")]
+    pub use crate::presets::{
+        ClassicPresets, PresetCategory, PresetInfo, PresetLibrary, SoundDesignPresets,
+        TutorialPresets,
+    };
+
+    // ========================================================================
+    // Std-only exports (require full std)
+    // ========================================================================
+
+    // Extended I/O (requires std for network, plugins, etc.)
     #[cfg(feature = "std")]
     pub use crate::extended_io::{
         AudioBusConfig, OscBinding, OscInput, OscMessage, OscPattern, OscReceiver, OscValue,
@@ -125,21 +140,14 @@ pub mod prelude {
         WebAudioProcessor, WebAudioWorklet,
     };
 
-    // Phase 5: Module Development Kit (requires std)
+    // Module Development Kit (requires std)
     #[cfg(feature = "std")]
     pub use crate::mdk::{
         AudioAnalysis, DocFormat, DocGenerator, ModuleCategory, ModulePresets, ModuleTemplate,
         ModuleTestHarness, PortTemplate, StateFieldTemplate, TestResult, TestSuiteResult,
     };
 
-    // Phase 5: Preset Library (requires std)
-    #[cfg(feature = "std")]
-    pub use crate::presets::{
-        ClassicPresets, PresetCategory, PresetInfo, PresetLibrary, SoundDesignPresets,
-        TutorialPresets,
-    };
-
-    // Phase 5: Visual Tools (requires std)
+    // Visual Tools (requires std)
     #[cfg(feature = "std")]
     pub use crate::visual::{
         AutomationData, AutomationPoint, AutomationRecorder, AutomationTrack, DotExporter,

@@ -97,23 +97,30 @@ quiver = "0.1"
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `std` | Yes | Full functionality with I/O, serialization, and visualization |
-| `simd` | No | SIMD vectorization for block processing |
+| `std` | Yes | Full functionality including OSC, plugins, visualization (implies `alloc`) |
+| `alloc` | No | Serialization, presets, and I/O for `no_std` + heap environments |
+| `simd` | No | SIMD vectorization for block processing (works with any tier) |
 
 ### `no_std` Support
 
-Quiver supports `no_std` environments for embedded systems and WebAssembly:
+Quiver supports three tiers for different environments:
 
 ```toml
-[dependencies]
+# Tier 1: Core DSP only (embedded, no heap)
 quiver = { version = "0.1", default-features = false }
+
+# Tier 2: With serialization & presets (WASM web apps)
+quiver = { version = "0.1", default-features = false, features = ["alloc"] }
+
+# Tier 3: Full std (desktop apps, default)
+quiver = "0.1"
 ```
 
-In `no_std` mode, core DSP modules are available using `alloc` and `libm`. The following modules require `std`:
-- I/O modules (MIDI, external inputs)
-- Serialization (JSON save/load)
-- Visualization tools (Scope, Spectrum Analyzer)
-- Preset library and Module Development Kit
+| Tier | DSP | Serialize | Presets | I/O | OSC/Plugins | Visual |
+|------|-----|-----------|---------|-----|-------------|--------|
+| Core | ✓ | | | | | |
+| `alloc` | ✓ | ✓ | ✓ | ✓ | | |
+| `std` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 Build a simple synthesizer patch:
 

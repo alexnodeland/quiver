@@ -382,15 +382,18 @@ pub trait GraphModule: Send + Sync {
         "unknown"
     }
 
-    /// Serialize module state (std feature only)
-    #[cfg(feature = "std")]
+    /// Serialize module state (alloc feature only)
+    #[cfg(feature = "alloc")]
     fn serialize_state(&self) -> Option<serde_json::Value> {
         None
     }
 
-    /// Deserialize module state (std feature only)
-    #[cfg(feature = "std")]
-    fn deserialize_state(&mut self, _state: &serde_json::Value) -> Result<(), String> {
+    /// Deserialize module state (alloc feature only)
+    #[cfg(feature = "alloc")]
+    fn deserialize_state(
+        &mut self,
+        _state: &serde_json::Value,
+    ) -> Result<(), alloc::string::String> {
         Ok(())
     }
 }

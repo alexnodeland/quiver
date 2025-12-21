@@ -36,48 +36,64 @@ quiver = { git = "https://github.com/alexnodeland/quiver", features = ["simd"] }
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `std` | Yes | Full functionality with I/O, serialization, and visualization tools |
-| `simd` | No | SIMD vectorization for block processing |
+| `std` | Yes | Full functionality including OSC, plugins, visualization (implies `alloc`) |
+| `alloc` | No | Serialization, presets, and I/O for `no_std` + heap environments |
+| `simd` | No | SIMD vectorization for block processing (works with any tier) |
 
-### `no_std` Support
+### Feature Tiers
 
-Quiver supports `no_std` environments for embedded systems and WebAssembly targets. To use Quiver without the standard library:
+Quiver supports three tiers for different environments:
+
+#### Tier 1: Core Only (`default-features = false`)
+
+For bare-metal embedded systems without heap allocation:
 
 ```toml
 [dependencies]
 quiver = { git = "https://github.com/alexnodeland/quiver", default-features = false }
 ```
 
-#### What's Available in `no_std` Mode
+Includes all core DSP modules: oscillators, filters, envelopes, amplifiers, mixers, utilities, logic modules, analog modeling, polyphony, and the patch graph.
 
-Core DSP functionality works in `no_std` using the `alloc` crate and `libm` for math operations:
+#### Tier 2: With Alloc (`features = ["alloc"]`)
 
-- All oscillators (VCO, LFO, AnalogVco)
-- All filters (SVF, DiodeLadderFilter)
-- Envelope generators (ADSR)
-- Amplifiers and mixers (VCA, Mixer)
-- Utility modules (Clock, Quantizer, SlewLimiter, etc.)
-- Logic modules (AND, OR, XOR, NOT, Comparator)
-- Analog modeling (Saturator, Wavefolder, component drift)
-- Polyphony (VoiceAllocator, PolyPatch)
-- Patch graph with all connection types
+For WASM web apps and embedded systems with heap:
 
-#### What Requires `std`
+```toml
+[dependencies]
+quiver = { git = "https://github.com/alexnodeland/quiver", default-features = false, features = ["alloc"] }
+```
 
-The following modules are only available with the `std` feature:
+Adds:
+- **Serialization** - JSON save/load for patches (`PatchDef`, `ModuleDef`, `CableDef`)
+- **Presets** - Ready-to-use patch presets (`ClassicPresets`, `PresetLibrary`)
+- **I/O Modules** - External inputs/outputs, MIDI state (`AtomicF64`, `MidiState`)
 
-| Module | Reason |
-|--------|--------|
-| `io` (AtomicF64, MidiState, ExternalInput/Output) | Thread-safe atomics and system I/O |
-| `extended_io` (OSC, Plugin wrapper, Web Audio) | Network and plugin host interfaces |
-| `serialize` (PatchDef, JSON save/load) | serde_json requires std |
-| `visual` (Scope, SpectrumAnalyzer, LevelMeter) | FFT and visualization tools |
-| `mdk` (ModuleTemplate, DocGenerator) | Module development kit |
-| `presets` (ClassicPresets, PresetLibrary) | Preset management |
+#### Tier 3: Full Std (default)
+
+For desktop applications and DAW plugins:
+
+```toml
+[dependencies]
+quiver = { git = "https://github.com/alexnodeland/quiver" }
+```
+
+Adds:
+- **Extended I/O** - OSC protocol, plugin wrappers, Web Audio interfaces
+- **Visual Tools** - Scope, Spectrum Analyzer, Level Meter, Automation Recorder
+- **MDK** - Module Development Kit for creating custom modules
+
+#### Feature Matrix
+
+| Tier | DSP | Serialize | Presets | I/O | OSC/Plugins | Visual | MDK |
+|------|-----|-----------|---------|-----|-------------|--------|-----|
+| Core | ✓ | | | | | | |
+| `alloc` | ✓ | ✓ | ✓ | ✓ | | | |
+| `std` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 #### Implementation Notes
 
-- Uses `BTreeMap` instead of `HashMap` (no hashing in `no_std`)
+- Uses `BTreeMap` instead of `HashMap` in non-std modes (no hashing required)
 - Includes a seedable Xorshift128+ RNG for deterministic random generation
 - Math functions provided by `libm` (sin, cos, pow, sqrt, exp, log, etc.)
 - Heap allocations via `alloc` crate (Vec, Box, String)

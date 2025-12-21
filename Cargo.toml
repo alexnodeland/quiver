@@ -26,7 +26,11 @@ harness = false
 
 [features]
 default = ["std"]
-std = ["serde/std", "serde_json", "slotmap/std", "rand"]
+# Full standard library support (includes alloc)
+std = ["alloc", "serde/std", "slotmap/std", "rand"]
+# Heap allocation support for no_std (enables serialization, presets, I/O)
+alloc = ["serde_json"]
+# SIMD vectorization (works with any feature combination)
 simd = []
 
 [[example]]

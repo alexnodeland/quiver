@@ -287,18 +287,30 @@ All audio processing uses `f64` for:
 
 ### `no_std` Support
 
-The library supports `no_std` environments through a feature flag:
+The library supports three feature tiers for different environments:
 
-- **Default** (`std` feature enabled): Full functionality including I/O, serialization, and visual tools
-- **`no_std`** (`default-features = false`): Core DSP modules using `alloc`, `libm`, and `BTreeMap`
+| Tier | Feature | Use Case |
+|------|---------|----------|
+| Core | `default-features = false` | Bare-metal embedded, no heap |
+| Alloc | `features = ["alloc"]` | WASM web apps, embedded with heap |
+| Std | default | Desktop apps, DAW plugins |
 
-Key adaptations for `no_std`:
+**Tier 1 (Core)**: All DSP modules using `alloc`, `libm`, and `BTreeMap`
+**Tier 2 (Alloc)**: Adds serialization, presets, and I/O modules
+**Tier 3 (Std)**: Adds OSC, plugin wrappers, visualization, and MDK
+
+Key adaptations for non-std modes:
 - `BTreeMap` replaces `HashMap` for ordered, `alloc`-compatible collections
 - Seedable `Xorshift128+` RNG replaces `rand` crate
 - `libm` provides math functions (sin, cos, pow, sqrt, etc.)
 - `core::` primitives replace `std::` equivalents
 
-For embedded/WASM targets, use:
+For WASM web apps with save/load support:
+```toml
+quiver = { version = "0.1", default-features = false, features = ["alloc"] }
+```
+
+For embedded without heap:
 ```toml
 quiver = { version = "0.1", default-features = false }
 ```
