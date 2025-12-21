@@ -129,8 +129,8 @@ pub mod prelude {
     // Serialization (works with alloc via serde_json alloc feature)
     #[cfg(feature = "alloc")]
     pub use crate::serialize::{
-        CableDef, ModuleDef, ModuleMetadata, ModuleRegistry, PatchDef, ValidationError,
-        ValidationResult,
+        CableDef, CatalogResponse, ModuleCatalogEntry, ModuleDef, ModuleMetadata, ModuleRegistry,
+        PatchDef, PortSummary, ValidationError, ValidationResult,
     };
 
     // Preset Library (works with alloc - just data structures)

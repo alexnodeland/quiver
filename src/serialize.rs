@@ -173,6 +173,87 @@ pub struct ModuleMetadata {
     pub category: String,
     pub description: String,
     pub port_spec: PortSpec,
+    /// Keywords for search functionality
+    pub keywords: Vec<String>,
+    /// Tags for filtering (e.g., "essential", "advanced")
+    pub tags: Vec<String>,
+}
+
+// =============================================================================
+// Module Catalog Types (Phase 3: GUI Framework)
+// =============================================================================
+
+/// Summary of a module's port configuration for the catalog UI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortSummary {
+    /// Number of input ports
+    pub inputs: u8,
+    /// Number of output ports
+    pub outputs: u8,
+    /// Whether the module has audio input(s)
+    pub has_audio_in: bool,
+    /// Whether the module has audio output(s)
+    pub has_audio_out: bool,
+}
+
+impl PortSummary {
+    /// Create a port summary from a PortSpec
+    pub fn from_port_spec(spec: &PortSpec) -> Self {
+        use crate::port::SignalKind;
+
+        let has_audio_in = spec.inputs.iter().any(|p| p.kind == SignalKind::Audio);
+        let has_audio_out = spec.outputs.iter().any(|p| p.kind == SignalKind::Audio);
+
+        Self {
+            inputs: spec.inputs.len() as u8,
+            outputs: spec.outputs.len() as u8,
+            has_audio_in,
+            has_audio_out,
+        }
+    }
+}
+
+/// A catalog entry for the "add module" UI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleCatalogEntry {
+    /// Module type identifier (e.g., "vco", "svf")
+    pub type_id: String,
+    /// Human-readable name (e.g., "VCO", "State Variable Filter")
+    pub name: String,
+    /// Category for grouping (e.g., "Oscillators", "Filters")
+    pub category: String,
+    /// Longer description for tooltips/help
+    pub description: String,
+    /// Search keywords (e.g., ["oscillator", "sine", "saw", "pulse"])
+    pub keywords: Vec<String>,
+    /// Port configuration summary
+    pub ports: PortSummary,
+    /// Tags for filtering (e.g., ["essential", "advanced", "analog"])
+    pub tags: Vec<String>,
+}
+
+impl ModuleCatalogEntry {
+    /// Create a catalog entry from ModuleMetadata
+    pub fn from_metadata(metadata: &ModuleMetadata) -> Self {
+        Self {
+            type_id: metadata.type_id.clone(),
+            name: metadata.name.clone(),
+            category: metadata.category.clone(),
+            description: metadata.description.clone(),
+            keywords: metadata.keywords.clone(),
+            ports: PortSummary::from_port_spec(&metadata.port_spec),
+            tags: metadata.tags.clone(),
+        }
+    }
+}
+
+/// Response from catalog() containing all modules and categories
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogResponse {
+    /// All available modules
+    pub modules: Vec<ModuleCatalogEntry>,
+    /// All unique categories (sorted)
+    pub categories: Vec<String>,
 }
 
 /// Registry of available module types for instantiation
@@ -195,305 +276,453 @@ impl ModuleRegistry {
     }
 
     fn register_builtin(&mut self) {
+        // =====================================================================
         // Oscillators
-        self.register_factory(
+        // =====================================================================
+        self.register_factory_with_keywords(
             "vco",
             "VCO",
             "Oscillators",
             "Voltage-controlled oscillator with multiple waveforms",
+            &[
+                "oscillator",
+                "sine",
+                "saw",
+                "pulse",
+                "triangle",
+                "waveform",
+                "pitch",
+            ],
+            &["essential"],
             |sr| Box::new(Vco::new(sr)),
         );
 
-        self.register_factory(
+        self.register_factory_with_keywords(
             "analog_vco",
             "Analog VCO",
             "Oscillators",
             "VCO with analog modeling (drift, saturation)",
+            &[
+                "oscillator",
+                "analog",
+                "drift",
+                "warm",
+                "vintage",
+                "detuned",
+            ],
+            &["analog"],
             |sr| Box::new(AnalogVco::new(sr)),
         );
 
-        self.register_factory(
+        self.register_factory_with_keywords(
             "lfo",
             "LFO",
             "Modulation",
             "Low-frequency oscillator for modulation",
+            &[
+                "oscillator",
+                "modulation",
+                "vibrato",
+                "tremolo",
+                "slow",
+                "sweep",
+            ],
+            &["essential"],
             |sr| Box::new(Lfo::new(sr)),
         );
 
+        // =====================================================================
         // Filters
-        self.register_factory(
+        // =====================================================================
+        self.register_factory_with_keywords(
             "svf",
             "SVF",
             "Filters",
             "State-variable filter with LP/BP/HP/Notch outputs",
+            &[
+                "filter",
+                "lowpass",
+                "highpass",
+                "bandpass",
+                "notch",
+                "resonance",
+                "cutoff",
+            ],
+            &["essential"],
             |sr| Box::new(Svf::new(sr)),
         );
 
-        // Envelopes
-        self.register_factory(
-            "adsr",
-            "ADSR",
-            "Envelopes",
-            "Attack-Decay-Sustain-Release envelope generator",
-            |sr| Box::new(Adsr::new(sr)),
-        );
-
-        // Amplifiers
-        self.register_factory(
-            "vca",
-            "VCA",
-            "Utilities",
-            "Voltage-controlled amplifier",
-            |_| Box::new(Vca::new()),
-        );
-
-        // Utilities
-        self.register_factory(
-            "mixer",
-            "Mixer",
-            "Utilities",
-            "4-channel audio mixer",
-            |_| Box::new(Mixer::new(4)),
-        );
-
-        self.register_factory(
-            "offset",
-            "Offset",
-            "Utilities",
-            "DC offset / voltage source",
-            |_| Box::new(Offset::new(0.0)),
-        );
-
-        self.register_factory(
-            "unit_delay",
-            "Unit Delay",
-            "Utilities",
-            "Single-sample delay for feedback",
-            |_| Box::new(UnitDelay::new()),
-        );
-
-        // Sources
-        self.register_factory(
-            "noise",
-            "Noise",
-            "Sources",
-            "White and pink noise generator",
-            |_| Box::new(NoiseGenerator::new()),
-        );
-
-        // Sequencing
-        self.register_factory(
-            "step_sequencer",
-            "Step Sequencer",
-            "Sequencing",
-            "8-step CV/gate sequencer",
-            |_| Box::new(StepSequencer::new()),
-        );
-
-        // Output
-        self.register_factory(
-            "stereo_output",
-            "Stereo Output",
-            "I/O",
-            "Final stereo audio output",
-            |_| Box::new(StereoOutput::new()),
-        );
-
-        // Analog modeling
-        self.register_factory(
-            "saturator",
-            "Saturator",
-            "Effects",
-            "Soft saturation / overdrive",
-            |_| Box::new(Saturator::default()),
-        );
-
-        self.register_factory(
-            "wavefolder",
-            "Wavefolder",
-            "Effects",
-            "Wavefolder for complex harmonics",
-            |_| Box::new(Wavefolder::default()),
-        );
-
-        // Utility modules
-        self.register_factory(
-            "sample_and_hold",
-            "Sample & Hold",
-            "Utilities",
-            "Sample input value on trigger",
-            |_| Box::new(SampleAndHold::new()),
-        );
-
-        self.register_factory(
-            "slew_limiter",
-            "Slew Limiter",
-            "Utilities",
-            "Limits rate of change (portamento/glide)",
-            |sr| Box::new(SlewLimiter::new(sr)),
-        );
-
-        self.register_factory(
-            "quantizer",
-            "Quantizer",
-            "Utilities",
-            "Quantize V/Oct to musical scales",
-            |_| Box::new(Quantizer::new(Scale::Chromatic)),
-        );
-
-        self.register_factory(
-            "clock",
-            "Clock",
-            "Sequencing",
-            "Master clock with tempo control",
-            |sr| Box::new(Clock::new(sr)),
-        );
-
-        self.register_factory(
-            "attenuverter",
-            "Attenuverter",
-            "Utilities",
-            "Attenuate, invert, and offset signals",
-            |_| Box::new(Attenuverter::new()),
-        );
-
-        self.register_factory(
-            "multiple",
-            "Multiple",
-            "Utilities",
-            "Signal splitter (1 input to 4 outputs)",
-            |_| Box::new(Multiple::new()),
-        );
-
-        // Phase 2 Modules
-
-        self.register_factory(
-            "ring_mod",
-            "Ring Modulator",
-            "Effects",
-            "Multiplies two signals for metallic/bell sounds",
-            |_| Box::new(RingModulator::new()),
-        );
-
-        self.register_factory(
-            "crossfader",
-            "Crossfader/Panner",
-            "Utilities",
-            "Crossfade between inputs or pan stereo",
-            |_| Box::new(Crossfader::new()),
-        );
-
-        self.register_factory(
-            "logic_and",
-            "Logic AND",
-            "Logic",
-            "Output high when both inputs are high",
-            |_| Box::new(LogicAnd::new()),
-        );
-
-        self.register_factory(
-            "logic_or",
-            "Logic OR",
-            "Logic",
-            "Output high when either input is high",
-            |_| Box::new(LogicOr::new()),
-        );
-
-        self.register_factory(
-            "logic_xor",
-            "Logic XOR",
-            "Logic",
-            "Output high when exactly one input is high",
-            |_| Box::new(LogicXor::new()),
-        );
-
-        self.register_factory(
-            "logic_not",
-            "Logic NOT",
-            "Logic",
-            "Invert gate signal",
-            |_| Box::new(LogicNot::new()),
-        );
-
-        self.register_factory(
-            "comparator",
-            "Comparator",
-            "Logic",
-            "Compare two CVs, output gates for greater/less/equal",
-            |_| Box::new(Comparator::new()),
-        );
-
-        self.register_factory(
-            "rectifier",
-            "Rectifier",
-            "Effects",
-            "Full-wave and half-wave rectification",
-            |_| Box::new(Rectifier::new()),
-        );
-
-        self.register_factory(
-            "precision_adder",
-            "Precision Adder",
-            "Utilities",
-            "High-precision CV adder for V/Oct signals",
-            |_| Box::new(PrecisionAdder::new()),
-        );
-
-        self.register_factory(
-            "vc_switch",
-            "VC Switch",
-            "Utilities",
-            "Voltage-controlled signal router",
-            |_| Box::new(VcSwitch::new()),
-        );
-
-        self.register_factory(
-            "bernoulli_gate",
-            "Bernoulli Gate",
-            "Random",
-            "Probabilistic trigger router",
-            |_| Box::new(BernoulliGate::new()),
-        );
-
-        self.register_factory(
-            "min",
-            "Min",
-            "Utilities",
-            "Output minimum of two signals",
-            |_| Box::new(Min::new()),
-        );
-
-        self.register_factory(
-            "max",
-            "Max",
-            "Utilities",
-            "Output maximum of two signals",
-            |_| Box::new(Max::new()),
-        );
-
-        // Phase 3 Modules
-
-        self.register_factory(
+        self.register_factory_with_keywords(
             "diode_ladder",
             "Diode Ladder Filter",
             "Filters",
             "24dB/oct ladder filter with diode saturation",
+            &[
+                "filter",
+                "ladder",
+                "moog",
+                "lowpass",
+                "resonance",
+                "saturation",
+                "analog",
+            ],
+            &["analog"],
             |sr| Box::new(DiodeLadderFilter::new(sr)),
         );
 
-        self.register_factory(
+        // =====================================================================
+        // Envelopes
+        // =====================================================================
+        self.register_factory_with_keywords(
+            "adsr",
+            "ADSR",
+            "Envelopes",
+            "Attack-Decay-Sustain-Release envelope generator",
+            &[
+                "envelope", "attack", "decay", "sustain", "release", "eg", "contour",
+            ],
+            &["essential"],
+            |sr| Box::new(Adsr::new(sr)),
+        );
+
+        // =====================================================================
+        // Amplifiers & VCAs
+        // =====================================================================
+        self.register_factory_with_keywords(
+            "vca",
+            "VCA",
+            "Utilities",
+            "Voltage-controlled amplifier",
+            &["amplifier", "gain", "volume", "level", "cv"],
+            &["essential"],
+            |_| Box::new(Vca::new()),
+        );
+
+        // =====================================================================
+        // Mixers & Utilities
+        // =====================================================================
+        self.register_factory_with_keywords(
+            "mixer",
+            "Mixer",
+            "Utilities",
+            "4-channel audio mixer",
+            &["mix", "combine", "sum", "blend", "audio"],
+            &["essential"],
+            |_| Box::new(Mixer::new(4)),
+        );
+
+        self.register_factory_with_keywords(
+            "offset",
+            "Offset",
+            "Utilities",
+            "DC offset / voltage source",
+            &["dc", "voltage", "constant", "bias", "source"],
+            &[],
+            |_| Box::new(Offset::new(0.0)),
+        );
+
+        self.register_factory_with_keywords(
+            "unit_delay",
+            "Unit Delay",
+            "Utilities",
+            "Single-sample delay for feedback",
+            &["delay", "feedback", "sample", "z-1"],
+            &["advanced"],
+            |_| Box::new(UnitDelay::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "attenuverter",
+            "Attenuverter",
+            "Utilities",
+            "Attenuate, invert, and offset signals",
+            &["attenuator", "invert", "scale", "offset", "gain"],
+            &["essential"],
+            |_| Box::new(Attenuverter::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "multiple",
+            "Multiple",
+            "Utilities",
+            "Signal splitter (1 input to 4 outputs)",
+            &["split", "copy", "mult", "buffer", "distribute"],
+            &["essential"],
+            |_| Box::new(Multiple::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "crossfader",
+            "Crossfader/Panner",
+            "Utilities",
+            "Crossfade between inputs or pan stereo",
+            &["crossfade", "pan", "stereo", "balance", "mix"],
+            &[],
+            |_| Box::new(Crossfader::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "precision_adder",
+            "Precision Adder",
+            "Utilities",
+            "High-precision CV adder for V/Oct signals",
+            &["add", "sum", "transpose", "octave", "voct", "pitch"],
+            &[],
+            |_| Box::new(PrecisionAdder::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "vc_switch",
+            "VC Switch",
+            "Utilities",
+            "Voltage-controlled signal router",
+            &["switch", "router", "selector", "mux", "demux"],
+            &[],
+            |_| Box::new(VcSwitch::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "min",
+            "Min",
+            "Utilities",
+            "Output minimum of two signals",
+            &["minimum", "compare", "math", "lowest"],
+            &[],
+            |_| Box::new(Min::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "max",
+            "Max",
+            "Utilities",
+            "Output maximum of two signals",
+            &["maximum", "compare", "math", "highest"],
+            &[],
+            |_| Box::new(Max::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "sample_and_hold",
+            "Sample & Hold",
+            "Utilities",
+            "Sample input value on trigger",
+            &["sample", "hold", "trigger", "freeze", "snapshot"],
+            &[],
+            |_| Box::new(SampleAndHold::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "slew_limiter",
+            "Slew Limiter",
+            "Utilities",
+            "Limits rate of change (portamento/glide)",
+            &["slew", "portamento", "glide", "lag", "smooth"],
+            &[],
+            |sr| Box::new(SlewLimiter::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "quantizer",
+            "Quantizer",
+            "Utilities",
+            "Quantize V/Oct to musical scales",
+            &["quantize", "scale", "pitch", "chromatic", "note", "tune"],
+            &[],
+            |_| Box::new(Quantizer::new(Scale::Chromatic)),
+        );
+
+        // =====================================================================
+        // Sources
+        // =====================================================================
+        self.register_factory_with_keywords(
+            "noise",
+            "Noise",
+            "Sources",
+            "White and pink noise generator",
+            &["noise", "white", "pink", "random", "hiss"],
+            &["essential"],
+            |_| Box::new(NoiseGenerator::new()),
+        );
+
+        // =====================================================================
+        // Sequencing
+        // =====================================================================
+        self.register_factory_with_keywords(
+            "step_sequencer",
+            "Step Sequencer",
+            "Sequencing",
+            "8-step CV/gate sequencer",
+            &["sequencer", "step", "pattern", "melody", "cv", "gate"],
+            &["essential"],
+            |_| Box::new(StepSequencer::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "clock",
+            "Clock",
+            "Sequencing",
+            "Master clock with tempo control",
+            &["clock", "tempo", "bpm", "trigger", "pulse", "sync"],
+            &["essential"],
+            |sr| Box::new(Clock::new(sr)),
+        );
+
+        // =====================================================================
+        // I/O
+        // =====================================================================
+        self.register_factory_with_keywords(
+            "stereo_output",
+            "Stereo Output",
+            "I/O",
+            "Final stereo audio output",
+            &["output", "stereo", "main", "master", "speaker", "audio"],
+            &["essential"],
+            |_| Box::new(StereoOutput::new()),
+        );
+
+        // =====================================================================
+        // Effects
+        // =====================================================================
+        self.register_factory_with_keywords(
+            "saturator",
+            "Saturator",
+            "Effects",
+            "Soft saturation / overdrive",
+            &[
+                "saturation",
+                "overdrive",
+                "distortion",
+                "warm",
+                "tube",
+                "tape",
+            ],
+            &["analog"],
+            |_| Box::new(Saturator::default()),
+        );
+
+        self.register_factory_with_keywords(
+            "wavefolder",
+            "Wavefolder",
+            "Effects",
+            "Wavefolder for complex harmonics",
+            &["wavefolder", "fold", "harmonics", "timbre", "west coast"],
+            &[],
+            |_| Box::new(Wavefolder::default()),
+        );
+
+        self.register_factory_with_keywords(
+            "ring_mod",
+            "Ring Modulator",
+            "Effects",
+            "Multiplies two signals for metallic/bell sounds",
+            &["ring", "modulator", "multiply", "bell", "metallic", "am"],
+            &[],
+            |_| Box::new(RingModulator::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "rectifier",
+            "Rectifier",
+            "Effects",
+            "Full-wave and half-wave rectification",
+            &["rectify", "absolute", "waveshape", "fold"],
+            &[],
+            |_| Box::new(Rectifier::new()),
+        );
+
+        // =====================================================================
+        // Logic
+        // =====================================================================
+        self.register_factory_with_keywords(
+            "logic_and",
+            "Logic AND",
+            "Logic",
+            "Output high when both inputs are high",
+            &["and", "gate", "boolean", "logic", "digital"],
+            &[],
+            |_| Box::new(LogicAnd::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "logic_or",
+            "Logic OR",
+            "Logic",
+            "Output high when either input is high",
+            &["or", "gate", "boolean", "logic", "digital"],
+            &[],
+            |_| Box::new(LogicOr::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "logic_xor",
+            "Logic XOR",
+            "Logic",
+            "Output high when exactly one input is high",
+            &["xor", "exclusive", "gate", "boolean", "logic", "digital"],
+            &[],
+            |_| Box::new(LogicXor::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "logic_not",
+            "Logic NOT",
+            "Logic",
+            "Invert gate signal",
+            &["not", "invert", "gate", "boolean", "logic", "digital"],
+            &[],
+            |_| Box::new(LogicNot::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "comparator",
+            "Comparator",
+            "Logic",
+            "Compare two CVs, output gates for greater/less/equal",
+            &["compare", "greater", "less", "equal", "threshold", "cv"],
+            &[],
+            |_| Box::new(Comparator::new()),
+        );
+
+        // =====================================================================
+        // Random
+        // =====================================================================
+        self.register_factory_with_keywords(
+            "bernoulli_gate",
+            "Bernoulli Gate",
+            "Random",
+            "Probabilistic trigger router",
+            &[
+                "random",
+                "probability",
+                "chance",
+                "coin",
+                "trigger",
+                "router",
+            ],
+            &[],
+            |_| Box::new(BernoulliGate::new()),
+        );
+
+        // =====================================================================
+        // Analog Modeling
+        // =====================================================================
+        self.register_factory_with_keywords(
             "crosstalk",
             "Crosstalk",
             "Analog Modeling",
             "Channel crosstalk simulation",
+            &["crosstalk", "bleed", "stereo", "channel", "analog"],
+            &["analog"],
             |sr| Box::new(Crosstalk::new(sr)),
         );
 
-        self.register_factory(
+        self.register_factory_with_keywords(
             "ground_loop",
             "Ground Loop",
             "Analog Modeling",
             "Ground loop hum simulation (50/60 Hz)",
+            &["ground", "hum", "buzz", "50hz", "60hz", "mains", "analog"],
+            &["analog"],
             |sr| Box::new(GroundLoop::new(sr)),
         );
     }
@@ -505,6 +734,30 @@ impl ModuleRegistry {
         name: &str,
         category: &str,
         description: &str,
+        factory: F,
+    ) where
+        F: Fn(f64) -> Box<dyn GraphModule> + Send + Sync + 'static,
+    {
+        self.register_factory_with_keywords(
+            type_id,
+            name,
+            category,
+            description,
+            &[],
+            &[],
+            factory,
+        );
+    }
+
+    /// Register a module factory with metadata, keywords, and tags
+    pub fn register_factory_with_keywords<F>(
+        &mut self,
+        type_id: &str,
+        name: &str,
+        category: &str,
+        description: &str,
+        keywords: &[&str],
+        tags: &[&str],
         factory: F,
     ) where
         F: Fn(f64) -> Box<dyn GraphModule> + Send + Sync + 'static,
@@ -524,6 +777,8 @@ impl ModuleRegistry {
                 category: category.to_string(),
                 description: description.to_string(),
                 port_spec,
+                keywords: keywords.iter().map(|s| s.to_string()).collect(),
+                tags: tags.iter().map(|s| s.to_string()).collect(),
             },
         );
     }
@@ -559,6 +814,105 @@ impl ModuleRegistry {
         cats.sort();
         cats.dedup();
         cats
+    }
+
+    // =========================================================================
+    // Catalog API (Phase 3: GUI Framework)
+    // =========================================================================
+
+    /// Get the full module catalog for the "add module" UI
+    pub fn catalog(&self) -> CatalogResponse {
+        let mut modules: Vec<ModuleCatalogEntry> = self
+            .metadata
+            .values()
+            .map(ModuleCatalogEntry::from_metadata)
+            .collect();
+
+        // Sort by category, then by name for consistent ordering
+        modules.sort_by(|a, b| (&a.category, &a.name).cmp(&(&b.category, &b.name)));
+
+        CatalogResponse {
+            modules,
+            categories: self.categories(),
+        }
+    }
+
+    /// Search modules by query string
+    ///
+    /// Matches against type_id, name, description, and keywords (case-insensitive)
+    pub fn search(&self, query: &str) -> Vec<ModuleCatalogEntry> {
+        let query_lower = query.to_lowercase();
+
+        let mut results: Vec<(ModuleCatalogEntry, u8)> = self
+            .metadata
+            .values()
+            .filter_map(|m| {
+                // Calculate match score (higher = better match)
+                let mut score: u8 = 0;
+
+                // Exact type_id match (highest priority)
+                if m.type_id.to_lowercase() == query_lower {
+                    score += 100;
+                }
+                // Exact name match
+                else if m.name.to_lowercase() == query_lower {
+                    score += 90;
+                }
+                // type_id contains query
+                else if m.type_id.to_lowercase().contains(&query_lower) {
+                    score += 70;
+                }
+                // name contains query
+                else if m.name.to_lowercase().contains(&query_lower) {
+                    score += 60;
+                }
+                // keyword exact match
+                else if m.keywords.iter().any(|k| k.to_lowercase() == query_lower) {
+                    score += 50;
+                }
+                // keyword contains query
+                else if m
+                    .keywords
+                    .iter()
+                    .any(|k| k.to_lowercase().contains(&query_lower))
+                {
+                    score += 40;
+                }
+                // description contains query
+                else if m.description.to_lowercase().contains(&query_lower) {
+                    score += 20;
+                }
+                // category contains query
+                else if m.category.to_lowercase().contains(&query_lower) {
+                    score += 10;
+                }
+
+                if score > 0 {
+                    Some((ModuleCatalogEntry::from_metadata(m), score))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by score (descending), then by name
+        results.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
+
+        results.into_iter().map(|(entry, _)| entry).collect()
+    }
+
+    /// Get modules in a specific category
+    pub fn by_category(&self, category: &str) -> Vec<ModuleCatalogEntry> {
+        let mut modules: Vec<ModuleCatalogEntry> = self
+            .metadata
+            .values()
+            .filter(|m| m.category.eq_ignore_ascii_case(category))
+            .map(ModuleCatalogEntry::from_metadata)
+            .collect();
+
+        // Sort by name for consistent ordering
+        modules.sort_by(|a, b| a.name.cmp(&b.name));
+        modules
     }
 }
 
@@ -1206,5 +1560,178 @@ mod tests {
         let error = ValidationError::new("modules[0].name", "Name is empty");
         let display = format!("{}", error);
         assert_eq!(display, "modules[0].name: Name is empty");
+    }
+
+    // =============================================================================
+    // Module Catalog Tests (Phase 3: GUI Framework)
+    // =============================================================================
+
+    #[test]
+    fn test_catalog_returns_all_modules() {
+        let registry = ModuleRegistry::new();
+        let catalog = registry.catalog();
+
+        // Should have all 36 built-in modules
+        assert!(catalog.modules.len() >= 36, "Expected at least 36 modules");
+
+        // Check some known modules exist
+        assert!(catalog.modules.iter().any(|m| m.type_id == "vco"));
+        assert!(catalog.modules.iter().any(|m| m.type_id == "svf"));
+        assert!(catalog.modules.iter().any(|m| m.type_id == "adsr"));
+    }
+
+    #[test]
+    fn test_catalog_categories() {
+        let registry = ModuleRegistry::new();
+        let catalog = registry.catalog();
+
+        // Should have expected categories
+        assert!(catalog.categories.contains(&"Oscillators".to_string()));
+        assert!(catalog.categories.contains(&"Filters".to_string()));
+        assert!(catalog.categories.contains(&"Utilities".to_string()));
+        assert!(catalog.categories.contains(&"Effects".to_string()));
+
+        // Categories should be sorted
+        let mut sorted_cats = catalog.categories.clone();
+        sorted_cats.sort();
+        assert_eq!(catalog.categories, sorted_cats);
+    }
+
+    #[test]
+    fn test_catalog_entry_has_port_summary() {
+        let registry = ModuleRegistry::new();
+        let catalog = registry.catalog();
+
+        let vco = catalog.modules.iter().find(|m| m.type_id == "vco").unwrap();
+        assert!(vco.ports.outputs > 0, "VCO should have outputs");
+        assert!(vco.ports.has_audio_out, "VCO should have audio output");
+
+        let stereo_out = catalog
+            .modules
+            .iter()
+            .find(|m| m.type_id == "stereo_output")
+            .unwrap();
+        assert!(
+            stereo_out.ports.inputs > 0,
+            "Stereo output should have inputs"
+        );
+        assert!(
+            stereo_out.ports.has_audio_in,
+            "Stereo output should have audio input"
+        );
+    }
+
+    #[test]
+    fn test_search_exact_type_id_match() {
+        let registry = ModuleRegistry::new();
+        let results = registry.search("vco");
+
+        assert!(!results.is_empty());
+        // Exact match should be first
+        assert_eq!(results[0].type_id, "vco");
+    }
+
+    #[test]
+    fn test_search_by_keyword() {
+        let registry = ModuleRegistry::new();
+        let results = registry.search("oscillator");
+
+        // Should find VCO, Analog VCO, LFO (all have "oscillator" keyword)
+        assert!(results.len() >= 3);
+        assert!(results.iter().any(|m| m.type_id == "vco"));
+        assert!(results.iter().any(|m| m.type_id == "analog_vco"));
+        assert!(results.iter().any(|m| m.type_id == "lfo"));
+    }
+
+    #[test]
+    fn test_search_case_insensitive() {
+        let registry = ModuleRegistry::new();
+        let results_lower = registry.search("filter");
+        let results_upper = registry.search("FILTER");
+        let results_mixed = registry.search("FiLtEr");
+
+        assert_eq!(results_lower.len(), results_upper.len());
+        assert_eq!(results_lower.len(), results_mixed.len());
+    }
+
+    #[test]
+    fn test_search_by_description() {
+        let registry = ModuleRegistry::new();
+        let results = registry.search("saturation");
+
+        // Should find saturator, diode_ladder, analog_vco (all mention saturation)
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|m| m.type_id == "saturator"));
+    }
+
+    #[test]
+    fn test_search_no_results() {
+        let registry = ModuleRegistry::new();
+        let results = registry.search("nonexistent_xyz_123");
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_by_category() {
+        let registry = ModuleRegistry::new();
+        let oscillators = registry.by_category("Oscillators");
+
+        assert!(oscillators.len() >= 2);
+        assert!(oscillators.iter().all(|m| m.category == "Oscillators"));
+        assert!(oscillators.iter().any(|m| m.type_id == "vco"));
+        assert!(oscillators.iter().any(|m| m.type_id == "analog_vco"));
+    }
+
+    #[test]
+    fn test_by_category_case_insensitive() {
+        let registry = ModuleRegistry::new();
+        let filters1 = registry.by_category("Filters");
+        let filters2 = registry.by_category("filters");
+        let filters3 = registry.by_category("FILTERS");
+
+        assert_eq!(filters1.len(), filters2.len());
+        assert_eq!(filters1.len(), filters3.len());
+    }
+
+    #[test]
+    fn test_by_category_sorted_by_name() {
+        let registry = ModuleRegistry::new();
+        let utilities = registry.by_category("Utilities");
+
+        // Check that results are sorted by name
+        let names: Vec<_> = utilities.iter().map(|m| &m.name).collect();
+        let mut sorted_names = names.clone();
+        sorted_names.sort();
+        assert_eq!(names, sorted_names);
+    }
+
+    #[test]
+    fn test_catalog_entry_serialization() {
+        let registry = ModuleRegistry::new();
+        let catalog = registry.catalog();
+
+        // Should serialize to JSON without errors
+        let json = serde_json::to_string(&catalog).unwrap();
+        assert!(json.contains("\"type_id\""));
+        assert!(json.contains("\"category\""));
+        assert!(json.contains("\"keywords\""));
+
+        // Should deserialize back
+        let deserialized: CatalogResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.modules.len(), catalog.modules.len());
+    }
+
+    #[test]
+    fn test_module_has_keywords_and_tags() {
+        let registry = ModuleRegistry::new();
+        let metadata = registry.get_metadata("vco").unwrap();
+
+        // VCO should have keywords
+        assert!(!metadata.keywords.is_empty());
+        assert!(metadata.keywords.contains(&"oscillator".to_string()));
+
+        // VCO should have "essential" tag
+        assert!(metadata.tags.contains(&"essential".to_string()));
     }
 }

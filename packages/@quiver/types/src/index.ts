@@ -544,6 +544,158 @@ export interface ModuleMetadata {
 
   /** Port specification */
   port_spec: PortSpec;
+
+  /** Keywords for search functionality */
+  keywords: string[];
+
+  /** Tags for filtering (e.g., "essential", "advanced", "analog") */
+  tags: string[];
+}
+
+// =============================================================================
+// Module Catalog Types (Phase 3: GUI Framework)
+// =============================================================================
+
+/**
+ * Summary of a module's port configuration for the catalog UI
+ * Corresponds to Rust: PortSummary in src/serialize.rs
+ */
+export interface PortSummary {
+  /** Number of input ports */
+  inputs: number;
+
+  /** Number of output ports */
+  outputs: number;
+
+  /** Whether the module has audio input(s) */
+  has_audio_in: boolean;
+
+  /** Whether the module has audio output(s) */
+  has_audio_out: boolean;
+}
+
+/**
+ * A catalog entry for the "add module" UI
+ * Corresponds to Rust: ModuleCatalogEntry in src/serialize.rs
+ */
+export interface ModuleCatalogEntry {
+  /** Module type identifier (e.g., "vco", "svf") */
+  type_id: ModuleTypeId;
+
+  /** Human-readable name (e.g., "VCO", "State Variable Filter") */
+  name: string;
+
+  /** Category for grouping (e.g., "Oscillators", "Filters") */
+  category: ModuleCategory;
+
+  /** Longer description for tooltips/help */
+  description: string;
+
+  /** Search keywords (e.g., ["oscillator", "sine", "saw", "pulse"]) */
+  keywords: string[];
+
+  /** Port configuration summary */
+  ports: PortSummary;
+
+  /** Tags for filtering (e.g., ["essential", "advanced", "analog"]) */
+  tags: string[];
+}
+
+/**
+ * Response from catalog() containing all modules and categories
+ * Corresponds to Rust: CatalogResponse in src/serialize.rs
+ */
+export interface CatalogResponse {
+  /** All available modules */
+  modules: ModuleCatalogEntry[];
+
+  /** All unique categories (sorted) */
+  categories: ModuleCategory[];
+}
+
+/**
+ * Create a PortSummary from a PortSpec
+ */
+export function createPortSummary(spec: PortSpec): PortSummary {
+  return {
+    inputs: spec.inputs.length,
+    outputs: spec.outputs.length,
+    has_audio_in: spec.inputs.some((p) => p.kind === 'audio'),
+    has_audio_out: spec.outputs.some((p) => p.kind === 'audio'),
+  };
+}
+
+/**
+ * Search modules by query string (client-side implementation)
+ * Matches against type_id, name, description, and keywords (case-insensitive)
+ */
+export function searchModules(
+  modules: ModuleCatalogEntry[],
+  query: string
+): ModuleCatalogEntry[] {
+  const q = query.toLowerCase();
+
+  // Score and sort results
+  const scored = modules
+    .map((m) => {
+      let score = 0;
+
+      // Exact type_id match
+      if (m.type_id.toLowerCase() === q) score = 100;
+      // Exact name match
+      else if (m.name.toLowerCase() === q) score = 90;
+      // type_id contains query
+      else if (m.type_id.toLowerCase().includes(q)) score = 70;
+      // name contains query
+      else if (m.name.toLowerCase().includes(q)) score = 60;
+      // keyword exact match
+      else if (m.keywords.some((k) => k.toLowerCase() === q)) score = 50;
+      // keyword contains query
+      else if (m.keywords.some((k) => k.toLowerCase().includes(q))) score = 40;
+      // description contains query
+      else if (m.description.toLowerCase().includes(q)) score = 20;
+      // category contains query
+      else if (m.category.toLowerCase().includes(q)) score = 10;
+
+      return { module: m, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.module.name.localeCompare(b.module.name));
+
+  return scored.map((item) => item.module);
+}
+
+/**
+ * Filter modules by category
+ */
+export function filterByCategory(
+  modules: ModuleCatalogEntry[],
+  category: ModuleCategory
+): ModuleCatalogEntry[] {
+  return modules
+    .filter((m) => m.category === category)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Filter modules by tag
+ */
+export function filterByTag(
+  modules: ModuleCatalogEntry[],
+  tag: string
+): ModuleCatalogEntry[] {
+  return modules.filter((m) => m.tags.includes(tag));
+}
+
+/**
+ * Get all unique categories from modules
+ */
+export function getCategories(modules: ModuleCatalogEntry[]): ModuleCategory[] {
+  const categories = new Set<ModuleCategory>();
+  for (const m of modules) {
+    categories.add(m.category);
+  }
+  return Array.from(categories).sort();
 }
 
 // =============================================================================
