@@ -297,9 +297,7 @@ fn bench_sample_rate_simple_patch(c: &mut Criterion) {
             &sample_rate,
             |b, &sr| {
                 let mut patch = create_simple_patch(sr);
-                b.iter(|| {
-                    black_box(patch.tick())
-                });
+                b.iter(|| black_box(patch.tick()));
             },
         );
     }
@@ -319,9 +317,7 @@ fn bench_sample_rate_modulated_patch(c: &mut Criterion) {
             &sample_rate,
             |b, &sr| {
                 let mut patch = create_modulated_patch(sr);
-                b.iter(|| {
-                    black_box(patch.tick())
-                });
+                b.iter(|| black_box(patch.tick()));
             },
         );
     }
@@ -341,9 +337,7 @@ fn bench_sample_rate_complex_patch(c: &mut Criterion) {
             &sample_rate,
             |b, &sr| {
                 let mut patch = create_complex_patch(sr);
-                b.iter(|| {
-                    black_box(patch.tick())
-                });
+                b.iter(|| black_box(patch.tick()));
             },
         );
     }
@@ -441,9 +435,7 @@ fn bench_polyphony_scaling(c: &mut Criterion) {
                     poly.note_on(60 + i as u8, 100);
                 }
 
-                b.iter(|| {
-                    black_box(poly.tick())
-                });
+                b.iter(|| black_box(poly.tick()));
             },
         );
     }
@@ -573,9 +565,7 @@ fn bench_unison_processing(c: &mut Criterion) {
                 // Activate one voice with unison
                 poly.note_on(60, 100);
 
-                b.iter(|| {
-                    black_box(poly.tick())
-                });
+                b.iter(|| black_box(poly.tick()));
             },
         );
     }
@@ -635,83 +625,59 @@ fn bench_audio_block_operations(c: &mut Criterion) {
     for size in block_sizes {
         group.throughput(Throughput::Elements(size as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("add_scalar", size),
-            &size,
-            |b, &sz| {
-                let mut block = AudioBlock::new(sz);
-                for i in 0..sz {
-                    block.set(i, i as f64 * 0.001);
-                }
+        group.bench_with_input(BenchmarkId::new("add_scalar", size), &size, |b, &sz| {
+            let mut block = AudioBlock::new(sz);
+            for i in 0..sz {
+                block.set(i, i as f64 * 0.001);
+            }
 
-                b.iter(|| {
-                    block.add_scalar(black_box(0.5));
-                    block.get(0)
-                });
-            },
-        );
+            b.iter(|| {
+                block.add_scalar(black_box(0.5));
+                block.get(0)
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("mul_scalar", size),
-            &size,
-            |b, &sz| {
-                let mut block = AudioBlock::new(sz);
-                for i in 0..sz {
-                    block.set(i, i as f64 * 0.001);
-                }
+        group.bench_with_input(BenchmarkId::new("mul_scalar", size), &size, |b, &sz| {
+            let mut block = AudioBlock::new(sz);
+            for i in 0..sz {
+                block.set(i, i as f64 * 0.001);
+            }
 
-                b.iter(|| {
-                    block.mul_scalar(black_box(0.5));
-                    block.get(0)
-                });
-            },
-        );
+            b.iter(|| {
+                block.mul_scalar(black_box(0.5));
+                block.get(0)
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("soft_clip", size),
-            &size,
-            |b, &sz| {
-                let mut block = AudioBlock::new(sz);
-                for i in 0..sz {
-                    block.set(i, (i as f64 - sz as f64 / 2.0) * 0.02);
-                }
+        group.bench_with_input(BenchmarkId::new("soft_clip", size), &size, |b, &sz| {
+            let mut block = AudioBlock::new(sz);
+            for i in 0..sz {
+                block.set(i, (i as f64 - sz as f64 / 2.0) * 0.02);
+            }
 
-                b.iter(|| {
-                    block.soft_clip(black_box(1.5));
-                    block.get(0)
-                });
-            },
-        );
+            b.iter(|| {
+                block.soft_clip(black_box(1.5));
+                block.get(0)
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("peak", size),
-            &size,
-            |b, &sz| {
-                let mut block = AudioBlock::new(sz);
-                for i in 0..sz {
-                    block.set(i, (i as f64 * 0.1).sin());
-                }
+        group.bench_with_input(BenchmarkId::new("peak", size), &size, |b, &sz| {
+            let mut block = AudioBlock::new(sz);
+            for i in 0..sz {
+                block.set(i, (i as f64 * 0.1).sin());
+            }
 
-                b.iter(|| {
-                    black_box(block.peak())
-                });
-            },
-        );
+            b.iter(|| black_box(block.peak()));
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("rms", size),
-            &size,
-            |b, &sz| {
-                let mut block = AudioBlock::new(sz);
-                for i in 0..sz {
-                    block.set(i, (i as f64 * 0.1).sin());
-                }
+        group.bench_with_input(BenchmarkId::new("rms", size), &size, |b, &sz| {
+            let mut block = AudioBlock::new(sz);
+            for i in 0..sz {
+                block.set(i, (i as f64 * 0.1).sin());
+            }
 
-                b.iter(|| {
-                    black_box(block.rms())
-                });
-            },
-        );
+            b.iter(|| black_box(block.rms()));
+        });
     }
 
     group.finish();
@@ -727,12 +693,12 @@ fn bench_realtime_compliance(c: &mut Criterion) {
 
     // Common pro-audio configurations
     let configs = [
-        ("44.1kHz/256", 44100.0, 256),   // ~5.8ms budget
-        ("48kHz/256", 48000.0, 256),     // ~5.3ms budget
-        ("48kHz/128", 48000.0, 128),     // ~2.7ms budget - tighter
-        ("96kHz/256", 96000.0, 256),     // ~2.7ms budget
-        ("96kHz/128", 96000.0, 128),     // ~1.3ms budget - very tight
-        ("192kHz/256", 192000.0, 256),   // ~1.3ms budget
+        ("44.1kHz/256", 44100.0, 256), // ~5.8ms budget
+        ("48kHz/256", 48000.0, 256),   // ~5.3ms budget
+        ("48kHz/128", 48000.0, 128),   // ~2.7ms budget - tighter
+        ("96kHz/256", 96000.0, 256),   // ~2.7ms budget
+        ("96kHz/128", 96000.0, 128),   // ~1.3ms budget - very tight
+        ("192kHz/256", 192000.0, 256), // ~1.3ms budget
     ];
 
     for (name, sample_rate, buffer_size) in configs {
@@ -772,7 +738,11 @@ fn bench_polyphonic_realtime(c: &mut Criterion) {
     let buffer_size = 256;
     let time_budget_ns = (buffer_size as f64 / sample_rate) * 1_000_000_000.0;
 
-    eprintln!("\n48kHz/256 buffer time budget: {:.0}ns ({:.2}ms)", time_budget_ns, time_budget_ns / 1_000_000.0);
+    eprintln!(
+        "\n48kHz/256 buffer time budget: {:.0}ns ({:.2}ms)",
+        time_budget_ns,
+        time_budget_ns / 1_000_000.0
+    );
 
     for &num_voices in &VOICE_COUNTS {
         group.throughput(Throughput::Elements(buffer_size as u64));
@@ -887,10 +857,7 @@ criterion_group!(
     bench_unison_processing,
 );
 
-criterion_group!(
-    simd_benches,
-    bench_audio_block_operations,
-);
+criterion_group!(simd_benches, bench_audio_block_operations,);
 
 criterion_group!(
     realtime_benches,
@@ -898,11 +865,7 @@ criterion_group!(
     bench_polyphonic_realtime,
 );
 
-criterion_group!(
-    patch_benches,
-    bench_patch_compilation,
-    bench_throughput,
-);
+criterion_group!(patch_benches, bench_patch_compilation, bench_throughput,);
 
 criterion_main!(
     module_benches,
