@@ -78,6 +78,161 @@ impl SignalKind {
     }
 }
 
+// =============================================================================
+// GUI Signal Semantics (Phase 2)
+// =============================================================================
+
+/// CSS hex color values for each signal type (for cable coloring in UI)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalColors {
+    /// Audio signal color (default: red #e94560)
+    pub audio: String,
+    /// Bipolar CV color (default: dark blue #0f3460)
+    pub cv_bipolar: String,
+    /// Unipolar CV color (default: cyan #00b4d8)
+    pub cv_unipolar: String,
+    /// V/Oct pitch CV color (default: green #90be6d)
+    pub volt_per_octave: String,
+    /// Gate signal color (default: yellow #f9c74f)
+    pub gate: String,
+    /// Trigger signal color (default: orange #f8961e)
+    pub trigger: String,
+    /// Clock signal color (default: purple #9d4edd)
+    pub clock: String,
+}
+
+impl Default for SignalColors {
+    fn default() -> Self {
+        Self {
+            audio: "#e94560".into(),
+            cv_bipolar: "#0f3460".into(),
+            cv_unipolar: "#00b4d8".into(),
+            volt_per_octave: "#90be6d".into(),
+            gate: "#f9c74f".into(),
+            trigger: "#f8961e".into(),
+            clock: "#9d4edd".into(),
+        }
+    }
+}
+
+impl SignalColors {
+    /// Get the color for a specific signal kind
+    pub fn get(&self, kind: SignalKind) -> &str {
+        match kind {
+            SignalKind::Audio => &self.audio,
+            SignalKind::CvBipolar => &self.cv_bipolar,
+            SignalKind::CvUnipolar => &self.cv_unipolar,
+            SignalKind::VoltPerOctave => &self.volt_per_octave,
+            SignalKind::Gate => &self.gate,
+            SignalKind::Trigger => &self.trigger,
+            SignalKind::Clock => &self.clock,
+        }
+    }
+}
+
+/// Enhanced port information for GUI display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortInfo {
+    /// Unique identifier within the module
+    pub id: u32,
+    /// Human-readable name
+    pub name: String,
+    /// Signal type
+    pub kind: SignalKind,
+    /// Port this is normalled to (by name, for UI display)
+    pub normalled_to: Option<String>,
+    /// Optional description for tooltips
+    pub description: Option<String>,
+}
+
+impl PortInfo {
+    /// Create a new PortInfo
+    pub fn new(id: u32, name: impl Into<String>, kind: SignalKind) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            kind,
+            normalled_to: None,
+            description: None,
+        }
+    }
+
+    /// Set the normalled connection
+    pub fn with_normalled_to(mut self, port_name: impl Into<String>) -> Self {
+        self.normalled_to = Some(port_name.into());
+        self
+    }
+
+    /// Set the description
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = Some(desc.into());
+        self
+    }
+}
+
+impl From<&PortDef> for PortInfo {
+    fn from(def: &PortDef) -> Self {
+        Self {
+            id: def.id,
+            name: def.name.clone(),
+            kind: def.kind,
+            normalled_to: None, // PortDef uses PortId, PortInfo uses name string
+            description: None,
+        }
+    }
+}
+
+/// Compatibility status for port connections
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum Compatibility {
+    /// Exact signal type match
+    Exact,
+    /// Compatible connection (different but valid)
+    Allowed,
+    /// Connection works but may have issues
+    Warning { message: String },
+}
+
+/// Check if two signal kinds are compatible for connection
+///
+/// Returns the compatibility status indicating whether the connection is:
+/// - Exact: Same signal types
+/// - Allowed: Different but compatible types
+/// - Warning: Works but may cause issues (e.g., clicks, tuning problems)
+pub fn ports_compatible(from: SignalKind, to: SignalKind) -> Compatibility {
+    use SignalKind::*;
+
+    match (from, to) {
+        // Exact match
+        (a, b) if a == b => Compatibility::Exact,
+
+        // Audio can go anywhere
+        (Audio, _) => Compatibility::Allowed,
+
+        // CV interoperability
+        (CvBipolar, CvUnipolar) | (CvUnipolar, CvBipolar) => Compatibility::Allowed,
+
+        // V/Oct to CV is allowed
+        (VoltPerOctave, CvBipolar) | (VoltPerOctave, CvUnipolar) => Compatibility::Allowed,
+
+        // Gate/Trigger/Clock interoperability
+        (Gate, Trigger) | (Trigger, Gate) => Compatibility::Allowed,
+        (Clock, Gate) | (Clock, Trigger) => Compatibility::Allowed,
+
+        // Warnings for potentially problematic connections
+        (Gate, Audio) | (Trigger, Audio) => Compatibility::Warning {
+            message: "Gate/Trigger to Audio may cause clicks".into(),
+        },
+        (CvBipolar, VoltPerOctave) | (CvUnipolar, VoltPerOctave) => Compatibility::Warning {
+            message: "CV to V/Oct may cause tuning issues".into(),
+        },
+
+        // Default: allow other combinations
+        _ => Compatibility::Allowed,
+    }
+}
+
 /// Definition of a single port (input or output)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortDef {
@@ -587,5 +742,139 @@ mod tests {
 
         let above = range.apply(1.5);
         assert!((above - 20000.0).abs() < 1e-10);
+    }
+
+    // =============================================================================
+    // Signal Semantics Tests (Phase 2)
+    // =============================================================================
+
+    #[test]
+    fn test_signal_colors_default() {
+        let colors = SignalColors::default();
+        assert_eq!(colors.audio, "#e94560");
+        assert_eq!(colors.cv_bipolar, "#0f3460");
+        assert_eq!(colors.cv_unipolar, "#00b4d8");
+        assert_eq!(colors.volt_per_octave, "#90be6d");
+        assert_eq!(colors.gate, "#f9c74f");
+        assert_eq!(colors.trigger, "#f8961e");
+        assert_eq!(colors.clock, "#9d4edd");
+    }
+
+    #[test]
+    fn test_signal_colors_get() {
+        let colors = SignalColors::default();
+        assert_eq!(colors.get(SignalKind::Audio), "#e94560");
+        assert_eq!(colors.get(SignalKind::Gate), "#f9c74f");
+        assert_eq!(colors.get(SignalKind::VoltPerOctave), "#90be6d");
+    }
+
+    #[test]
+    fn test_port_info_creation() {
+        let info = PortInfo::new(0, "test", SignalKind::Audio)
+            .with_description("A test port")
+            .with_normalled_to("other");
+
+        assert_eq!(info.id, 0);
+        assert_eq!(info.name, "test");
+        assert_eq!(info.kind, SignalKind::Audio);
+        assert_eq!(info.description, Some("A test port".to_string()));
+        assert_eq!(info.normalled_to, Some("other".to_string()));
+    }
+
+    #[test]
+    fn test_port_info_from_port_def() {
+        let def = PortDef::new(5, "cutoff", SignalKind::CvUnipolar);
+        let info = PortInfo::from(&def);
+
+        assert_eq!(info.id, 5);
+        assert_eq!(info.name, "cutoff");
+        assert_eq!(info.kind, SignalKind::CvUnipolar);
+        assert!(info.normalled_to.is_none());
+        assert!(info.description.is_none());
+    }
+
+    #[test]
+    fn test_ports_compatible_exact() {
+        assert_eq!(
+            ports_compatible(SignalKind::Audio, SignalKind::Audio),
+            Compatibility::Exact
+        );
+        assert_eq!(
+            ports_compatible(SignalKind::Gate, SignalKind::Gate),
+            Compatibility::Exact
+        );
+        assert_eq!(
+            ports_compatible(SignalKind::VoltPerOctave, SignalKind::VoltPerOctave),
+            Compatibility::Exact
+        );
+    }
+
+    #[test]
+    fn test_ports_compatible_audio_to_anything() {
+        assert_eq!(
+            ports_compatible(SignalKind::Audio, SignalKind::CvBipolar),
+            Compatibility::Allowed
+        );
+        assert_eq!(
+            ports_compatible(SignalKind::Audio, SignalKind::Gate),
+            Compatibility::Allowed
+        );
+    }
+
+    #[test]
+    fn test_ports_compatible_cv_interop() {
+        assert_eq!(
+            ports_compatible(SignalKind::CvBipolar, SignalKind::CvUnipolar),
+            Compatibility::Allowed
+        );
+        assert_eq!(
+            ports_compatible(SignalKind::CvUnipolar, SignalKind::CvBipolar),
+            Compatibility::Allowed
+        );
+        assert_eq!(
+            ports_compatible(SignalKind::VoltPerOctave, SignalKind::CvBipolar),
+            Compatibility::Allowed
+        );
+    }
+
+    #[test]
+    fn test_ports_compatible_gate_trigger_interop() {
+        assert_eq!(
+            ports_compatible(SignalKind::Gate, SignalKind::Trigger),
+            Compatibility::Allowed
+        );
+        assert_eq!(
+            ports_compatible(SignalKind::Trigger, SignalKind::Gate),
+            Compatibility::Allowed
+        );
+        assert_eq!(
+            ports_compatible(SignalKind::Clock, SignalKind::Gate),
+            Compatibility::Allowed
+        );
+    }
+
+    #[test]
+    fn test_ports_compatible_warnings() {
+        // Gate to Audio warning
+        let compat = ports_compatible(SignalKind::Gate, SignalKind::Audio);
+        assert!(matches!(compat, Compatibility::Warning { .. }));
+
+        // CV to V/Oct warning
+        let compat = ports_compatible(SignalKind::CvBipolar, SignalKind::VoltPerOctave);
+        assert!(matches!(compat, Compatibility::Warning { .. }));
+    }
+
+    #[test]
+    fn test_compatibility_serialization() {
+        let exact = Compatibility::Exact;
+        let json = serde_json::to_string(&exact).unwrap();
+        assert!(json.contains("exact"));
+
+        let warning = Compatibility::Warning {
+            message: "test".to_string(),
+        };
+        let json = serde_json::to_string(&warning).unwrap();
+        assert!(json.contains("warning"));
+        assert!(json.contains("test"));
     }
 }

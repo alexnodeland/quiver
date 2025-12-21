@@ -39,7 +39,11 @@ pub mod simd;
 
 // Alloc-tier modules (work with no_std + alloc)
 #[cfg(feature = "alloc")]
+pub mod introspection;
+#[cfg(feature = "alloc")]
 pub mod io;
+#[cfg(feature = "alloc")]
+pub mod observer;
 #[cfg(feature = "alloc")]
 pub mod presets;
 #[cfg(feature = "alloc")]
@@ -63,8 +67,9 @@ pub mod prelude {
 
     // Layer 2: Port System
     pub use crate::port::{
-        BlockPortValues, GraphModule, ModulatedParam, ParamDef, ParamId, ParamRange, PortDef,
-        PortId, PortSpec, PortValues, SignalKind,
+        ports_compatible, BlockPortValues, Compatibility, GraphModule, ModulatedParam, ParamDef,
+        ParamId, ParamRange, PortDef, PortId, PortInfo, PortSpec, PortValues, SignalColors,
+        SignalKind,
     };
 
     // Layer 3: Patch Graph
@@ -117,9 +122,25 @@ pub mod prelude {
     #[cfg(feature = "alloc")]
     pub use crate::io::{AtomicF64, ExternalInput, ExternalOutput, MidiState};
 
+    // Introspection API (GUI parameter discovery)
+    #[cfg(feature = "alloc")]
+    pub use crate::introspection::{
+        ControlType, ModuleIntrospection, ParamCurve, ParamInfo, ValueFormat,
+    };
+
+    // Real-Time State Bridge (GUI live value streaming)
+    #[cfg(feature = "alloc")]
+    pub use crate::observer::{
+        calculate_peak_db, calculate_rms_db, GateDetector, LevelMeterState, ObservableValue,
+        ObserverConfig, StateObserver, SubscriptionTarget,
+    };
+
     // Serialization (works with alloc via serde_json alloc feature)
     #[cfg(feature = "alloc")]
-    pub use crate::serialize::{CableDef, ModuleDef, ModuleMetadata, ModuleRegistry, PatchDef};
+    pub use crate::serialize::{
+        CableDef, CatalogResponse, ModuleCatalogEntry, ModuleDef, ModuleMetadata, ModuleRegistry,
+        PatchDef, PortSummary, ValidationError, ValidationResult,
+    };
 
     // Preset Library (works with alloc - just data structures)
     #[cfg(feature = "alloc")]

@@ -700,6 +700,252 @@ function reactFlowToPatch(
 
 ---
 
+## Integration Layer (Part Two)
+
+The core types from Phases 1-5 are complete. The following integration work connects these types to the actual modules and exposes them to JavaScript.
+
+### Module Introspection Implementations
+
+Each built-in module must implement `ModuleIntrospection` to expose its parameters to the UI.
+
+**Modules requiring implementation (36 total):**
+
+| Category | Modules |
+|----------|---------|
+| Oscillators | `Vco`, `AnalogVco`, `Lfo` |
+| Filters | `StateVariableFilter`, `DiodeLadder` |
+| Envelopes | `Adsr` |
+| Utilities | `Vca`, `Mixer`, `Offset`, `UnitDelay`, `Multiple`, `Attenuverter`, `SlewLimiter`, `SampleAndHold`, `PrecisionAdder`, `VcSwitch`, `Min`, `Max` |
+| Sources | `Noise` |
+| Sequencing | `StepSequencer`, `Clock` |
+| Effects | `Saturator`, `Wavefolder`, `RingMod`, `Crossfader`, `Rectifier` |
+| Analog Modeling | `Crosstalk`, `GroundLoop` |
+| Logic | `LogicAnd`, `LogicOr`, `LogicXor`, `LogicNot`, `Comparator` |
+| Random | `BernoulliGate` |
+| I/O | `StereoOutput`, `Quantizer` |
+
+**Implementation pattern for each module:**
+
+```rust
+impl ModuleIntrospection for Vco {
+    fn param_infos(&self) -> Vec<ParamInfo> {
+        vec![
+            ParamInfo::frequency("frequency", "Frequency")
+                .with_range(0.1, 20000.0)
+                .with_default(440.0)
+                .with_value(self.frequency),
+            ParamInfo::select("waveform", "Waveform", 4)
+                .with_value(self.waveform as f64),
+            ParamInfo::percent("pulse_width", "Pulse Width")
+                .with_default(0.5)
+                .with_value(self.pulse_width),
+        ]
+    }
+
+    fn set_param_by_id(&mut self, id: &str, value: f64) -> bool {
+        match id {
+            "frequency" => { self.frequency = value; true }
+            "waveform" => { self.waveform = value as u8; true }
+            "pulse_width" => { self.pulse_width = value; true }
+            _ => false
+        }
+    }
+}
+```
+
+**Effort estimate:** ~2-4 hours (mostly mechanical, with some judgment on parameter ranges/curves)
+
+### WASM Bindings
+
+The WASM bindings expose the Rust engine to JavaScript via `wasm-bindgen`. This requires:
+
+1. **Feature flag setup** in `Cargo.toml`:
+
+```toml
+[features]
+wasm = ["wasm-bindgen", "tsify", "serde-wasm-bindgen", "alloc"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+tsify = { version = "0.4", features = ["js"] }
+serde-wasm-bindgen = "0.6"
+```
+
+2. **QuiverEngine wrapper** (`src/wasm/engine.rs`):
+
+```rust
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub struct QuiverEngine {
+    patch: Patch,
+    registry: ModuleRegistry,
+    observer: StateObserver,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl QuiverEngine {
+    #[wasm_bindgen(constructor)]
+    pub fn new(sample_rate: f64) -> Self {
+        let registry = ModuleRegistry::with_builtins();
+        Self {
+            patch: Patch::new(sample_rate),
+            registry,
+            observer: StateObserver::new(),
+        }
+    }
+
+    // Catalog API (Phase 3)
+    pub fn get_catalog(&self) -> Result<JsValue, JsError> {
+        Ok(serde_wasm_bindgen::to_value(&self.registry.catalog())?)
+    }
+
+    pub fn search_modules(&self, query: &str) -> Result<JsValue, JsError> {
+        Ok(serde_wasm_bindgen::to_value(&self.registry.search(query))?)
+    }
+
+    // Introspection API (Phase 1)
+    pub fn get_params(&self, node_id: &str) -> Result<JsValue, JsError> {
+        let module = self.patch.get_module(node_id)?;
+        let params = module.param_infos();
+        Ok(serde_wasm_bindgen::to_value(&params)?)
+    }
+
+    pub fn set_param(&mut self, node_id: &str, param_id: &str, value: f64) -> Result<(), JsError> {
+        let module = self.patch.get_module_mut(node_id)?;
+        module.set_param_by_id(param_id, value);
+        Ok(())
+    }
+
+    // Real-Time Bridge (Phase 4)
+    pub fn subscribe(&mut self, targets: JsValue) -> Result<(), JsError> {
+        let targets: Vec<SubscriptionTarget> = serde_wasm_bindgen::from_value(targets)?;
+        self.observer.add_subscriptions(targets);
+        Ok(())
+    }
+
+    pub fn unsubscribe(&mut self, target_keys: JsValue) -> Result<(), JsError> {
+        let keys: Vec<String> = serde_wasm_bindgen::from_value(target_keys)?;
+        self.observer.remove_subscriptions(&keys);
+        Ok(())
+    }
+
+    pub fn poll_updates(&mut self) -> Result<JsValue, JsError> {
+        let updates = self.observer.drain_updates();
+        Ok(serde_wasm_bindgen::to_value(&updates)?)
+    }
+
+    // Patch operations
+    pub fn load_patch(&mut self, patch_json: JsValue) -> Result<(), JsError> {
+        let patch_def: PatchDef = serde_wasm_bindgen::from_value(patch_json)?;
+        self.patch = self.registry.instantiate_patch(&patch_def)?;
+        Ok(())
+    }
+
+    pub fn save_patch(&self) -> Result<JsValue, JsError> {
+        let patch_def = self.patch.to_def();
+        Ok(serde_wasm_bindgen::to_value(&patch_def)?)
+    }
+
+    // Audio processing
+    pub fn process(&mut self, buffer_size: usize) -> Result<JsValue, JsError> {
+        let output = self.patch.process(buffer_size);
+        self.observer.collect_updates(&self.patch);
+        Ok(serde_wasm_bindgen::to_value(&output)?)
+    }
+}
+```
+
+3. **Build with wasm-pack:**
+
+```bash
+wasm-pack build --target web --features wasm
+```
+
+4. **React hooks** (`packages/@quiver/react/src/hooks.ts`):
+
+```typescript
+import { useEffect, useState, useRef, useCallback } from 'react';
+import type { ObservableValue, SubscriptionTarget } from '@quiver/types';
+import { getObservableValueKey } from '@quiver/types';
+
+export function useQuiverUpdates(
+  engine: QuiverEngine,
+  targets: SubscriptionTarget[]
+): Map<string, ObservableValue> {
+  const [values, setValues] = useState<Map<string, ObservableValue>>(new Map());
+  const targetsRef = useRef(targets);
+
+  useEffect(() => {
+    engine.subscribe(targets);
+    targetsRef.current = targets;
+
+    let animationId: number;
+    const poll = () => {
+      const updates = engine.poll_updates();
+      if (updates.length > 0) {
+        setValues(prev => {
+          const next = new Map(prev);
+          for (const update of updates) {
+            next.set(getObservableValueKey(update), update);
+          }
+          return next;
+        });
+      }
+      animationId = requestAnimationFrame(poll);
+    };
+    animationId = requestAnimationFrame(poll);
+
+    return () => {
+      cancelAnimationFrame(animationId);
+      engine.unsubscribe(targets.map(t => getSubscriptionTargetKey(t)));
+    };
+  }, [engine, JSON.stringify(targets)]);
+
+  return values;
+}
+
+export function useQuiverParam(
+  engine: QuiverEngine,
+  nodeId: string,
+  paramId: string
+): [number, (value: number) => void] {
+  const [value, setValue] = useState(0);
+
+  const targets = useMemo(
+    () => [{ type: 'param' as const, node_id: nodeId, param_id: paramId }],
+    [nodeId, paramId]
+  );
+
+  const updates = useQuiverUpdates(engine, targets);
+
+  useEffect(() => {
+    const key = `param:${nodeId}:${paramId}`;
+    const update = updates.get(key);
+    if (update?.type === 'param') {
+      setValue(update.value);
+    }
+  }, [updates, nodeId, paramId]);
+
+  const setParam = useCallback(
+    (newValue: number) => {
+      engine.set_param(nodeId, paramId, newValue);
+      setValue(newValue);
+    },
+    [engine, nodeId, paramId]
+  );
+
+  return [value, setParam];
+}
+```
+
+**Effort estimate:** ~4-8 hours (depends on AudioWorklet integration complexity)
+
+---
+
 ## File Structure
 
 ```
