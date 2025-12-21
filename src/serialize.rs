@@ -737,7 +737,7 @@ fn parse_port_ref(s: &str) -> Result<(&str, &str), PatchError> {
 /// A validation error with path and message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationError {
-    /// JSON path to the error location (e.g., "modules[0].name")
+    /// JSON path to the error location (e.g., `modules[0].name`)
     pub path: String,
     /// Human-readable error message
     pub message: String,
@@ -802,7 +802,10 @@ impl PatchDef {
 
         // Validate name
         if self.name.is_empty() {
-            errors.push(ValidationError::new("name", "Name must be a non-empty string"));
+            errors.push(ValidationError::new(
+                "name",
+                "Name must be a non-empty string",
+            ));
         }
 
         // Collect module names for duplicate checking
@@ -1049,7 +1052,11 @@ mod tests {
         def.cables.push(CableDef::new("vco1.saw", "output.left"));
 
         let result = def.validate();
-        assert!(result.valid, "Expected valid patch, got errors: {:?}", result.errors);
+        assert!(
+            result.valid,
+            "Expected valid patch, got errors: {:?}",
+            result.errors
+        );
         assert!(result.errors.is_empty());
     }
 
@@ -1071,7 +1078,10 @@ mod tests {
 
         let result = def.validate();
         assert!(!result.valid);
-        assert!(result.errors.iter().any(|e| e.message.contains("Duplicate")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("Duplicate")));
     }
 
     #[test]
@@ -1089,7 +1099,8 @@ mod tests {
     fn test_attenuation_range_validation() {
         let mut def = PatchDef::new("Test");
         def.modules.push(ModuleDef::new("vco1", "vco"));
-        def.cables.push(CableDef::new("a.out", "b.in").with_attenuation(5.0)); // Out of range
+        def.cables
+            .push(CableDef::new("a.out", "b.in").with_attenuation(5.0)); // Out of range
 
         let result = def.validate();
         assert!(!result.valid);
@@ -1100,7 +1111,8 @@ mod tests {
     fn test_offset_range_validation() {
         let mut def = PatchDef::new("Test");
         def.modules.push(ModuleDef::new("vco1", "vco"));
-        def.cables.push(CableDef::new("a.out", "b.in").with_offset(15.0)); // Out of range
+        def.cables
+            .push(CableDef::new("a.out", "b.in").with_offset(15.0)); // Out of range
 
         let result = def.validate();
         assert!(!result.valid);
@@ -1116,7 +1128,10 @@ mod tests {
 
         let result = def.validate_with_registry(&registry);
         assert!(!result.valid);
-        assert!(result.errors.iter().any(|e| e.message.contains("Unknown module type")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("Unknown module type")));
     }
 
     #[test]
@@ -1125,11 +1140,15 @@ mod tests {
 
         let mut def = PatchDef::new("Test");
         def.modules.push(ModuleDef::new("vco1", "vco"));
-        def.cables.push(CableDef::new("nonexistent.out", "vco1.voct"));
+        def.cables
+            .push(CableDef::new("nonexistent.out", "vco1.voct"));
 
         let result = def.validate_with_registry(&registry);
         assert!(!result.valid);
-        assert!(result.errors.iter().any(|e| e.message.contains("Unknown module")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("Unknown module")));
     }
 
     #[test]
@@ -1139,11 +1158,15 @@ mod tests {
         let mut def = PatchDef::new("Test");
         def.modules.push(ModuleDef::new("vco1", "vco"));
         def.modules.push(ModuleDef::new("output", "stereo_output"));
-        def.cables.push(CableDef::new("vco1.nonexistent_port", "output.left"));
+        def.cables
+            .push(CableDef::new("vco1.nonexistent_port", "output.left"));
 
         let result = def.validate_with_registry(&registry);
         assert!(!result.valid);
-        assert!(result.errors.iter().any(|e| e.message.contains("Unknown output port")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("Unknown output port")));
     }
 
     #[test]
@@ -1157,7 +1180,11 @@ mod tests {
         def.cables.push(CableDef::new("vco1.sin", "output.right"));
 
         let result = def.validate_with_registry(&registry);
-        assert!(result.valid, "Expected valid patch, got errors: {:?}", result.errors);
+        assert!(
+            result.valid,
+            "Expected valid patch, got errors: {:?}",
+            result.errors
+        );
     }
 
     #[test]
