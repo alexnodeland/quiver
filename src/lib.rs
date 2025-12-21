@@ -41,6 +41,8 @@ pub mod simd;
 #[cfg(feature = "alloc")]
 pub mod introspection;
 #[cfg(feature = "alloc")]
+mod introspection_impls; // ModuleIntrospection implementations for all modules
+#[cfg(feature = "alloc")]
 pub mod io;
 #[cfg(feature = "alloc")]
 pub mod observer;

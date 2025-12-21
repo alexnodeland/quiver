@@ -731,7 +731,7 @@ impl GraphModule for Mixer {
 ///
 /// Adds a constant offset to a signal.
 pub struct Offset {
-    offset: f64,
+    pub(crate) offset: f64,
     spec: PortSpec,
 }
 
@@ -884,7 +884,7 @@ pub struct NoiseGenerator {
     /// Phase 3: Secondary pink noise for stereo correlation
     pink2: PinkNoiseState,
     /// Phase 3: Correlation amount between channels (0 = independent, 1 = identical)
-    correlation: f64,
+    pub(crate) correlation: f64,
     /// Phase 3: Last white noise sample for correlation
     last_white: f64,
     spec: PortSpec,
@@ -1068,7 +1068,7 @@ pub struct GroundLoop {
     /// Hum oscillator phase
     phase: f64,
     /// Hum frequency (50 or 60 Hz)
-    frequency: f64,
+    pub(crate) frequency: f64,
     /// Thermal modulation state
     thermal_state: f64,
     spec: PortSpec,
@@ -1472,7 +1472,7 @@ impl GraphModule for SlewLimiter {
 /// Quantizes input CV to musical scale degrees.
 /// Supports chromatic, major, minor, and pentatonic scales.
 pub struct Quantizer {
-    scale: Scale,
+    pub(crate) scale: Scale,
     spec: PortSpec,
 }
 
