@@ -94,10 +94,11 @@ impl ValueFormat {
 // =============================================================================
 
 /// How parameter values are scaled between min and max
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ParamCurve {
     /// Linear interpolation between min and max
+    #[default]
     Linear,
     /// Exponential scaling (good for frequency, time)
     Exponential,
@@ -105,12 +106,6 @@ pub enum ParamCurve {
     Logarithmic,
     /// Discrete steps
     Stepped { steps: u32 },
-}
-
-impl Default for ParamCurve {
-    fn default() -> Self {
-        ParamCurve::Linear
-    }
 }
 
 impl ParamCurve {
@@ -185,10 +180,11 @@ impl ParamCurve {
 // =============================================================================
 
 /// Suggested UI control type for a parameter
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlType {
     /// Rotary knob (most common for synth parameters)
+    #[default]
     Knob,
     /// Linear slider (vertical or horizontal)
     Slider,
@@ -196,12 +192,6 @@ pub enum ControlType {
     Toggle,
     /// Dropdown or segmented selector for discrete options
     Select,
-}
-
-impl Default for ControlType {
-    fn default() -> Self {
-        ControlType::Knob
-    }
 }
 
 // =============================================================================

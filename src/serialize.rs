@@ -750,6 +750,7 @@ impl ModuleRegistry {
     }
 
     /// Register a module factory with metadata, keywords, and tags
+    #[allow(clippy::too_many_arguments)]
     pub fn register_factory_with_keywords<F>(
         &mut self,
         type_id: &str,
