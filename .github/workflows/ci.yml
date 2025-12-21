@@ -6,43 +6,32 @@ on:
   pull_request:
     branches: [main, master]
 
-# Cancel outdated runs for the same branch/PR
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
 
 jobs:
-  # All jobs run in parallel for fastest feedback
-
-  fmt:
-    name: Format
+  # Fast lint checks - single job to reduce setup overhead
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-features -- -D warnings
 
+  # Main test job
   test:
-    name: Test Suite
+    name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,21 +39,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --all-features
-      - name: Run doc tests
-        run: cargo test --doc --all-features
 
-  # MSRV - Minimum Supported Rust Version
-  # Note: Cargo.lock v4 format requires Rust 1.78+
-  msrv:
-    name: MSRV (1.78)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.78.0
-      - uses: Swatinem/rust-cache@v2
-      - name: Check MSRV compatibility
-        run: cargo check --all-features
-
+  # Examples - only when source or examples change
   examples:
     name: Examples
     runs-on: ubuntu-latest
@@ -72,11 +48,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build all examples
-        run: cargo build --examples --all-features
-      # Run examples in parallel for faster execution
-      - name: Run examples
+      - name: Build and run examples
         run: |
+          cargo build --examples --all-features
           cargo run --example quick_taste &
           cargo run --example first_patch &
           cargo run --example tutorial_subtractive &
@@ -84,8 +58,9 @@ jobs:
           cargo run --example tutorial_filter_mod &
           wait
 
+  # Documentation - check rustdoc warnings
   doc:
-    name: Documentation
+    name: Docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,25 +70,36 @@ jobs:
         run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
-      - name: Upload rustdoc
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustdoc
-          path: target/doc/
 
+  # ============================================================================
+  # Main branch only - expensive or comparative checks
+  # ============================================================================
+
+  # MSRV check - only on main (PRs should just work if main works)
+  msrv:
+    name: MSRV (1.78)
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.78.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check MSRV
+        run: cargo check --all-features
+
+  # Benchmarks - only meaningful on main for comparisons
   bench:
     name: Benchmarks
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Check benchmarks compile
-        run: cargo bench --no-run
-      - name: Run benchmark tests
-        run: cargo bench -- --test
+      - name: Run benchmarks
+        run: cargo bench --no-run && cargo bench -- --test
 
-  # Coverage only on main branch to save CI time on PRs
+  # Coverage - expensive, main only
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
