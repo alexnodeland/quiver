@@ -16,31 +16,21 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ============================================================================
-  # TIER 1: Quick checks (< 30 seconds) - fail fast on basic issues
-  # ============================================================================
-  quick-checks:
-    name: Quick Checks (fmt + check)
+  # All jobs run in parallel for fastest feedback
+
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Cargo check
-        run: cargo check --all-features
-
-  # ============================================================================
-  # TIER 2: Linting (depends on quick-checks passing)
-  # ============================================================================
   clippy:
     name: Clippy
-    needs: quick-checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,13 +41,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-features -- -D warnings
 
-  # ============================================================================
-  # TIER 3: Tests and validation (depends on clippy passing)
-  # These jobs run in parallel after linting passes
-  # ============================================================================
   test:
     name: Test Suite
-    needs: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +57,6 @@ jobs:
   # Note: Cargo.lock v4 format requires Rust 1.78+
   msrv:
     name: MSRV (1.78)
-    needs: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,16 +67,13 @@ jobs:
 
   examples:
     name: Examples
-    needs: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-
       - name: Build all examples
         run: cargo build --examples --all-features
-
       # Run examples in parallel for faster execution
       - name: Run examples
         run: |
@@ -105,7 +86,6 @@ jobs:
 
   doc:
     name: Documentation
-    needs: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -123,7 +103,6 @@ jobs:
 
   bench:
     name: Benchmarks
-    needs: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,14 +113,10 @@ jobs:
       - name: Run benchmark tests
         run: cargo bench -- --test
 
-  # ============================================================================
-  # TIER 4: Expensive jobs (only on main branch)
-  # ============================================================================
+  # Coverage only on main branch to save CI time on PRs
   coverage:
     name: Coverage
-    needs: test
     runs-on: ubuntu-latest
-    # Only run coverage on main branch to save CI time on PRs
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v4
@@ -151,9 +126,3 @@ jobs:
         uses: taiki-e/install-action@cargo-tarpaulin
       - name: Run coverage
         run: cargo tarpaulin --all-features --fail-under 80
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: cobertura.xml
-        if: always()
