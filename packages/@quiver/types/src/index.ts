@@ -1041,3 +1041,177 @@ function validateCableDef(cable: unknown, path: string): ValidationError[] {
 
   return errors;
 }
+
+// =============================================================================
+// Real-Time State Bridge (Phase 4: GUI Framework)
+// =============================================================================
+
+/**
+ * Values that can be observed and streamed to the UI
+ * Corresponds to Rust: ObservableValue in src/observer.rs
+ */
+export type ObservableValue =
+  | { type: 'param'; node_id: string; param_id: string; value: number }
+  | { type: 'level'; node_id: string; port_id: number; rms_db: number; peak_db: number }
+  | { type: 'gate'; node_id: string; port_id: number; active: boolean }
+  | { type: 'scope'; node_id: string; port_id: number; samples: number[] }
+  | { type: 'spectrum'; node_id: string; port_id: number; bins: number[]; freq_range: [number, number] };
+
+/**
+ * Subscription target specifying what to observe
+ * Corresponds to Rust: SubscriptionTarget in src/observer.rs
+ */
+export type SubscriptionTarget =
+  | { type: 'param'; node_id: string; param_id: string }
+  | { type: 'level'; node_id: string; port_id: number }
+  | { type: 'gate'; node_id: string; port_id: number }
+  | { type: 'scope'; node_id: string; port_id: number; buffer_size: number }
+  | { type: 'spectrum'; node_id: string; port_id: number; fft_size: number };
+
+/**
+ * Get a unique key for an observable value (for deduplication in UI state)
+ */
+export function getObservableValueKey(value: ObservableValue): string {
+  switch (value.type) {
+    case 'param':
+      return `param:${value.node_id}:${value.param_id}`;
+    case 'level':
+      return `level:${value.node_id}:${value.port_id}`;
+    case 'gate':
+      return `gate:${value.node_id}:${value.port_id}`;
+    case 'scope':
+      return `scope:${value.node_id}:${value.port_id}`;
+    case 'spectrum':
+      return `spectrum:${value.node_id}:${value.port_id}`;
+  }
+}
+
+/**
+ * Get a unique key for a subscription target
+ */
+export function getSubscriptionTargetKey(target: SubscriptionTarget): string {
+  switch (target.type) {
+    case 'param':
+      return `param:${target.node_id}:${target.param_id}`;
+    case 'level':
+      return `level:${target.node_id}:${target.port_id}`;
+    case 'gate':
+      return `gate:${target.node_id}:${target.port_id}`;
+    case 'scope':
+      return `scope:${target.node_id}:${target.port_id}`;
+    case 'spectrum':
+      return `spectrum:${target.node_id}:${target.port_id}`;
+  }
+}
+
+/**
+ * Create a param subscription target
+ */
+export function subscribeParam(nodeId: string, paramId: string): SubscriptionTarget {
+  return { type: 'param', node_id: nodeId, param_id: paramId };
+}
+
+/**
+ * Create a level meter subscription target
+ */
+export function subscribeLevel(nodeId: string, portId: number): SubscriptionTarget {
+  return { type: 'level', node_id: nodeId, port_id: portId };
+}
+
+/**
+ * Create a gate subscription target
+ */
+export function subscribeGate(nodeId: string, portId: number): SubscriptionTarget {
+  return { type: 'gate', node_id: nodeId, port_id: portId };
+}
+
+/**
+ * Create a scope subscription target
+ */
+export function subscribeScope(
+  nodeId: string,
+  portId: number,
+  bufferSize: number = 512
+): SubscriptionTarget {
+  return { type: 'scope', node_id: nodeId, port_id: portId, buffer_size: bufferSize };
+}
+
+/**
+ * Create a spectrum analyzer subscription target
+ */
+export function subscribeSpectrum(
+  nodeId: string,
+  portId: number,
+  fftSize: number = 1024
+): SubscriptionTarget {
+  return { type: 'spectrum', node_id: nodeId, port_id: portId, fft_size: fftSize };
+}
+
+/**
+ * Configuration for the state observer
+ */
+export interface ObserverConfig {
+  /** Maximum updates per second (default: 60) */
+  maxUpdateRate: number;
+  /** Maximum pending updates before oldest are dropped (default: 1000) */
+  maxPendingUpdates: number;
+  /** Default scope buffer size (default: 512) */
+  defaultScopeBufferSize: number;
+  /** Default FFT size for spectrum analysis (default: 1024) */
+  defaultFftSize: number;
+}
+
+/**
+ * Default observer configuration
+ */
+export const DEFAULT_OBSERVER_CONFIG: ObserverConfig = {
+  maxUpdateRate: 60,
+  maxPendingUpdates: 1000,
+  defaultScopeBufferSize: 512,
+  defaultFftSize: 1024,
+};
+
+/**
+ * Bridge interface for both WASM and HTTP backends
+ */
+export interface QuiverBridge {
+  /** Subscribe to real-time values */
+  subscribe(targets: SubscriptionTarget[]): void;
+
+  /** Unsubscribe from specific targets */
+  unsubscribe(targetKeys: string[]): void;
+
+  /** Poll for pending updates (WASM) or register callback (HTTP) */
+  onUpdate(callback: (updates: ObservableValue[]) => void): () => void;
+}
+
+/**
+ * Calculate RMS level in decibels from samples
+ */
+export function calculateRmsDb(samples: number[]): number {
+  if (samples.length === 0) return -Infinity;
+
+  const sumSq = samples.reduce((sum, s) => sum + s * s, 0);
+  const rms = Math.sqrt(sumSq / samples.length);
+
+  return rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+}
+
+/**
+ * Calculate peak level in decibels from samples
+ */
+export function calculatePeakDb(samples: number[]): number {
+  if (samples.length === 0) return -Infinity;
+
+  const peak = samples.reduce((max, s) => Math.max(max, Math.abs(s)), 0);
+
+  return peak > 0 ? 20 * Math.log10(peak) : -Infinity;
+}
+
+/**
+ * Format decibels for display
+ */
+export function formatDb(db: number): string {
+  if (!isFinite(db)) return '-∞ dB';
+  return `${db.toFixed(1)} dB`;
+}

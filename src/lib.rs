@@ -43,6 +43,8 @@ pub mod introspection;
 #[cfg(feature = "alloc")]
 pub mod io;
 #[cfg(feature = "alloc")]
+pub mod observer;
+#[cfg(feature = "alloc")]
 pub mod presets;
 #[cfg(feature = "alloc")]
 pub mod serialize;
@@ -124,6 +126,13 @@ pub mod prelude {
     #[cfg(feature = "alloc")]
     pub use crate::introspection::{
         ControlType, ModuleIntrospection, ParamCurve, ParamInfo, ValueFormat,
+    };
+
+    // Real-Time State Bridge (GUI live value streaming)
+    #[cfg(feature = "alloc")]
+    pub use crate::observer::{
+        calculate_peak_db, calculate_rms_db, GateDetector, LevelMeterState, ObservableValue,
+        ObserverConfig, StateObserver, SubscriptionTarget,
     };
 
     // Serialization (works with alloc via serde_json alloc feature)
