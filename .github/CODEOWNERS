@@ -1,0 +1,28 @@
+# CODEOWNERS - Define code owners for automatic review requests
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything in the repo
+* @alexnodeland
+
+# Core library
+/src/ @alexnodeland
+
+# DSP modules - critical for audio quality
+/src/modules.rs @alexnodeland
+/src/analog.rs @alexnodeland
+/src/combinator.rs @alexnodeland
+
+# CI/CD and build configuration
+/.github/ @alexnodeland
+/Cargo.toml @alexnodeland
+/Makefile @alexnodeland
+
+# Documentation
+/docs/ @alexnodeland
+/*.md @alexnodeland
+
+# Examples
+/examples/ @alexnodeland
+
+# Benchmarks
+/benches/ @alexnodeland
