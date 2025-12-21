@@ -33,6 +33,10 @@ const SAMPLE_RATES: [f64; 4] = [44100.0, 48000.0, 96000.0, 192000.0];
 const BUFFER_SIZES: [usize; 4] = [64, 128, 256, 512];
 const VOICE_COUNTS: [usize; 5] = [1, 4, 8, 16, 32];
 
+// Extended constants for stress testing
+const ULTRA_LOW_LATENCY_BUFFERS: [usize; 3] = [16, 32, 48];
+const HIGH_POLYPHONY_COUNTS: [usize; 3] = [48, 64, 128];
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -823,6 +827,354 @@ fn bench_throughput(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Stress Test Benchmarks
+// ============================================================================
+
+/// Ultra-low latency benchmarks (16-48 sample buffers)
+fn bench_ultra_low_latency(c: &mut Criterion) {
+    let mut group = c.benchmark_group("stress/ultra_low_latency");
+
+    let sample_rate = 48000.0;
+
+    for buffer_size in ULTRA_LOW_LATENCY_BUFFERS {
+        let time_budget_us = (buffer_size as f64 / sample_rate) * 1_000_000.0;
+
+        group.throughput(Throughput::Elements(buffer_size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("simple_patch", buffer_size),
+            &buffer_size,
+            |b, &buf_size| {
+                let mut patch = create_simple_patch(sample_rate);
+                b.iter(|| {
+                    for _ in 0..buf_size {
+                        black_box(patch.tick());
+                    }
+                });
+            },
+        );
+
+        eprintln!(
+            "  {} samples @ 48kHz: budget = {:.1}µs ({:.3}ms)",
+            buffer_size,
+            time_budget_us,
+            time_budget_us / 1000.0
+        );
+    }
+
+    group.finish();
+}
+
+/// High polyphony stress test (48-128 voices)
+fn bench_high_polyphony(c: &mut Criterion) {
+    let mut group = c.benchmark_group("stress/high_polyphony");
+
+    let sample_rate = 48000.0;
+
+    for &num_voices in &HIGH_POLYPHONY_COUNTS {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("tick", num_voices),
+            &num_voices,
+            |b, &voices| {
+                let mut poly = PolyPatch::new(voices, sample_rate);
+                poly.compile().unwrap();
+
+                // Activate all voices with different notes
+                for i in 0..voices {
+                    poly.note_on(36 + (i as u8 % 48), 100);
+                }
+
+                b.iter(|| black_box(poly.tick()));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// High polyphony with buffer processing
+fn bench_high_polyphony_buffer(c: &mut Criterion) {
+    let mut group = c.benchmark_group("stress/high_polyphony_buffer");
+
+    let sample_rate = 48000.0;
+    let buffer_size = 128;
+
+    for &num_voices in &HIGH_POLYPHONY_COUNTS {
+        group.throughput(Throughput::Elements(buffer_size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("128_samples", num_voices),
+            &num_voices,
+            |b, &voices| {
+                let mut poly = PolyPatch::new(voices, sample_rate);
+                poly.compile().unwrap();
+
+                for i in 0..voices {
+                    poly.note_on(36 + (i as u8 % 48), 100);
+                }
+
+                b.iter(|| {
+                    for _ in 0..buffer_size {
+                        black_box(poly.tick());
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Additional Module Benchmarks
+// ============================================================================
+
+fn bench_noise_generator(c: &mut Criterion) {
+    let mut group = c.benchmark_group("modules/noise");
+
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("tick", |b| {
+        let mut noise = NoiseGenerator::new();
+        let inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        b.iter(|| {
+            noise.tick(black_box(&inputs), &mut outputs);
+            outputs.get(10).unwrap_or(0.0)
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_quantizer(c: &mut Criterion) {
+    let mut group = c.benchmark_group("modules/quantizer");
+
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("chromatic", |b| {
+        let mut quantizer = Quantizer::chromatic();
+        let mut inputs = PortValues::new();
+        inputs.set(0, 1.234); // V/Oct input
+        let mut outputs = PortValues::new();
+
+        b.iter(|| {
+            quantizer.tick(black_box(&inputs), &mut outputs);
+            outputs.get(10).unwrap_or(0.0)
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_slew_limiter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("modules/slew_limiter");
+
+    for sample_rate in SAMPLE_RATES {
+        let sr_name = format!("{}kHz", sample_rate as u32 / 1000);
+
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("tick", &sr_name),
+            &sample_rate,
+            |b, &sr| {
+                let mut slew = SlewLimiter::new(sr);
+                let mut inputs = PortValues::new();
+                inputs.set(0, 5.0); // Input signal
+                inputs.set(1, 0.5); // Rise rate
+                inputs.set(2, 0.5); // Fall rate
+                let mut outputs = PortValues::new();
+
+                b.iter(|| {
+                    slew.tick(black_box(&inputs), &mut outputs);
+                    outputs.get(10).unwrap_or(0.0)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_clock(c: &mut Criterion) {
+    let mut group = c.benchmark_group("modules/clock");
+
+    for sample_rate in SAMPLE_RATES {
+        let sr_name = format!("{}kHz", sample_rate as u32 / 1000);
+
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("tick", &sr_name),
+            &sample_rate,
+            |b, &sr| {
+                let mut clock = Clock::new(sr);
+                let mut inputs = PortValues::new();
+                inputs.set(0, 120.0); // BPM
+                let mut outputs = PortValues::new();
+
+                b.iter(|| {
+                    clock.tick(black_box(&inputs), &mut outputs);
+                    outputs.get(10).unwrap_or(0.0)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Filter Comparison Benchmarks
+// ============================================================================
+
+/// Compare SVF vs DiodeLadder filter performance
+fn bench_filter_comparison(c: &mut Criterion) {
+    let mut group = c.benchmark_group("comparison/filters");
+
+    let sample_rate = 48000.0;
+    let buffer_size = 256;
+
+    // SVF filter
+    group.throughput(Throughput::Elements(buffer_size as u64));
+    group.bench_function("svf_256", |b| {
+        let mut svf = Svf::new(sample_rate);
+        let mut inputs = PortValues::new();
+        inputs.set(0, 1.0);
+        inputs.set(1, 0.5);
+        inputs.set(2, 0.7);
+        let mut outputs = PortValues::new();
+
+        b.iter(|| {
+            for _ in 0..buffer_size {
+                svf.tick(black_box(&inputs), &mut outputs);
+            }
+            outputs.get(10).unwrap_or(0.0)
+        });
+    });
+
+    // Diode Ladder filter
+    group.throughput(Throughput::Elements(buffer_size as u64));
+    group.bench_function("diode_ladder_256", |b| {
+        let mut filter = DiodeLadderFilter::new(sample_rate);
+        let mut inputs = PortValues::new();
+        inputs.set(0, 1.0);
+        inputs.set(1, 0.5);
+        inputs.set(2, 0.7);
+        inputs.set(6, 0.3);
+        let mut outputs = PortValues::new();
+
+        b.iter(|| {
+            for _ in 0..buffer_size {
+                filter.tick(black_box(&inputs), &mut outputs);
+            }
+            outputs.get(10).unwrap_or(0.0)
+        });
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// Patch Lifecycle Benchmarks
+// ============================================================================
+
+/// Benchmark patch creation and teardown
+fn bench_patch_lifecycle(c: &mut Criterion) {
+    let mut group = c.benchmark_group("lifecycle");
+
+    let sample_rate = 48000.0;
+
+    // Simple patch creation
+    group.bench_function("create_simple", |b| {
+        b.iter(|| {
+            let patch = create_simple_patch(sample_rate);
+            black_box(patch)
+        });
+    });
+
+    // Complex patch creation
+    group.bench_function("create_complex", |b| {
+        b.iter(|| {
+            let patch = create_complex_patch(sample_rate);
+            black_box(patch)
+        });
+    });
+
+    // PolyPatch creation (8 voices)
+    group.bench_function("create_poly8", |b| {
+        b.iter(|| {
+            let mut poly = PolyPatch::new(8, sample_rate);
+            poly.compile().unwrap();
+            black_box(poly)
+        });
+    });
+
+    // PolyPatch creation (32 voices)
+    group.bench_function("create_poly32", |b| {
+        b.iter(|| {
+            let mut poly = PolyPatch::new(32, sample_rate);
+            poly.compile().unwrap();
+            black_box(poly)
+        });
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// Maximum Throughput Benchmark
+// ============================================================================
+
+/// Find the maximum sustainable polyphony at 48kHz/256 samples
+fn bench_max_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("stress/max_throughput");
+
+    let sample_rate = 48000.0;
+    let buffer_size = 256;
+    let time_budget_ns = (buffer_size as f64 / sample_rate) * 1_000_000_000.0;
+
+    eprintln!(
+        "\nMax throughput test - budget: {:.0}ns ({:.2}ms)",
+        time_budget_ns,
+        time_budget_ns / 1_000_000.0
+    );
+
+    // Test increasingly complex scenarios
+    let scenarios: &[(&str, usize, usize)] = &[
+        ("8v_simple", 8, 1), // 8 voices, simple patch
+        ("16v_simple", 16, 1),
+        ("32v_simple", 32, 1),
+        ("8v_unison4", 8, 4),   // 8 voices with 4x unison each
+        ("16v_unison2", 16, 2), // 16 voices with 2x unison each
+    ];
+
+    for (name, voices, unison) in scenarios {
+        group.throughput(Throughput::Elements(buffer_size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("scenario", *name),
+            &(*voices, *unison),
+            |b, &(v, u)| {
+                let mut poly = PolyPatch::new(v, sample_rate);
+                if u > 1 {
+                    poly.set_unison(UnisonConfig::new(u, 15.0));
+                }
+                poly.compile().unwrap();
+
+                for i in 0..v {
+                    poly.note_on(48 + (i as u8 % 24), 100);
+                }
+
+                b.iter(|| {
+                    for _ in 0..buffer_size {
+                        black_box(poly.tick());
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
 // Criterion Groups
 // ============================================================================
 
@@ -833,6 +1185,14 @@ criterion_group!(
     bench_diode_ladder,
     bench_adsr,
     bench_lfo,
+);
+
+criterion_group!(
+    extended_module_benches,
+    bench_noise_generator,
+    bench_quantizer,
+    bench_slew_limiter,
+    bench_clock,
 );
 
 criterion_group!(
@@ -867,12 +1227,28 @@ criterion_group!(
 
 criterion_group!(patch_benches, bench_patch_compilation, bench_throughput,);
 
+criterion_group!(
+    stress_benches,
+    bench_ultra_low_latency,
+    bench_high_polyphony,
+    bench_high_polyphony_buffer,
+    bench_max_throughput,
+);
+
+criterion_group!(comparison_benches, bench_filter_comparison,);
+
+criterion_group!(lifecycle_benches, bench_patch_lifecycle,);
+
 criterion_main!(
     module_benches,
+    extended_module_benches,
     sample_rate_benches,
     buffer_benches,
     polyphony_benches,
     simd_benches,
     realtime_benches,
     patch_benches,
+    stress_benches,
+    comparison_benches,
+    lifecycle_benches,
 );
