@@ -11,11 +11,16 @@ on:
         required: true
         type: string
 
+# Only one release at a time
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Validate the release
+  # Validate and test in parallel where possible
   validate:
     name: Validate Release
     runs-on: ubuntu-latest
@@ -62,29 +67,29 @@ jobs:
           fi
           echo "Version match confirmed: $CARGO_VERSION"
 
-  # Run full test suite
+  # Run full test suite (can start immediately, runs in parallel with validate)
   test:
     name: Test Suite
-    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
-        run: cargo test --all-features
+      # Run all checks in parallel
+      - name: Run all checks
+        run: |
+          cargo fmt --all -- --check &
+          cargo clippy --all-features -- -D warnings &
+          cargo test --all-features &
+          wait
 
-      - name: Run clippy
-        run: cargo clippy --all-features -- -D warnings
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-  # Generate changelog
+  # Generate changelog (needs validation to pass)
   changelog:
     name: Generate Changelog
-    needs: [validate, test]
+    needs: validate
     runs-on: ubuntu-latest
     outputs:
       changelog: ${{ steps.changelog.outputs.changelog }}
@@ -108,8 +113,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Update CHANGELOG.md
-        run: |
-          git cliff --output .github/CHANGELOG.md
+        run: git cliff --output .github/CHANGELOG.md
 
       - name: Upload changelog artifact
         uses: actions/upload-artifact@v4
@@ -117,7 +121,7 @@ jobs:
           name: changelog
           path: .github/CHANGELOG.md
 
-  # Create GitHub Release
+  # Create GitHub Release (needs both validation and tests to pass)
   release:
     name: Create Release
     needs: [validate, test, changelog]
@@ -134,7 +138,7 @@ jobs:
           path: .github/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.validate.outputs.version }}
           name: ${{ needs.validate.outputs.version }}
