@@ -56,24 +56,27 @@ patch.connect(vco, "out", vcf, "input");
 
 Quiver is built in three composable layers:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Layer 3: Patch Graph                      │
-│  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐       │
-│  │   VCO   │───▶│   VCF   │───▶│   VCA   │───▶│  Output │       │
-│  └─────────┘    └─────────┘    └─────────┘    └─────────┘       │
-│       │              ▲              ▲                            │
-│       │         ┌────┴────┐    ┌────┴────┐                       │
-│       └────────▶│   LFO   │    │  ADSR   │                       │
-│                 └─────────┘    └─────────┘                       │
-├─────────────────────────────────────────────────────────────────┤
-│                     Layer 2: Port System                         │
-│  SignalKind: Audio | V/Oct | Gate | Trigger | CV                 │
-│  ModulatedParam: Linear | Exponential | V/Oct ranges             │
-├─────────────────────────────────────────────────────────────────┤
-│                   Layer 1: Typed Combinators                     │
-│  Chain (>>>) | Parallel (***) | Fanout (&&&) | Feedback          │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph "Layer 3: Patch Graph"
+        VCO[VCO] --> VCF[VCF]
+        VCF --> VCA[VCA]
+        VCA --> Output[Output]
+        VCO --> LFO[LFO]
+        LFO --> VCF
+        ADSR[ADSR] --> VCA
+    end
+
+    subgraph "Layer 2: Port System"
+        Ports["SignalKind: Audio | V/Oct | Gate | Trigger | CV<br/>ModulatedParam: Linear | Exponential | V/Oct ranges"]
+    end
+
+    subgraph "Layer 1: Typed Combinators"
+        Combinators["Chain (>>>) | Parallel (***) | Fanout (&&&) | Feedback"]
+    end
+
+    Output ~~~ Ports
+    Ports ~~~ Combinators
 ```
 
 **Layer 1 - Combinators**: Functional composition with type-safe signal flow
