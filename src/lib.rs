@@ -39,6 +39,8 @@ pub mod simd;
 
 // Alloc-tier modules (work with no_std + alloc)
 #[cfg(feature = "alloc")]
+pub mod introspection;
+#[cfg(feature = "alloc")]
 pub mod io;
 #[cfg(feature = "alloc")]
 pub mod presets;
@@ -117,6 +119,12 @@ pub mod prelude {
     // External I/O (works with alloc via core::sync::atomic + alloc::sync::Arc)
     #[cfg(feature = "alloc")]
     pub use crate::io::{AtomicF64, ExternalInput, ExternalOutput, MidiState};
+
+    // Introspection API (GUI parameter discovery)
+    #[cfg(feature = "alloc")]
+    pub use crate::introspection::{
+        ControlType, ModuleIntrospection, ParamCurve, ParamInfo, ValueFormat,
+    };
 
     // Serialization (works with alloc via serde_json alloc feature)
     #[cfg(feature = "alloc")]

@@ -226,6 +226,232 @@ export interface PortSpec {
 }
 
 // =============================================================================
+// Introspection API (Phase 1)
+// =============================================================================
+
+/**
+ * How to format parameter values for display
+ * Corresponds to Rust: ValueFormat in src/introspection.rs
+ */
+export type ValueFormat =
+  | { type: 'decimal'; places: number }
+  | { type: 'frequency' }
+  | { type: 'time' }
+  | { type: 'decibels' }
+  | { type: 'percent' }
+  | { type: 'note_name' }
+  | { type: 'ratio' };
+
+/**
+ * How parameter values are scaled between min and max
+ * Corresponds to Rust: ParamCurve in src/introspection.rs
+ */
+export type ParamCurve =
+  | { type: 'linear' }
+  | { type: 'exponential' }
+  | { type: 'logarithmic' }
+  | { type: 'stepped'; steps: number };
+
+/**
+ * Suggested UI control type for a parameter
+ * Corresponds to Rust: ControlType in src/introspection.rs
+ */
+export type ControlType = 'knob' | 'slider' | 'toggle' | 'select';
+
+/**
+ * Complete parameter descriptor for UI generation
+ * Corresponds to Rust: ParamInfo in src/introspection.rs
+ */
+export interface ParamInfo {
+  /** Unique identifier within module (e.g., "frequency", "resonance") */
+  id: string;
+  /** Display name (e.g., "Frequency", "Resonance") */
+  name: string;
+  /** Current value */
+  value: number;
+  /** Minimum value */
+  min: number;
+  /** Maximum value */
+  max: number;
+  /** Default value */
+  default: number;
+  /** Value scaling curve */
+  curve: ParamCurve;
+  /** Suggested control type */
+  control: ControlType;
+  /** Unit for display (Hz, ms, dB, %, etc.) */
+  unit?: string;
+  /** Value formatting hint */
+  format: ValueFormat;
+}
+
+/**
+ * Create a frequency parameter preset
+ */
+export function createFrequencyParam(id: string, name: string): ParamInfo {
+  return {
+    id,
+    name,
+    value: 1000,
+    min: 20,
+    max: 20000,
+    default: 1000,
+    curve: { type: 'exponential' },
+    control: 'knob',
+    unit: 'Hz',
+    format: { type: 'frequency' },
+  };
+}
+
+/**
+ * Create a time parameter preset
+ */
+export function createTimeParam(id: string, name: string): ParamInfo {
+  return {
+    id,
+    name,
+    value: 0.1,
+    min: 0.001,
+    max: 10,
+    default: 0.1,
+    curve: { type: 'exponential' },
+    control: 'knob',
+    unit: 's',
+    format: { type: 'time' },
+  };
+}
+
+/**
+ * Create a percentage parameter preset
+ */
+export function createPercentParam(id: string, name: string): ParamInfo {
+  return {
+    id,
+    name,
+    value: 0.5,
+    min: 0,
+    max: 1,
+    default: 0.5,
+    curve: { type: 'linear' },
+    control: 'knob',
+    format: { type: 'percent' },
+  };
+}
+
+/**
+ * Create a toggle parameter preset
+ */
+export function createToggleParam(id: string, name: string): ParamInfo {
+  return {
+    id,
+    name,
+    value: 0,
+    min: 0,
+    max: 1,
+    default: 0,
+    curve: { type: 'stepped', steps: 2 },
+    control: 'toggle',
+    format: { type: 'decimal', places: 0 },
+  };
+}
+
+/**
+ * Create a selector parameter preset
+ */
+export function createSelectParam(id: string, name: string, options: number): ParamInfo {
+  return {
+    id,
+    name,
+    value: 0,
+    min: 0,
+    max: options - 1,
+    default: 0,
+    curve: { type: 'stepped', steps: options },
+    control: 'select',
+    format: { type: 'decimal', places: 0 },
+  };
+}
+
+/**
+ * Format a value according to a ValueFormat specification
+ */
+export function formatParamValue(value: number, format: ValueFormat): string {
+  switch (format.type) {
+    case 'decimal':
+      return value.toFixed(format.places);
+    case 'frequency':
+      return value >= 1000 ? `${(value / 1000).toFixed(2)} kHz` : `${value.toFixed(1)} Hz`;
+    case 'time':
+      return value >= 1 ? `${value.toFixed(2)} s` : `${(value * 1000).toFixed(1)} ms`;
+    case 'decibels':
+      return `${value.toFixed(1)} dB`;
+    case 'percent':
+      return `${(value * 100).toFixed(0)}%`;
+    case 'note_name': {
+      const midiNote = Math.round(value * 12 + 60);
+      const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+      const note = noteNames[((midiNote % 12) + 12) % 12];
+      const octave = Math.floor(midiNote / 12) - 1;
+      return `${note}${octave}`;
+    }
+    case 'ratio':
+      return value >= 1 ? `${value.toFixed(1)}:1` : value > 0 ? `1:${(1 / value).toFixed(1)}` : '0:1';
+  }
+}
+
+/**
+ * Apply a parameter curve to convert normalized (0-1) to actual value
+ */
+export function applyParamCurve(normalized: number, min: number, max: number, curve: ParamCurve): number {
+  const n = Math.max(0, Math.min(1, normalized));
+
+  switch (curve.type) {
+    case 'linear':
+      return min + n * (max - min);
+    case 'exponential':
+      return min <= 0 ? n * max : min * Math.pow(max / min, n);
+    case 'logarithmic': {
+      const logMin = min > 0 ? Math.log10(min) : 0;
+      const logMax = Math.log10(Math.max(max, 0.001));
+      return Math.pow(10, logMin + n * (logMax - logMin));
+    }
+    case 'stepped': {
+      const stepSize = (max - min) / curve.steps;
+      const stepIndex = Math.min(Math.floor(n * curve.steps), curve.steps - 1);
+      return min + stepIndex * stepSize;
+    }
+  }
+}
+
+/**
+ * Normalize an actual value to 0-1 based on a parameter curve
+ */
+export function normalizeParamValue(value: number, min: number, max: number, curve: ParamCurve): number {
+  if (Math.abs(max - min) < 1e-10) return 0;
+
+  switch (curve.type) {
+    case 'linear':
+      return Math.max(0, Math.min(1, (value - min) / (max - min)));
+    case 'exponential':
+      if (min <= 0 || value <= 0) {
+        return Math.max(0, Math.min(1, (value - min) / (max - min)));
+      }
+      return Math.max(0, Math.min(1, Math.log(value / min) / Math.log(max / min)));
+    case 'logarithmic': {
+      const logMin = min > 0 ? Math.log10(min) : 0;
+      const logMax = Math.log10(Math.max(max, 0.001));
+      const logVal = Math.log10(Math.max(value, 0.001));
+      return Math.max(0, Math.min(1, (logVal - logMin) / (logMax - logMin)));
+    }
+    case 'stepped': {
+      const stepSize = (max - min) / curve.steps;
+      const stepIndex = Math.round((value - min) / stepSize);
+      return Math.max(0, Math.min(1, stepIndex / curve.steps));
+    }
+  }
+}
+
+// =============================================================================
 // Module Registry Types
 // =============================================================================
 
