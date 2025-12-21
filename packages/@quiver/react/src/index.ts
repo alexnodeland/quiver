@@ -379,6 +379,24 @@ export function removeModuleFromPatch(
 }
 
 // =============================================================================
+// WASM Bridge Hooks
+// =============================================================================
+
+export {
+  // Types
+  type QuiverEngine,
+  // Hooks
+  useQuiverUpdates,
+  useQuiverParam,
+  useQuiverLevel,
+  useQuiverGate,
+  useQuiverCatalog,
+  useQuiverSearch,
+  useQuiverPatch,
+  useQuiverEngine,
+} from './hooks';
+
+// =============================================================================
 // Re-exports from @quiver/types
 // =============================================================================
 

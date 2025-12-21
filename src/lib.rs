@@ -59,6 +59,10 @@ pub mod mdk;
 #[cfg(feature = "std")]
 pub mod visual;
 
+// WASM bindings (requires wasm feature)
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
 /// Prelude module for convenient imports
 pub mod prelude {
     // Layer 1: Combinators
@@ -176,6 +180,10 @@ pub mod prelude {
         AutomationData, AutomationPoint, AutomationRecorder, AutomationTrack, DotExporter,
         DotStyle, LevelMeter, Scope, SpectrumAnalyzer, TriggerMode,
     };
+
+    // WASM bindings (requires wasm feature)
+    #[cfg(feature = "wasm")]
+    pub use crate::wasm::{QuiverEngine, QuiverError};
 }
 
 // Re-export key types at crate root for convenience

@@ -215,6 +215,14 @@ impl NodeHandle {
         self.id
     }
 
+    /// Create a NodeHandle from a NodeId and module reference
+    pub fn from_module(id: NodeId, module: &dyn GraphModule) -> Self {
+        Self {
+            id,
+            spec: module.port_spec().clone(),
+        }
+    }
+
     /// Reference an output port by name
     pub fn out(&self, name: &str) -> PortRef {
         let port = self
@@ -774,6 +782,40 @@ impl Patch {
         self.nodes
             .iter()
             .map(|(id, node)| (id, node.name.as_str(), node.module.as_ref()))
+    }
+
+    /// Get a NodeId by module name
+    pub fn get_node_id_by_name(&self, name: &str) -> Option<NodeId> {
+        self.nodes
+            .iter()
+            .find(|(_, node)| node.name == name)
+            .map(|(id, _)| id)
+    }
+
+    /// Get a NodeHandle by module name
+    pub fn get_handle_by_name(&self, name: &str) -> Option<NodeHandle> {
+        self.nodes
+            .iter()
+            .find(|(_, node)| node.name == name)
+            .map(|(id, node)| NodeHandle::from_module(id, node.module.as_ref()))
+    }
+
+    /// Disconnect a cable by finding matching port refs
+    pub fn disconnect_ports(&mut self, from: PortRef, to: PortRef) -> Result<(), PatchError> {
+        let idx = self
+            .cables
+            .iter()
+            .position(|c| c.from == from && c.to == to)
+            .ok_or(PatchError::InvalidCable)?;
+
+        self.cables.remove(idx);
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Get all module names
+    pub fn module_names(&self) -> Vec<&str> {
+        self.nodes.iter().map(|(_, node)| node.name.as_str()).collect()
     }
 }
 

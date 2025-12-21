@@ -1,0 +1,38 @@
+{
+  "name": "@quiver/wasm",
+  "version": "0.1.0",
+  "description": "Quiver modular synthesizer WASM bindings",
+  "main": "quiver.js",
+  "module": "quiver.js",
+  "types": "quiver.d.ts",
+  "files": [
+    "quiver.js",
+    "quiver.d.ts",
+    "quiver_bg.wasm",
+    "quiver_bg.js",
+    "quiver_bg.wasm.d.ts",
+    "src/"
+  ],
+  "scripts": {
+    "build": "wasm-pack build ../../../ --target web --features wasm --out-dir packages/@quiver/wasm",
+    "build:dev": "wasm-pack build ../../../ --target web --features wasm --out-dir packages/@quiver/wasm --dev"
+  },
+  "keywords": [
+    "wasm",
+    "webassembly",
+    "audio",
+    "synthesizer",
+    "modular",
+    "quiver"
+  ],
+  "peerDependencies": {
+    "@quiver/types": "^0.1.0"
+  },
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/quiver/quiver"
+  },
+  "sideEffects": false
+}

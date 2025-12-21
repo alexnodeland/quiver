@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 
 /// Serializable patch definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct PatchDef {
     /// Schema version for forward compatibility
     pub version: u32,
@@ -89,6 +91,7 @@ impl Default for PatchDef {
 
 /// Serializable module definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 pub struct ModuleDef {
     /// Unique instance name
     pub name: String,
@@ -121,6 +124,7 @@ impl ModuleDef {
 
 /// Serializable cable definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 pub struct CableDef {
     /// Source: "module_name.port_name"
     pub from: String,
@@ -185,6 +189,7 @@ pub struct ModuleMetadata {
 
 /// Summary of a module's port configuration for the catalog UI
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 pub struct PortSummary {
     /// Number of input ports
     pub inputs: u8,
@@ -215,6 +220,7 @@ impl PortSummary {
 
 /// A catalog entry for the "add module" UI
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 pub struct ModuleCatalogEntry {
     /// Module type identifier (e.g., "vco", "svf")
     pub type_id: String,
@@ -249,6 +255,8 @@ impl ModuleCatalogEntry {
 
 /// Response from catalog() containing all modules and categories
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct CatalogResponse {
     /// All available modules
     pub modules: Vec<ModuleCatalogEntry>,
@@ -1091,6 +1099,7 @@ fn parse_port_ref(s: &str) -> Result<(&str, &str), PatchError> {
 
 /// A validation error with path and message
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 pub struct ValidationError {
     /// JSON path to the error location (e.g., `modules[0].name`)
     pub path: String,
@@ -1115,6 +1124,8 @@ impl core::fmt::Display for ValidationError {
 
 /// Result of patch validation
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct ValidationResult {
     /// Whether the patch is valid
     pub valid: bool,

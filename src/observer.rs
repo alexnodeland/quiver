@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 /// Values that can be observed and streamed to the UI
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ObservableValue {
     /// Parameter value change
@@ -89,6 +91,8 @@ impl ObservableValue {
 
 /// Subscription target specifying what to observe
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum SubscriptionTarget {
     /// Subscribe to a parameter value
@@ -262,6 +266,50 @@ impl StateObserver {
     /// Get the configuration
     pub fn config(&self) -> &ObserverConfig {
         &self.config
+    }
+
+    /// Collect observable values from the patch after processing
+    ///
+    /// This method should be called after each audio processing cycle
+    /// to update subscribed values. It uses the graph module's param
+    /// values to populate parameter subscriptions.
+    pub fn collect_from_patch(&mut self, patch: &crate::graph::Patch) {
+        for target in &self.subscriptions.clone() {
+            match target {
+                SubscriptionTarget::Param { node_id, param_id } => {
+                    // Find the node and get its parameter value
+                    if let Some(nid) = patch.get_node_id_by_name(node_id) {
+                        // Try to get param value by parsing param_id as index
+                        if let Ok(idx) = param_id.parse::<u32>() {
+                            if let Some(value) = patch.get_param(nid, idx) {
+                                self.push_update(ObservableValue::Param {
+                                    node_id: node_id.clone(),
+                                    param_id: param_id.clone(),
+                                    value,
+                                });
+                            }
+                        }
+                    }
+                }
+                SubscriptionTarget::Level {
+                    node_id, port_id, ..
+                } => {
+                    // Level metering would require access to output buffers
+                    // For now, we'll skip this - full implementation requires
+                    // access to the internal buffer values from Patch
+                    let _ = (node_id, port_id);
+                }
+                SubscriptionTarget::Gate {
+                    node_id, port_id, ..
+                } => {
+                    // Gate detection would require access to output buffers
+                    let _ = (node_id, port_id);
+                }
+                SubscriptionTarget::Scope { .. } | SubscriptionTarget::Spectrum { .. } => {
+                    // Scope and spectrum require buffer access - skip for now
+                }
+            }
+        }
     }
 }
 
