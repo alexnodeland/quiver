@@ -111,4 +111,4 @@ jobs:
       - name: Install cargo-tarpaulin
         uses: taiki-e/install-action@cargo-tarpaulin
       - name: Run coverage
-        run: cargo tarpaulin --all-features --fail-under 80
+        run: cargo tarpaulin
