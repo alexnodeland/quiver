@@ -9,13 +9,12 @@
     "quiver.js",
     "quiver.d.ts",
     "quiver_bg.wasm",
-    "quiver_bg.js",
     "quiver_bg.wasm.d.ts",
     "src/"
   ],
   "scripts": {
-    "build": "wasm-pack build ../../../ --target web --features wasm --out-dir packages/@quiver/wasm",
-    "build:dev": "wasm-pack build ../../../ --target web --features wasm --out-dir packages/@quiver/wasm --dev"
+    "build": "cd ../../.. && make wasm",
+    "build:dev": "cd ../../.. && make wasm-dev"
   },
   "keywords": [
     "wasm",
@@ -25,14 +24,11 @@
     "modular",
     "quiver"
   ],
-  "peerDependencies": {
-    "@quiver/types": "^0.1.0"
-  },
-  "author": "",
+  "author": "Alex Nodeland",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/quiver/quiver"
+    "url": "https://github.com/alexnodeland/quiver"
   },
   "sideEffects": false
 }

@@ -4,7 +4,7 @@
 //! that bridge the typed combinator layer with the graph-based patching system.
 
 use crate::StdMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use libm::Libm;

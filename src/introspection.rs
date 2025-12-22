@@ -3,7 +3,8 @@
 //! This module provides types and traits for exposing module metadata to UIs,
 //! enabling automatic generation of appropriate controls (knobs, sliders, etc.).
 
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 

@@ -7,8 +7,8 @@
     "packages/@quiver/*"
   ],
   "scripts": {
-    "build:wasm": "wasm-pack build --target web --features wasm --out-dir packages/@quiver/wasm",
-    "build:wasm:dev": "wasm-pack build --target web --features wasm --out-dir packages/@quiver/wasm --dev",
+    "build:wasm": "make wasm",
+    "build:wasm:dev": "make wasm-dev",
     "build:types": "cd packages/@quiver/types && npm run build",
     "build:react": "cd packages/@quiver/react && npm run build",
     "build": "npm run build:wasm && npm run build:types && npm run build:react"

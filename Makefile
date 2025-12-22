@@ -2,7 +2,7 @@
 # Common development commands
 
 .PHONY: all build test check fmt lint lint-fix clippy doc bench coverage clean setup help
-.PHONY: install-hooks changelog examples
+.PHONY: install-hooks changelog examples wasm wasm-dev wasm-check
 
 # Default target
 all: check
@@ -137,6 +137,22 @@ watch:
 watch-check:
 	cargo watch -x "check --all-features"
 
+# Build WASM package (release)
+wasm:
+	wasm-pack build --target web --no-default-features --features wasm
+	cp pkg/quiver.js pkg/quiver.d.ts pkg/quiver_bg.wasm pkg/quiver_bg.wasm.d.ts packages/@quiver/wasm/
+	@echo "WASM package built: packages/@quiver/wasm/"
+
+# Build WASM package (development, faster)
+wasm-dev:
+	wasm-pack build --target web --no-default-features --features wasm --dev
+	cp pkg/quiver.js pkg/quiver.d.ts pkg/quiver_bg.wasm pkg/quiver_bg.wasm.d.ts packages/@quiver/wasm/
+	@echo "WASM package built (dev): packages/@quiver/wasm/"
+
+# Check WASM compilation without building
+wasm-check:
+	cargo check --target wasm32-unknown-unknown --no-default-features --features wasm
+
 # Print help
 help:
 	@echo "Quiver Development Commands"
@@ -144,6 +160,9 @@ help:
 	@echo "Building:"
 	@echo "  make build        - Build the project"
 	@echo "  make release      - Build in release mode"
+	@echo "  make wasm         - Build WASM package (release)"
+	@echo "  make wasm-dev     - Build WASM package (development)"
+	@echo "  make wasm-check   - Check WASM compilation"
 	@echo "  make clean        - Clean build artifacts"
 	@echo ""
 	@echo "Testing:"

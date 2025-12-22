@@ -12,7 +12,7 @@
 //! - **Scope**: Oscilloscope waveform capture for visualization
 //! - **Spectrum**: Frequency spectrum via DFT for analyzer display
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::f64::consts::PI;
@@ -163,7 +163,7 @@ impl SubscriptionTarget {
 // =============================================================================
 
 /// Unique key for a port buffer
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct PortKey {
     node_id: String,
     port_id: u32,

@@ -4,8 +4,9 @@ use crate::graph::{NodeId, Patch};
 use crate::observer::{StateObserver, SubscriptionTarget};
 use crate::port::{ports_compatible, SignalColors, SignalKind};
 use crate::serialize::{ModuleRegistry, PatchDef};
+use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use wasm_bindgen::prelude::*;
 
