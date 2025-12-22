@@ -460,6 +460,76 @@ impl ModuleRegistry {
         );
 
         self.register_factory_with_keywords(
+            "flanger",
+            "Flanger",
+            "Effects",
+            "Classic flanging effect with modulated delay",
+            &["flanger", "modulation", "sweep", "jet", "effect"],
+            &[],
+            |sr| Box::new(Flanger::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "phaser",
+            "Phaser",
+            "Effects",
+            "Classic phaser effect with all-pass filters",
+            &["phaser", "modulation", "sweep", "effect", "allpass"],
+            &[],
+            |sr| Box::new(Phaser::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "limiter",
+            "Limiter",
+            "Dynamics",
+            "Prevents signals from exceeding threshold",
+            &["limiter", "dynamics", "ceiling", "clip", "loudness"],
+            &[],
+            |sr| Box::new(Limiter::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "noise_gate",
+            "Noise Gate",
+            "Dynamics",
+            "Attenuates signals below threshold",
+            &["gate", "dynamics", "noise", "threshold", "mute"],
+            &[],
+            |sr| Box::new(NoiseGate::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "compressor",
+            "Compressor",
+            "Dynamics",
+            "Dynamic range compression with sidechain",
+            &["compressor", "dynamics", "squeeze", "punch", "sidechain"],
+            &[],
+            |sr| Box::new(Compressor::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "envelope_follower",
+            "Envelope Follower",
+            "Utilities",
+            "Extracts amplitude envelope from audio",
+            &["envelope", "follower", "detector", "cv", "ducking"],
+            &[],
+            |sr| Box::new(EnvelopeFollower::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "bitcrusher",
+            "Bitcrusher",
+            "Effects",
+            "Lo-fi bit depth and sample rate reduction",
+            &["bitcrusher", "lofi", "distortion", "digital", "retro"],
+            &[],
+            |_| Box::new(Bitcrusher::new()),
+        );
+
+        self.register_factory_with_keywords(
             "attenuverter",
             "Attenuverter",
             "Utilities",

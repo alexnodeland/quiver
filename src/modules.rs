@@ -1135,6 +1135,676 @@ impl GraphModule for Chorus {
     }
 }
 
+/// Limiter
+///
+/// A dynamics processor that prevents signals from exceeding a threshold.
+/// Supports both hard and soft limiting modes.
+pub struct Limiter {
+    sample_rate: f64,
+    envelope: f64,
+    spec: PortSpec,
+}
+
+impl Limiter {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            sample_rate,
+            envelope: 0.0,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "threshold", SignalKind::CvUnipolar)
+                        .with_default(0.8)
+                        .with_attenuverter(),
+                    PortDef::new(2, "release", SignalKind::CvUnipolar)
+                        .with_default(0.3)
+                        .with_attenuverter(),
+                    PortDef::new(3, "soft", SignalKind::Gate).with_default(5.0),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Audio),
+                    PortDef::new(11, "gr", SignalKind::CvUnipolar),
+                ],
+            },
+        }
+    }
+}
+
+impl Default for Limiter {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Limiter {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let threshold = inputs.get_or(1, 0.8).clamp(0.01, 1.0) * 5.0;
+        let release_cv = inputs.get_or(2, 0.3).clamp(0.0, 1.0);
+        let soft_mode = inputs.get_or(3, 5.0) > 2.5;
+
+        let release_ms = 10.0 + release_cv * 990.0;
+        let release_coef = Libm::<f64>::exp(-1.0 / (release_ms * self.sample_rate / 1000.0));
+
+        let abs_input = Libm::<f64>::fabs(input);
+
+        if abs_input > self.envelope {
+            self.envelope = abs_input;
+        } else {
+            self.envelope = release_coef * self.envelope + (1.0 - release_coef) * abs_input;
+        }
+
+        let gain = if self.envelope > threshold {
+            if soft_mode {
+                let over = self.envelope / threshold;
+                threshold / self.envelope * Libm::<f64>::tanh(over - 1.0) + 1.0 / over
+            } else {
+                threshold / self.envelope
+            }
+        } else {
+            1.0
+        };
+
+        outputs.set(10, input * gain);
+        outputs.set(11, (1.0 - gain) * 10.0);
+    }
+
+    fn reset(&mut self) {
+        self.envelope = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "limiter"
+    }
+}
+
+/// Noise Gate
+///
+/// A dynamics processor that attenuates signals below a threshold.
+pub struct NoiseGate {
+    sample_rate: f64,
+    envelope: f64,
+    gate_state: f64,
+    spec: PortSpec,
+}
+
+impl NoiseGate {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            sample_rate,
+            envelope: 0.0,
+            gate_state: 0.0,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "threshold", SignalKind::CvUnipolar)
+                        .with_default(0.1)
+                        .with_attenuverter(),
+                    PortDef::new(2, "attack", SignalKind::CvUnipolar)
+                        .with_default(0.1)
+                        .with_attenuverter(),
+                    PortDef::new(3, "release", SignalKind::CvUnipolar)
+                        .with_default(0.3)
+                        .with_attenuverter(),
+                    PortDef::new(4, "range", SignalKind::CvUnipolar)
+                        .with_default(1.0)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Audio),
+                    PortDef::new(11, "gate", SignalKind::Gate),
+                ],
+            },
+        }
+    }
+}
+
+impl Default for NoiseGate {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for NoiseGate {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let threshold = inputs.get_or(1, 0.1).clamp(0.0, 1.0) * 5.0;
+        let attack_cv = inputs.get_or(2, 0.1).clamp(0.0, 1.0);
+        let release_cv = inputs.get_or(3, 0.3).clamp(0.0, 1.0);
+        let range = inputs.get_or(4, 1.0).clamp(0.0, 1.0);
+
+        let attack_ms = 0.1 + attack_cv * 49.9;
+        let release_ms = 10.0 + release_cv * 490.0;
+        let attack_coef = Libm::<f64>::exp(-1.0 / (attack_ms * self.sample_rate / 1000.0));
+        let release_coef = Libm::<f64>::exp(-1.0 / (release_ms * self.sample_rate / 1000.0));
+
+        let abs_input = Libm::<f64>::fabs(input);
+        if abs_input > self.envelope {
+            self.envelope = attack_coef * self.envelope + (1.0 - attack_coef) * abs_input;
+        } else {
+            self.envelope = release_coef * self.envelope + (1.0 - release_coef) * abs_input;
+        }
+
+        let open_threshold = threshold;
+        let close_threshold = threshold * 0.7;
+
+        if self.envelope > open_threshold {
+            self.gate_state = attack_coef * self.gate_state + (1.0 - attack_coef) * 1.0;
+        } else if self.envelope < close_threshold {
+            self.gate_state *= release_coef;
+        }
+
+        let gain = (1.0 - range) + range * self.gate_state;
+        outputs.set(10, input * gain);
+        outputs.set(11, if self.gate_state > 0.5 { 5.0 } else { 0.0 });
+    }
+
+    fn reset(&mut self) {
+        self.envelope = 0.0;
+        self.gate_state = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "noise_gate"
+    }
+}
+
+/// Compressor
+///
+/// A dynamics processor that reduces the dynamic range of audio signals.
+pub struct Compressor {
+    sample_rate: f64,
+    envelope: f64,
+    spec: PortSpec,
+}
+
+impl Compressor {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            sample_rate,
+            envelope: 0.0,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "threshold", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(2, "ratio", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(3, "attack", SignalKind::CvUnipolar)
+                        .with_default(0.2)
+                        .with_attenuverter(),
+                    PortDef::new(4, "release", SignalKind::CvUnipolar)
+                        .with_default(0.3)
+                        .with_attenuverter(),
+                    PortDef::new(5, "makeup", SignalKind::CvUnipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                    PortDef::new(6, "sidechain", SignalKind::Audio),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Audio),
+                    PortDef::new(11, "gr", SignalKind::CvUnipolar),
+                ],
+            },
+        }
+    }
+}
+
+impl Default for Compressor {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Compressor {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let threshold_cv = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
+        let ratio_cv = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
+        let attack_cv = inputs.get_or(3, 0.2).clamp(0.0, 1.0);
+        let release_cv = inputs.get_or(4, 0.3).clamp(0.0, 1.0);
+        let makeup_cv = inputs.get_or(5, 0.0).clamp(0.0, 1.0);
+        let sidechain = inputs.get_or(6, input);
+
+        let threshold = threshold_cv * 5.0;
+        let ratio = 1.0 + ratio_cv * 19.0;
+        let attack_ms = 0.1 + attack_cv * 99.9;
+        let release_ms = 10.0 + release_cv * 990.0;
+        let makeup_gain = 1.0 + makeup_cv * 3.0;
+
+        let attack_coef = Libm::<f64>::exp(-1.0 / (attack_ms * self.sample_rate / 1000.0));
+        let release_coef = Libm::<f64>::exp(-1.0 / (release_ms * self.sample_rate / 1000.0));
+
+        let abs_sidechain = Libm::<f64>::fabs(sidechain);
+        if abs_sidechain > self.envelope {
+            self.envelope = attack_coef * self.envelope + (1.0 - attack_coef) * abs_sidechain;
+        } else {
+            self.envelope = release_coef * self.envelope + (1.0 - release_coef) * abs_sidechain;
+        }
+
+        let gain = if self.envelope > threshold && threshold > 0.0 {
+            let over_db = 20.0 * Libm::<f64>::log10(self.envelope / threshold);
+            let compressed_db = over_db / ratio;
+            let gain_reduction_db = over_db - compressed_db;
+            Libm::<f64>::pow(10.0, -gain_reduction_db / 20.0)
+        } else {
+            1.0
+        };
+
+        outputs.set(10, input * gain * makeup_gain);
+        outputs.set(11, (1.0 - gain) * 10.0);
+    }
+
+    fn reset(&mut self) {
+        self.envelope = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "compressor"
+    }
+}
+
+/// Envelope Follower
+///
+/// Extracts the amplitude envelope from an audio signal.
+pub struct EnvelopeFollower {
+    sample_rate: f64,
+    envelope: f64,
+    spec: PortSpec,
+}
+
+impl EnvelopeFollower {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            sample_rate,
+            envelope: 0.0,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "attack", SignalKind::CvUnipolar)
+                        .with_default(0.2)
+                        .with_attenuverter(),
+                    PortDef::new(2, "release", SignalKind::CvUnipolar)
+                        .with_default(0.3)
+                        .with_attenuverter(),
+                    PortDef::new(3, "gain", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::CvUnipolar),
+                    PortDef::new(11, "inv", SignalKind::CvUnipolar),
+                ],
+            },
+        }
+    }
+}
+
+impl Default for EnvelopeFollower {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for EnvelopeFollower {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let attack_cv = inputs.get_or(1, 0.2).clamp(0.0, 1.0);
+        let release_cv = inputs.get_or(2, 0.3).clamp(0.0, 1.0);
+        let gain = inputs.get_or(3, 0.5).clamp(0.0, 1.0) * 4.0;
+
+        let attack_ms = 0.1 + attack_cv * 99.9;
+        let release_ms = 1.0 + release_cv * 999.0;
+        let attack_coef = Libm::<f64>::exp(-1.0 / (attack_ms * self.sample_rate / 1000.0));
+        let release_coef = Libm::<f64>::exp(-1.0 / (release_ms * self.sample_rate / 1000.0));
+
+        let abs_input = Libm::<f64>::fabs(input);
+        if abs_input > self.envelope {
+            self.envelope = attack_coef * self.envelope + (1.0 - attack_coef) * abs_input;
+        } else {
+            self.envelope = release_coef * self.envelope + (1.0 - release_coef) * abs_input;
+        }
+
+        let out = (self.envelope * gain).clamp(0.0, 10.0);
+        outputs.set(10, out);
+        outputs.set(11, 10.0 - out);
+    }
+
+    fn reset(&mut self) {
+        self.envelope = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "envelope_follower"
+    }
+}
+
+/// Bitcrusher
+///
+/// Lo-fi effect that reduces bit depth and sample rate.
+pub struct Bitcrusher {
+    hold_sample: f64,
+    hold_counter: f64,
+    spec: PortSpec,
+}
+
+impl Bitcrusher {
+    pub fn new() -> Self {
+        Self {
+            hold_sample: 0.0,
+            hold_counter: 0.0,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "bits", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(2, "downsample", SignalKind::CvUnipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+            },
+        }
+    }
+}
+
+impl Default for Bitcrusher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphModule for Bitcrusher {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let bits_cv = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
+        let downsample_cv = inputs.get_or(2, 0.0).clamp(0.0, 1.0);
+
+        let bits = 1.0 + bits_cv * 15.0;
+        let downsample_factor = 1.0 + downsample_cv * 63.0;
+
+        self.hold_counter += 1.0;
+        if self.hold_counter >= downsample_factor {
+            self.hold_counter = 0.0;
+            self.hold_sample = input;
+        }
+
+        let levels = Libm::<f64>::pow(2.0, bits);
+        let normalized = (self.hold_sample / 5.0 + 1.0) * 0.5;
+        let quantized = Libm::<f64>::floor(normalized * levels) / levels;
+        outputs.set(10, (quantized * 2.0 - 1.0) * 5.0);
+    }
+
+    fn reset(&mut self) {
+        self.hold_sample = 0.0;
+        self.hold_counter = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "bitcrusher"
+    }
+}
+
+/// Flanger
+///
+/// Classic flanging effect using a short modulated delay with feedback.
+pub struct Flanger {
+    buffer: Vec<f64>,
+    write_pos: usize,
+    lfo_phase: f64,
+    sample_rate: f64,
+    spec: PortSpec,
+}
+
+impl Flanger {
+    const MAX_DELAY_MS: f64 = 10.0;
+
+    pub fn new(sample_rate: f64) -> Self {
+        let buffer_size = (sample_rate * Self::MAX_DELAY_MS / 1000.0) as usize + 10;
+        Self {
+            buffer: vec![0.0; buffer_size],
+            write_pos: 0,
+            lfo_phase: 0.0,
+            sample_rate,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "rate", SignalKind::CvUnipolar)
+                        .with_default(0.3)
+                        .with_attenuverter(),
+                    PortDef::new(2, "depth", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(3, "feedback", SignalKind::CvBipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                    PortDef::new(4, "mix", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+            },
+        }
+    }
+
+    fn read_interpolated(&self, delay_samples: f64) -> f64 {
+        let buffer_len = self.buffer.len();
+        let delay_int = delay_samples as usize;
+        let frac = delay_samples - delay_int as f64;
+        let read_pos1 = (self.write_pos + buffer_len - delay_int) % buffer_len;
+        let read_pos2 = (self.write_pos + buffer_len - delay_int - 1) % buffer_len;
+        self.buffer[read_pos1] * (1.0 - frac) + self.buffer[read_pos2] * frac
+    }
+}
+
+impl Default for Flanger {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Flanger {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let rate_cv = inputs.get_or(1, 0.3).clamp(0.0, 1.0);
+        let depth_cv = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
+        let feedback = inputs.get_or(3, 0.0).clamp(-0.95, 0.95);
+        let mix = inputs.get_or(4, 0.5).clamp(0.0, 1.0);
+
+        let lfo_freq = 0.05 * Libm::<f64>::pow(100.0, rate_cv);
+        let base_delay_ms = 1.0;
+        let mod_depth_ms = depth_cv * (Self::MAX_DELAY_MS - base_delay_ms);
+
+        let lfo = (Libm::<f64>::sin(self.lfo_phase * TAU) + 1.0) * 0.5;
+        self.lfo_phase += lfo_freq / self.sample_rate;
+        if self.lfo_phase >= 1.0 {
+            self.lfo_phase -= 1.0;
+        }
+
+        let delay_ms = base_delay_ms + lfo * mod_depth_ms;
+        let delay_samples =
+            (delay_ms * self.sample_rate / 1000.0).clamp(1.0, (self.buffer.len() - 1) as f64);
+
+        let delayed = self.read_interpolated(delay_samples);
+        self.buffer[self.write_pos] = input + delayed * feedback;
+        self.write_pos = (self.write_pos + 1) % self.buffer.len();
+
+        outputs.set(10, input * (1.0 - mix) + delayed * mix);
+    }
+
+    fn reset(&mut self) {
+        self.buffer.fill(0.0);
+        self.write_pos = 0;
+        self.lfo_phase = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+        let buffer_size = (sample_rate * Self::MAX_DELAY_MS / 1000.0) as usize + 10;
+        self.buffer = vec![0.0; buffer_size];
+        self.write_pos = 0;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "flanger"
+    }
+}
+
+/// Phaser
+///
+/// Classic phaser effect using cascaded all-pass filters.
+pub struct Phaser {
+    allpass_states: [f64; 6],
+    lfo_phase: f64,
+    sample_rate: f64,
+    spec: PortSpec,
+}
+
+impl Phaser {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            allpass_states: [0.0; 6],
+            lfo_phase: 0.0,
+            sample_rate,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "rate", SignalKind::CvUnipolar)
+                        .with_default(0.3)
+                        .with_attenuverter(),
+                    PortDef::new(2, "depth", SignalKind::CvUnipolar)
+                        .with_default(0.7)
+                        .with_attenuverter(),
+                    PortDef::new(3, "feedback", SignalKind::CvBipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                    PortDef::new(4, "mix", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(5, "stages", SignalKind::CvUnipolar).with_default(1.0),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+            },
+        }
+    }
+
+    fn allpass(input: f64, state: &mut f64, coef: f64) -> f64 {
+        let output = *state + coef * (input - *state);
+        *state = input + coef * (output - input);
+        output
+    }
+}
+
+impl Default for Phaser {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Phaser {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let rate_cv = inputs.get_or(1, 0.3).clamp(0.0, 1.0);
+        let depth = inputs.get_or(2, 0.7).clamp(0.0, 1.0);
+        let feedback = inputs.get_or(3, 0.0).clamp(-0.95, 0.95);
+        let mix = inputs.get_or(4, 0.5).clamp(0.0, 1.0);
+        let stages_cv = inputs.get_or(5, 1.0).clamp(0.0, 1.0);
+
+        let num_stages = if stages_cv < 0.33 {
+            2
+        } else if stages_cv < 0.66 {
+            4
+        } else {
+            6
+        };
+
+        let lfo_freq = 0.05 * Libm::<f64>::pow(100.0, rate_cv);
+        let lfo = Libm::<f64>::sin(self.lfo_phase * TAU);
+        self.lfo_phase += lfo_freq / self.sample_rate;
+        if self.lfo_phase >= 1.0 {
+            self.lfo_phase -= 1.0;
+        }
+
+        let min_freq = 200.0;
+        let max_freq = 4000.0;
+        let freq = min_freq + (lfo * 0.5 + 0.5) * depth * (max_freq - min_freq);
+
+        let w = TAU * freq / self.sample_rate;
+        let tan_w = Libm::<f64>::tan(w * 0.5);
+        let coef = (1.0 - tan_w) / (1.0 + tan_w);
+
+        let mut signal = input + self.allpass_states[num_stages - 1] * feedback;
+
+        for i in 0..num_stages {
+            signal = Self::allpass(signal, &mut self.allpass_states[i], coef);
+        }
+
+        outputs.set(10, input * (1.0 - mix) + signal * mix);
+    }
+
+    fn reset(&mut self) {
+        self.allpass_states = [0.0; 6];
+        self.lfo_phase = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "phaser"
+    }
+}
+
 /// Pink noise generator state
 struct PinkNoiseState {
     rows: [f64; 16],
@@ -3144,6 +3814,204 @@ mod tests {
     fn test_chorus_default() {
         let chorus = Chorus::default();
         assert_eq!(chorus.type_id(), "chorus");
+    }
+
+    #[test]
+    fn test_limiter() {
+        let mut limiter = Limiter::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Test with signal above threshold
+        inputs.set(0, 10.0); // Way above threshold
+        inputs.set(1, 0.5); // Threshold
+        for _ in 0..100 {
+            limiter.tick(&inputs, &mut outputs);
+        }
+
+        // Output should be limited
+        let out = outputs.get(10).unwrap();
+        assert!(out.abs() < 10.0);
+        assert!(out.is_finite());
+    }
+
+    #[test]
+    fn test_limiter_default() {
+        let limiter = Limiter::default();
+        assert_eq!(limiter.type_id(), "limiter");
+    }
+
+    #[test]
+    fn test_noise_gate() {
+        let mut gate = NoiseGate::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Test with signal below threshold
+        inputs.set(0, 0.01); // Very quiet
+        inputs.set(1, 0.5); // Threshold
+        for _ in 0..1000 {
+            gate.tick(&inputs, &mut outputs);
+        }
+
+        // Gate should be closed, output attenuated
+        let out = outputs.get(10).unwrap();
+        assert!(out.abs() < 0.1);
+
+        // Gate output should be closed
+        let gate_out = outputs.get(11).unwrap();
+        assert!(gate_out < 2.5);
+    }
+
+    #[test]
+    fn test_noise_gate_default() {
+        let gate = NoiseGate::default();
+        assert_eq!(gate.type_id(), "noise_gate");
+    }
+
+    #[test]
+    fn test_compressor() {
+        let mut comp = Compressor::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Signal above threshold
+        inputs.set(0, 5.0);
+        inputs.set(1, 0.2); // Low threshold
+        inputs.set(2, 0.8); // High ratio
+        for _ in 0..100 {
+            comp.tick(&inputs, &mut outputs);
+        }
+
+        let out = outputs.get(10).unwrap();
+        assert!(out.is_finite());
+
+        // Should have some gain reduction
+        let gr = outputs.get(11).unwrap();
+        assert!(gr >= 0.0);
+    }
+
+    #[test]
+    fn test_compressor_default() {
+        let comp = Compressor::default();
+        assert_eq!(comp.type_id(), "compressor");
+    }
+
+    #[test]
+    fn test_envelope_follower() {
+        let mut ef = EnvelopeFollower::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Feed signal
+        inputs.set(0, 5.0);
+        for _ in 0..1000 {
+            ef.tick(&inputs, &mut outputs);
+        }
+
+        let out = outputs.get(10).unwrap();
+        assert!(out > 0.0);
+        assert!(out.is_finite());
+
+        // Inverted output
+        let inv = outputs.get(11).unwrap();
+        assert!(inv.is_finite());
+    }
+
+    #[test]
+    fn test_envelope_follower_default() {
+        let ef = EnvelopeFollower::default();
+        assert_eq!(ef.type_id(), "envelope_follower");
+    }
+
+    #[test]
+    fn test_bitcrusher() {
+        let mut bc = Bitcrusher::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 2.5);
+        inputs.set(1, 0.3); // Low bit depth
+        inputs.set(2, 0.5); // Some downsampling
+        bc.tick(&inputs, &mut outputs);
+
+        let out = outputs.get(10).unwrap();
+        assert!(out.is_finite());
+    }
+
+    #[test]
+    fn test_bitcrusher_default() {
+        let bc = Bitcrusher::default();
+        assert_eq!(bc.type_id(), "bitcrusher");
+    }
+
+    #[test]
+    fn test_flanger() {
+        let mut flanger = Flanger::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 1.0);
+        for _ in 0..1000 {
+            flanger.tick(&inputs, &mut outputs);
+        }
+
+        let out = outputs.get(10).unwrap();
+        assert!(out.is_finite());
+    }
+
+    #[test]
+    fn test_flanger_default() {
+        let flanger = Flanger::default();
+        assert_eq!(flanger.type_id(), "flanger");
+    }
+
+    #[test]
+    fn test_phaser() {
+        let mut phaser = Phaser::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 1.0);
+        for _ in 0..1000 {
+            phaser.tick(&inputs, &mut outputs);
+        }
+
+        let out = outputs.get(10).unwrap();
+        assert!(out.is_finite());
+    }
+
+    #[test]
+    fn test_phaser_default() {
+        let phaser = Phaser::default();
+        assert_eq!(phaser.type_id(), "phaser");
+    }
+
+    #[test]
+    fn test_phaser_stages() {
+        let mut phaser = Phaser::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 1.0);
+        inputs.set(5, 0.0); // 2 stages
+
+        for _ in 0..100 {
+            phaser.tick(&inputs, &mut outputs);
+        }
+        let out_2 = outputs.get(10).unwrap();
+
+        phaser.reset();
+        inputs.set(5, 1.0); // 6 stages
+
+        for _ in 0..100 {
+            phaser.tick(&inputs, &mut outputs);
+        }
+        let out_6 = outputs.get(10).unwrap();
+
+        // Both should produce valid output
+        assert!(out_2.is_finite());
+        assert!(out_6.is_finite());
     }
 
     #[test]

@@ -61,35 +61,33 @@ VCO (PWM) → SVF → VCA → Chorus → Stereo Output
 
 ---
 
-## P1: High Priority - Missing Core Modules
+## P1: High Priority - Missing Core Modules ✅ MOSTLY COMPLETE
 
 ### Effects Modules
-
-These are standard synthesizer effects that users expect:
 
 | Module | Description | Complexity | Status |
 |--------|-------------|------------|--------|
 | **DelayLine** | Multi-tap delay with feedback, wet/dry mix | Medium | ✅ Done |
 | **Chorus** | Modulated delay for thickening | Medium | ✅ Done |
+| **Flanger** | Short modulated delay with feedback | Medium | ✅ Done |
+| **Phaser** | All-pass filter chain with modulation | Medium | ✅ Done |
+| **Bitcrusher** | Lo-fi bit depth and sample rate reduction | Low | ✅ Done |
 | **Reverb** | Algorithmic reverb (Freeverb, Schroeder) | High | Pending |
-| **Flanger** | Short modulated delay with feedback | Medium | Pending |
-| **Phaser** | All-pass filter chain with modulation | Medium | Pending |
 
 ### Dynamics Modules
 
-| Module | Description | Complexity |
-|--------|-------------|------------|
-| **Compressor** | Dynamic range compression with attack/release | Medium |
-| **Limiter** | Hard/soft limiting | Low |
-| **Gate** | Noise gate with threshold | Low |
+| Module | Description | Complexity | Status |
+|--------|-------------|------------|--------|
+| **Limiter** | Hard/soft limiting | Low | ✅ Done |
+| **NoiseGate** | Noise gate with threshold and hysteresis | Low | ✅ Done |
+| **Compressor** | Dynamic range compression with sidechain | Medium | ✅ Done |
 
 ### Utility Modules
 
-| Module | Description | Complexity |
-|--------|-------------|------------|
-| **EnvelopeFollower** | Extract amplitude envelope from signal | Low |
-| **Bitcrusher** | Sample rate/bit depth reduction | Low |
-| **PitchShifter** | Frequency domain pitch shifting | High |
+| Module | Description | Complexity | Status |
+|--------|-------------|------------|--------|
+| **EnvelopeFollower** | Extract amplitude envelope from signal | Low | ✅ Done |
+| **PitchShifter** | Frequency domain pitch shifting | High | Pending |
 
 ---
 
@@ -289,9 +287,15 @@ When implementing features from this list:
 | DelayLine | ✅ Complete | - | Multi-sample delay with feedback, CV time control |
 | Chorus | ✅ Complete | - | 3-voice stereo chorus effect |
 | Juno Pad preset update | ✅ Complete | - | Now uses Chorus module |
-| Compressor | Not started | - | |
-| Limiter | Not started | - | |
-| Reverb | Not started | - | |
+| Flanger | ✅ Complete | - | Short modulated delay with feedback |
+| Phaser | ✅ Complete | - | 6-stage all-pass filter with LFO |
+| Limiter | ✅ Complete | - | Hard/soft limiting with gain reduction output |
+| NoiseGate | ✅ Complete | - | Threshold with hysteresis and range control |
+| Compressor | ✅ Complete | - | Full compressor with sidechain support |
+| EnvelopeFollower | ✅ Complete | - | Amplitude detection with inverted output |
+| Bitcrusher | ✅ Complete | - | Bit depth and sample rate reduction |
+| Reverb | Not started | - | High complexity |
+| PitchShifter | Not started | - | High complexity |
 | WASM examples | Not started | - | |
 
 ---
