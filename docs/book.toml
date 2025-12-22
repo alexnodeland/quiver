@@ -35,8 +35,7 @@ hidelines = { rust = "#" }
 command = "mdbook-mermaid"
 
 [preprocessor.katex]
-after = ["mermaid"]
-renderers = ["html"]
+after = ["links"]
 
 [output.html.search]
 enable = true
