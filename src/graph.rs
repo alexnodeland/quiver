@@ -820,6 +820,26 @@ impl Patch {
             .map(|(_, node)| node.name.as_str())
             .collect()
     }
+
+    /// Get the current output buffer value for a specific port
+    ///
+    /// This is used by the observer to collect real-time values for metering,
+    /// scope display, and other visualizations.
+    pub fn get_output_value(&self, node: NodeId, port: PortId) -> Option<f64> {
+        self.buffers.get(&PortRef { node, port }).copied()
+    }
+
+    /// Get the signal kind for an output port by node ID and port ID
+    pub fn get_output_signal_kind(&self, node: NodeId, port: PortId) -> Option<SignalKind> {
+        let node_data = self.nodes.get(node)?;
+        node_data
+            .module
+            .port_spec()
+            .outputs
+            .iter()
+            .find(|p| p.id == port)
+            .map(|p| p.kind)
+    }
 }
 
 #[cfg(test)]
