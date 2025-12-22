@@ -222,7 +222,11 @@ impl QuiverEngine {
             .ok_or_else(|| JsValue::from_str(&format!("Unknown module: {}", to_module)))?;
 
         self.patch
-            .connect_attenuated(from_handle.out(from_port), to_handle.in_(to_port), attenuation)
+            .connect_attenuated(
+                from_handle.out(from_port),
+                to_handle.in_(to_port),
+                attenuation,
+            )
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
         Ok(())
@@ -321,7 +325,12 @@ impl QuiverEngine {
     }
 
     /// Set a parameter value by numeric index
-    pub fn set_param(&mut self, node_name: &str, param_index: u32, value: f64) -> Result<(), JsValue> {
+    pub fn set_param(
+        &mut self,
+        node_name: &str,
+        param_index: u32,
+        value: f64,
+    ) -> Result<(), JsValue> {
         let node_id = self
             .get_node_id_by_name(node_name)
             .ok_or_else(|| JsValue::from_str(&format!("Unknown module: {}", node_name)))?;

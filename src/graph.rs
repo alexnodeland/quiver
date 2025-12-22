@@ -815,7 +815,10 @@ impl Patch {
 
     /// Get all module names
     pub fn module_names(&self) -> Vec<&str> {
-        self.nodes.iter().map(|(_, node)| node.name.as_str()).collect()
+        self.nodes
+            .iter()
+            .map(|(_, node)| node.name.as_str())
+            .collect()
     }
 }
 

@@ -1,7 +1,7 @@
 # Quiver Makefile
 # Common development commands
 
-.PHONY: all build test check fmt lint clippy doc bench coverage clean setup help
+.PHONY: all build test check fmt lint lint-fix clippy doc bench coverage clean setup help
 .PHONY: install-hooks changelog examples
 
 # Default target
@@ -42,6 +42,10 @@ fmt-check:
 # Run clippy linter
 lint:
 	cargo clippy --all-features -- -D warnings
+
+# Fix clippy lint issues automatically
+lint-fix:
+	cargo clippy --all-features --fix --allow-dirty --allow-staged
 
 # Alias for lint
 clippy: lint
@@ -155,6 +159,7 @@ help:
 	@echo "  make fmt          - Format code"
 	@echo "  make fmt-check    - Check formatting"
 	@echo "  make lint         - Run clippy"
+	@echo "  make lint-fix     - Fix clippy issues automatically"
 	@echo ""
 	@echo "Documentation:"
 	@echo "  make doc          - Build and open rustdoc"

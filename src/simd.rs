@@ -882,7 +882,7 @@ mod tests {
     #[test]
     fn test_block_processor_process_samples() {
         use crate::modules::Vco;
-        use crate::port::{BlockPortValues, GraphModule};
+        use crate::port::BlockPortValues;
 
         let processor = BlockProcessor::new(64, 44100.0);
 
