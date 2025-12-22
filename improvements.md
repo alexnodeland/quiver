@@ -11,35 +11,53 @@ This document outlines identified gaps, missing features, and improvements neede
 
 ---
 
-## P0: Critical - Documentation/Implementation Mismatches
+## P0: Critical - Documentation/Implementation Mismatches ✅ COMPLETED
 
-### Preset API Alignment
+### Preset API Alignment ✅
 
 **Location**: `src/presets.rs`, `docs/src/appendix/presets.md`
 
-The documented API doesn't match the implementation:
+**Status**: IMPLEMENTED - The documented API now works as expected:
 
-| Documented API | Actual API | Action Needed |
-|----------------|------------|---------------|
-| `PresetLibrary::new()` | Does not exist | Implement or update docs |
-| `library.get("name")` | `PresetLibrary::load(name)` | Update docs |
-| `preset.build(sample_rate)` | Does not exist | Implement or update docs |
-| `library.search_tags(&["tag"])` | `PresetLibrary::by_tag(tag)` | Update docs |
+| Documented API | Status |
+|----------------|--------|
+| `PresetLibrary::new()` | ✅ Implemented |
+| `library.get("name")` | ✅ Implemented - returns `Option<Preset>` |
+| `preset.build(sample_rate)` | ✅ Implemented - returns `Result<Patch, PresetError>` |
+| `library.search_tags(&["tag"])` | ✅ Implemented |
 
-**Options**:
-1. Update documentation to match current static API
-2. Implement instance-based API as documented
+Additional features added:
+- `Preset` struct with `build()` and `build_with_registry()` methods
+- `PresetError` enum for error handling
+- `preset.into_def()` to get raw `PatchDef`
 
-### Chorus Module Missing
+### Chorus Module ✅
 
-**Location**: `docs/src/appendix/presets.md`
+**Location**: `src/modules.rs`
 
-The "Juno Pad" preset references a Chorus module that doesn't exist:
+**Status**: IMPLEMENTED - Full chorus effect with:
+- 3-voice modulated delay lines
+- Rate and depth CV control
+- Stereo spread outputs (mono, left, right)
+- Registered in `ModuleRegistry` as "chorus"
+
+### DelayLine Module ✅ (Bonus)
+
+**Location**: `src/modules.rs`
+
+**Status**: IMPLEMENTED - Multi-sample delay with:
+- CV-controllable delay time (1ms to 2 seconds)
+- Feedback with stability limiting
+- Wet/dry mix
+- Linear interpolation for smooth modulation
+- Registered in `ModuleRegistry` as "delay_line"
+
+### Juno Pad Preset Updated ✅
+
+The "Juno Pad" preset now includes the Chorus module in its signal chain:
 ```
-VCO (saw + sub) → SVF → VCA → Chorus
+VCO (PWM) → SVF → VCA → Chorus → Stereo Output
 ```
-
-**Action**: Either implement `Chorus` module or remove from preset documentation.
 
 ---
 
@@ -49,13 +67,13 @@ VCO (saw + sub) → SVF → VCA → Chorus
 
 These are standard synthesizer effects that users expect:
 
-| Module | Description | Complexity |
-|--------|-------------|------------|
-| **DelayLine** | Multi-tap delay with feedback, wet/dry mix | Medium |
-| **Chorus** | Modulated delay for thickening | Medium |
-| **Reverb** | Algorithmic reverb (Freeverb, Schroeder) | High |
-| **Flanger** | Short modulated delay with feedback | Medium |
-| **Phaser** | All-pass filter chain with modulation | Medium |
+| Module | Description | Complexity | Status |
+|--------|-------------|------------|--------|
+| **DelayLine** | Multi-tap delay with feedback, wet/dry mix | Medium | ✅ Done |
+| **Chorus** | Modulated delay for thickening | Medium | ✅ Done |
+| **Reverb** | Algorithmic reverb (Freeverb, Schroeder) | High | Pending |
+| **Flanger** | Short modulated delay with feedback | Medium | Pending |
+| **Phaser** | All-pass filter chain with modulation | Medium | Pending |
 
 ### Dynamics Modules
 
@@ -267,13 +285,15 @@ When implementing features from this list:
 
 | Feature | Status | PR | Notes |
 |---------|--------|-----|-------|
-| Preset API docs fix | Not started | - | |
-| DelayLine | Not started | - | |
-| Chorus | Not started | - | Blocked by DelayLine |
+| Preset API implementation | ✅ Complete | - | `PresetLibrary::new()`, `get()`, `search_tags()`, `Preset::build()` |
+| DelayLine | ✅ Complete | - | Multi-sample delay with feedback, CV time control |
+| Chorus | ✅ Complete | - | 3-voice stereo chorus effect |
+| Juno Pad preset update | ✅ Complete | - | Now uses Chorus module |
 | Compressor | Not started | - | |
 | Limiter | Not started | - | |
+| Reverb | Not started | - | |
 | WASM examples | Not started | - | |
 
 ---
 
-*Last updated: 2024-12*
+*Last updated: 2025-12*

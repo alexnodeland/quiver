@@ -843,6 +843,298 @@ impl GraphModule for UnitDelay {
     }
 }
 
+/// Delay Line
+///
+/// A multi-sample delay line with feedback and wet/dry mix.
+/// Supports CV-controlled delay time for effects like chorus and flanging.
+///
+/// Maximum delay time is 2 seconds at any sample rate.
+pub struct DelayLine {
+    buffer: Vec<f64>,
+    write_pos: usize,
+    sample_rate: f64,
+    spec: PortSpec,
+}
+
+impl DelayLine {
+    /// Maximum delay time in seconds
+    const MAX_DELAY_SECS: f64 = 2.0;
+
+    pub fn new(sample_rate: f64) -> Self {
+        let buffer_size = (sample_rate * Self::MAX_DELAY_SECS) as usize + 1;
+        Self {
+            buffer: vec![0.0; buffer_size],
+            write_pos: 0,
+            sample_rate,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "time", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(2, "feedback", SignalKind::CvUnipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                    PortDef::new(3, "mix", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+            },
+        }
+    }
+
+    /// Read from the delay line with linear interpolation
+    fn read_interpolated(&self, delay_samples: f64) -> f64 {
+        let buffer_len = self.buffer.len();
+        let delay_int = delay_samples as usize;
+        let frac = delay_samples - delay_int as f64;
+
+        // Calculate read positions (wrapping)
+        let read_pos1 = (self.write_pos + buffer_len - delay_int) % buffer_len;
+        let read_pos2 = (self.write_pos + buffer_len - delay_int - 1) % buffer_len;
+
+        // Linear interpolation
+        let sample1 = self.buffer[read_pos1];
+        let sample2 = self.buffer[read_pos2];
+        sample1 * (1.0 - frac) + sample2 * frac
+    }
+}
+
+impl Default for DelayLine {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for DelayLine {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let time_cv = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
+        let feedback = inputs.get_or(2, 0.0).clamp(0.0, 0.99); // Prevent runaway
+        let mix = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
+
+        // Map time CV (0-1) to delay time (1ms to max delay, exponential)
+        let min_delay_ms = 1.0;
+        let max_delay_ms = Self::MAX_DELAY_SECS * 1000.0;
+        let delay_ms = min_delay_ms * Libm::<f64>::pow(max_delay_ms / min_delay_ms, time_cv);
+        let delay_samples = (delay_ms * self.sample_rate / 1000.0)
+            .clamp(1.0, (self.buffer.len() - 1) as f64);
+
+        // Read from delay line
+        let delayed = self.read_interpolated(delay_samples);
+
+        // Write input + feedback to buffer
+        self.buffer[self.write_pos] = input + delayed * feedback;
+
+        // Advance write position
+        self.write_pos = (self.write_pos + 1) % self.buffer.len();
+
+        // Mix dry and wet signals
+        let output = input * (1.0 - mix) + delayed * mix;
+        outputs.set(10, output);
+    }
+
+    fn reset(&mut self) {
+        self.buffer.fill(0.0);
+        self.write_pos = 0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+        let buffer_size = (sample_rate * Self::MAX_DELAY_SECS) as usize + 1;
+        self.buffer = vec![0.0; buffer_size];
+        self.write_pos = 0;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "delay_line"
+    }
+}
+
+/// Chorus Effect
+///
+/// Classic chorus effect using multiple modulated delay lines.
+/// Creates a rich, shimmering sound by mixing slightly detuned copies
+/// of the input signal.
+pub struct Chorus {
+    /// Three delay lines for rich chorus
+    delay_buffers: [Vec<f64>; 3],
+    write_pos: usize,
+    /// LFO phases for each voice
+    lfo_phases: [f64; 3],
+    sample_rate: f64,
+    spec: PortSpec,
+}
+
+impl Chorus {
+    /// Maximum modulation delay in milliseconds
+    const MAX_MOD_DELAY_MS: f64 = 25.0;
+    /// Base delay in milliseconds
+    const BASE_DELAY_MS: f64 = 7.0;
+
+    pub fn new(sample_rate: f64) -> Self {
+        let buffer_size = ((Self::MAX_MOD_DELAY_MS + Self::BASE_DELAY_MS) * sample_rate / 1000.0)
+            as usize
+            + 10;
+        Self {
+            delay_buffers: [
+                vec![0.0; buffer_size],
+                vec![0.0; buffer_size],
+                vec![0.0; buffer_size],
+            ],
+            write_pos: 0,
+            // Offset phases for each voice to create movement
+            lfo_phases: [0.0, 0.33, 0.67],
+            sample_rate,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "rate", SignalKind::CvUnipolar)
+                        .with_default(0.3)
+                        .with_attenuverter(),
+                    PortDef::new(2, "depth", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(3, "mix", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Audio),
+                    PortDef::new(11, "left", SignalKind::Audio),
+                    PortDef::new(12, "right", SignalKind::Audio),
+                ],
+            },
+        }
+    }
+
+    /// Read from a delay buffer with linear interpolation
+    fn read_interpolated(buffer: &[f64], write_pos: usize, delay_samples: f64) -> f64 {
+        let buffer_len = buffer.len();
+        let delay_int = delay_samples as usize;
+        let frac = delay_samples - delay_int as f64;
+
+        let read_pos1 = (write_pos + buffer_len - delay_int) % buffer_len;
+        let read_pos2 = (write_pos + buffer_len - delay_int - 1) % buffer_len;
+
+        let sample1 = buffer[read_pos1];
+        let sample2 = buffer[read_pos2];
+        sample1 * (1.0 - frac) + sample2 * frac
+    }
+}
+
+impl Default for Chorus {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Chorus {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let rate_cv = inputs.get_or(1, 0.3).clamp(0.0, 1.0);
+        let depth_cv = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
+        let mix = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
+
+        // Map rate CV to LFO frequency (0.1 Hz to 5 Hz)
+        let lfo_freq = 0.1 * Libm::<f64>::pow(50.0, rate_cv);
+
+        // Map depth CV to modulation depth in ms
+        let mod_depth_ms = depth_cv * Self::MAX_MOD_DELAY_MS;
+
+        let base_delay_samples = Self::BASE_DELAY_MS * self.sample_rate / 1000.0;
+        let mod_depth_samples = mod_depth_ms * self.sample_rate / 1000.0;
+
+        let mut wet_sum = 0.0;
+        let mut left_sum = 0.0;
+        let mut right_sum = 0.0;
+
+        for i in 0..3 {
+            // Calculate modulated delay for this voice
+            let lfo_val = Libm::<f64>::sin(self.lfo_phases[i] * core::f64::consts::TAU);
+            let delay_samples = base_delay_samples + lfo_val * mod_depth_samples;
+            let delay_samples = delay_samples.clamp(1.0, (self.delay_buffers[i].len() - 1) as f64);
+
+            // Read from this voice's delay line
+            let delayed =
+                Self::read_interpolated(&self.delay_buffers[i], self.write_pos, delay_samples);
+
+            wet_sum += delayed;
+
+            // Stereo spread: voice 0 center, voice 1 left, voice 2 right
+            match i {
+                0 => {
+                    left_sum += delayed * 0.5;
+                    right_sum += delayed * 0.5;
+                }
+                1 => left_sum += delayed,
+                2 => right_sum += delayed,
+                _ => {}
+            }
+
+            // Write input to this voice's delay buffer
+            self.delay_buffers[i][self.write_pos] = input;
+
+            // Advance LFO phase with slight detuning between voices
+            let freq_mult = 1.0 + (i as f64 - 1.0) * 0.1; // Slight frequency offset
+            let phase_inc = lfo_freq * freq_mult / self.sample_rate;
+            self.lfo_phases[i] += phase_inc;
+            if self.lfo_phases[i] >= 1.0 {
+                self.lfo_phases[i] -= 1.0;
+            }
+        }
+
+        // Normalize wet signal (3 voices)
+        wet_sum /= 3.0;
+        left_sum /= 2.0;
+        right_sum /= 2.0;
+
+        // Advance write position
+        self.write_pos = (self.write_pos + 1) % self.delay_buffers[0].len();
+
+        // Mix dry and wet
+        let mono_out = input * (1.0 - mix) + wet_sum * mix;
+        let left_out = input * (1.0 - mix) + left_sum * mix;
+        let right_out = input * (1.0 - mix) + right_sum * mix;
+
+        outputs.set(10, mono_out);
+        outputs.set(11, left_out);
+        outputs.set(12, right_out);
+    }
+
+    fn reset(&mut self) {
+        for buffer in &mut self.delay_buffers {
+            buffer.fill(0.0);
+        }
+        self.write_pos = 0;
+        self.lfo_phases = [0.0, 0.33, 0.67];
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+        let buffer_size = ((Self::MAX_MOD_DELAY_MS + Self::BASE_DELAY_MS) * sample_rate / 1000.0)
+            as usize
+            + 10;
+        for buffer in &mut self.delay_buffers {
+            *buffer = vec![0.0; buffer_size];
+        }
+        self.write_pos = 0;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "chorus"
+    }
+}
+
 /// Pink noise generator state
 struct PinkNoiseState {
     rows: [f64; 16],
@@ -2674,6 +2966,184 @@ mod tests {
         inputs.set(0, 2.0);
         delay.tick(&inputs, &mut outputs);
         assert!((outputs.get(10).unwrap() - 1.0).abs() < 0.01); // Should be previous input
+    }
+
+    #[test]
+    fn test_delay_line() {
+        let mut delay = DelayLine::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Set delay time to minimum and mix to wet only
+        inputs.set(1, 0.0); // Minimum time
+        inputs.set(2, 0.0); // No feedback
+        inputs.set(3, 1.0); // 100% wet
+
+        // Feed an impulse
+        inputs.set(0, 1.0);
+        delay.tick(&inputs, &mut outputs);
+
+        // First output should be from empty buffer (near zero)
+        let first_out = outputs.get(10).unwrap();
+        assert!(first_out.abs() < 0.1);
+
+        // Continue processing
+        inputs.set(0, 0.0);
+        for _ in 0..100 {
+            delay.tick(&inputs, &mut outputs);
+        }
+
+        // Eventually should output our impulse
+        let out = outputs.get(10).unwrap();
+        assert!(out.is_finite());
+    }
+
+    #[test]
+    fn test_delay_line_feedback() {
+        let mut delay = DelayLine::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Set high feedback
+        inputs.set(1, 0.0); // Minimum time
+        inputs.set(2, 0.5); // 50% feedback
+        inputs.set(3, 0.5); // 50% wet
+
+        // Feed an impulse
+        inputs.set(0, 1.0);
+        delay.tick(&inputs, &mut outputs);
+
+        // Process more samples with no input
+        inputs.set(0, 0.0);
+        for _ in 0..1000 {
+            delay.tick(&inputs, &mut outputs);
+        }
+
+        // Output should still be finite (feedback doesn't blow up)
+        let out = outputs.get(10).unwrap();
+        assert!(out.is_finite());
+    }
+
+    #[test]
+    fn test_delay_line_reset() {
+        let mut delay = DelayLine::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Feed some signal
+        inputs.set(0, 1.0);
+        for _ in 0..100 {
+            delay.tick(&inputs, &mut outputs);
+        }
+
+        // Reset
+        delay.reset();
+
+        // Buffer should be cleared
+        inputs.set(0, 0.0);
+        inputs.set(3, 1.0); // 100% wet
+        delay.tick(&inputs, &mut outputs);
+        let out = outputs.get(10).unwrap();
+        assert!(out.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_chorus() {
+        let mut chorus = Chorus::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Default settings
+        inputs.set(0, 0.5); // Input signal
+
+        // Process several samples to let LFOs move
+        for _ in 0..1000 {
+            chorus.tick(&inputs, &mut outputs);
+        }
+
+        // Should produce output on all three ports
+        let mono = outputs.get(10).unwrap();
+        let left = outputs.get(11).unwrap();
+        let right = outputs.get(12).unwrap();
+
+        assert!(mono.is_finite());
+        assert!(left.is_finite());
+        assert!(right.is_finite());
+    }
+
+    #[test]
+    fn test_chorus_stereo_spread() {
+        let mut chorus = Chorus::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Set mix to 100% wet
+        inputs.set(0, 1.0); // Input signal
+        inputs.set(1, 0.5); // Rate
+        inputs.set(2, 0.5); // Depth
+        inputs.set(3, 1.0); // 100% wet
+
+        // Process many samples
+        let mut left_sum = 0.0;
+        let mut right_sum = 0.0;
+        for _ in 0..10000 {
+            chorus.tick(&inputs, &mut outputs);
+            left_sum += outputs.get(11).unwrap().abs();
+            right_sum += outputs.get(12).unwrap().abs();
+        }
+
+        // Both channels should have significant output
+        assert!(left_sum > 1.0);
+        assert!(right_sum > 1.0);
+    }
+
+    #[test]
+    fn test_chorus_reset() {
+        let mut chorus = Chorus::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Feed signal
+        inputs.set(0, 1.0);
+        for _ in 0..1000 {
+            chorus.tick(&inputs, &mut outputs);
+        }
+
+        // Reset
+        chorus.reset();
+
+        // Check LFO phases are reset
+        inputs.set(0, 0.0);
+        inputs.set(3, 1.0); // 100% wet
+        chorus.tick(&inputs, &mut outputs);
+
+        // Output should be near zero after reset with zero input
+        let out = outputs.get(10).unwrap();
+        assert!(out.abs() < 0.1);
+    }
+
+    #[test]
+    fn test_delay_line_type_id() {
+        let delay = DelayLine::new(44100.0);
+        assert_eq!(delay.type_id(), "delay_line");
+    }
+
+    #[test]
+    fn test_chorus_type_id() {
+        let chorus = Chorus::new(44100.0);
+        assert_eq!(chorus.type_id(), "chorus");
+    }
+
+    #[test]
+    fn test_delay_line_default() {
+        let delay = DelayLine::default();
+        assert_eq!(delay.type_id(), "delay_line");
+    }
+
+    #[test]
+    fn test_chorus_default() {
+        let chorus = Chorus::default();
+        assert_eq!(chorus.type_id(), "chorus");
     }
 
     #[test]

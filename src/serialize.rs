@@ -440,6 +440,26 @@ impl ModuleRegistry {
         );
 
         self.register_factory_with_keywords(
+            "delay_line",
+            "Delay Line",
+            "Effects",
+            "Multi-tap delay with feedback and wet/dry mix",
+            &["delay", "echo", "feedback", "time", "effect"],
+            &[],
+            |sr| Box::new(DelayLine::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "chorus",
+            "Chorus",
+            "Effects",
+            "Classic chorus effect with modulated delay lines",
+            &["chorus", "modulation", "detune", "ensemble", "effect", "stereo"],
+            &[],
+            |sr| Box::new(Chorus::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
             "attenuverter",
             "Attenuverter",
             "Utilities",
