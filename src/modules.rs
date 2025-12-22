@@ -922,8 +922,8 @@ impl GraphModule for DelayLine {
         let min_delay_ms = 1.0;
         let max_delay_ms = Self::MAX_DELAY_SECS * 1000.0;
         let delay_ms = min_delay_ms * Libm::<f64>::pow(max_delay_ms / min_delay_ms, time_cv);
-        let delay_samples = (delay_ms * self.sample_rate / 1000.0)
-            .clamp(1.0, (self.buffer.len() - 1) as f64);
+        let delay_samples =
+            (delay_ms * self.sample_rate / 1000.0).clamp(1.0, (self.buffer.len() - 1) as f64);
 
         // Read from delay line
         let delayed = self.read_interpolated(delay_samples);
@@ -978,9 +978,8 @@ impl Chorus {
     const BASE_DELAY_MS: f64 = 7.0;
 
     pub fn new(sample_rate: f64) -> Self {
-        let buffer_size = ((Self::MAX_MOD_DELAY_MS + Self::BASE_DELAY_MS) * sample_rate / 1000.0)
-            as usize
-            + 10;
+        let buffer_size =
+            ((Self::MAX_MOD_DELAY_MS + Self::BASE_DELAY_MS) * sample_rate / 1000.0) as usize + 10;
         Self {
             delay_buffers: [
                 vec![0.0; buffer_size],
@@ -1121,9 +1120,8 @@ impl GraphModule for Chorus {
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
-        let buffer_size = ((Self::MAX_MOD_DELAY_MS + Self::BASE_DELAY_MS) * sample_rate / 1000.0)
-            as usize
-            + 10;
+        let buffer_size =
+            ((Self::MAX_MOD_DELAY_MS + Self::BASE_DELAY_MS) * sample_rate / 1000.0) as usize + 10;
         for buffer in &mut self.delay_buffers {
             *buffer = vec![0.0; buffer_size];
         }

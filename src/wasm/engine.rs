@@ -17,6 +17,12 @@ pub struct QuiverEngine {
     registry: ModuleRegistry,
     observer: StateObserver,
     sample_rate: f64,
+    // MIDI state for worklet integration
+    midi_note: Option<f64>,
+    midi_velocity: Option<f64>,
+    midi_gate: bool,
+    midi_cc_values: [f64; 128],
+    midi_pitch_bend_value: f64,
 }
 
 #[wasm_bindgen]
@@ -32,6 +38,11 @@ impl QuiverEngine {
             registry: ModuleRegistry::new(),
             observer: StateObserver::new(),
             sample_rate,
+            midi_note: None,
+            midi_velocity: None,
+            midi_gate: false,
+            midi_cc_values: [0.0; 128],
+            midi_pitch_bend_value: 0.0,
         }
     }
 
@@ -425,6 +436,77 @@ impl QuiverEngine {
         self.patch
             .compile()
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
+    }
+
+    // =========================================================================
+    // MIDI Support for Worklet Integration
+    // =========================================================================
+
+    /// Handle a MIDI Note On message
+    ///
+    /// This is a convenience method for AudioWorklet MIDI handling.
+    /// The note and velocity are normalized to the typical synth CV ranges.
+    pub fn midi_note_on(&mut self, note: u8, velocity: u8) -> Result<(), JsValue> {
+        // Convert MIDI note to V/Oct (0V = C4, 1V = C5)
+        let v_oct = (note as f64 - 60.0) / 12.0;
+        // Convert velocity to 0-1 range
+        let vel = velocity as f64 / 127.0;
+
+        // These would typically be connected to external inputs
+        // For now, just store them for retrieval
+        self.midi_note = Some(v_oct);
+        self.midi_velocity = Some(vel);
+        self.midi_gate = true;
+
+        Ok(())
+    }
+
+    /// Handle a MIDI Note Off message
+    pub fn midi_note_off(&mut self, _note: u8, _velocity: u8) -> Result<(), JsValue> {
+        self.midi_gate = false;
+        Ok(())
+    }
+
+    /// Get the current MIDI note as V/Oct (for connecting to VCO)
+    #[wasm_bindgen(getter)]
+    pub fn midi_note(&self) -> f64 {
+        self.midi_note.unwrap_or(0.0)
+    }
+
+    /// Get the current MIDI velocity (0-1)
+    #[wasm_bindgen(getter)]
+    pub fn midi_velocity(&self) -> f64 {
+        self.midi_velocity.unwrap_or(0.0)
+    }
+
+    /// Get the current MIDI gate state
+    #[wasm_bindgen(getter)]
+    pub fn midi_gate(&self) -> bool {
+        self.midi_gate
+    }
+
+    /// Handle a MIDI Control Change message
+    pub fn midi_cc(&mut self, cc: u8, value: u8) -> Result<(), JsValue> {
+        // Store CC values for retrieval
+        self.midi_cc_values[cc as usize] = value as f64 / 127.0;
+        Ok(())
+    }
+
+    /// Get a MIDI CC value (0-1 normalized)
+    pub fn get_midi_cc(&self, cc: u8) -> f64 {
+        self.midi_cc_values.get(cc as usize).copied().unwrap_or(0.0)
+    }
+
+    /// Handle a MIDI Pitch Bend message (-1 to 1)
+    pub fn midi_pitch_bend(&mut self, value: f64) -> Result<(), JsValue> {
+        self.midi_pitch_bend_value = value;
+        Ok(())
+    }
+
+    /// Get the current pitch bend value (-1 to 1)
+    #[wasm_bindgen(getter)]
+    pub fn pitch_bend(&self) -> f64 {
+        self.midi_pitch_bend_value
     }
 
     // =========================================================================

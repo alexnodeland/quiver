@@ -679,6 +679,368 @@ impl PluginWrapper {
     pub fn is_processing(&self) -> bool {
         self.is_processing.load(Ordering::SeqCst)
     }
+
+    /// Get the latency in samples
+    pub fn latency(&self) -> u32 {
+        self.info.latency
+    }
+
+    /// Set the latency in samples
+    pub fn set_latency(&mut self, samples: u32) {
+        self.info.latency = samples;
+    }
+}
+
+// ============================================================================
+// MIDI Support for Plugin Integration
+// ============================================================================
+
+/// MIDI message status bytes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MidiStatus {
+    /// Note Off (channel 0-15)
+    NoteOff(u8),
+    /// Note On (channel 0-15)
+    NoteOn(u8),
+    /// Polyphonic Aftertouch (channel 0-15)
+    PolyPressure(u8),
+    /// Control Change (channel 0-15)
+    ControlChange(u8),
+    /// Program Change (channel 0-15)
+    ProgramChange(u8),
+    /// Channel Aftertouch (channel 0-15)
+    ChannelPressure(u8),
+    /// Pitch Bend (channel 0-15)
+    PitchBend(u8),
+    /// System message
+    System(u8),
+}
+
+impl MidiStatus {
+    /// Parse status byte
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        let status = byte & 0xF0;
+        let channel = byte & 0x0F;
+        match status {
+            0x80 => Some(MidiStatus::NoteOff(channel)),
+            0x90 => Some(MidiStatus::NoteOn(channel)),
+            0xA0 => Some(MidiStatus::PolyPressure(channel)),
+            0xB0 => Some(MidiStatus::ControlChange(channel)),
+            0xC0 => Some(MidiStatus::ProgramChange(channel)),
+            0xD0 => Some(MidiStatus::ChannelPressure(channel)),
+            0xE0 => Some(MidiStatus::PitchBend(channel)),
+            0xF0..=0xFF => Some(MidiStatus::System(byte)),
+            _ => None,
+        }
+    }
+
+    /// Get the channel (0-15) or None for system messages
+    pub fn channel(&self) -> Option<u8> {
+        match self {
+            MidiStatus::NoteOff(ch)
+            | MidiStatus::NoteOn(ch)
+            | MidiStatus::PolyPressure(ch)
+            | MidiStatus::ControlChange(ch)
+            | MidiStatus::ProgramChange(ch)
+            | MidiStatus::ChannelPressure(ch)
+            | MidiStatus::PitchBend(ch) => Some(*ch),
+            MidiStatus::System(_) => None,
+        }
+    }
+}
+
+/// A MIDI message with timing information
+#[derive(Debug, Clone)]
+pub struct MidiMessage {
+    /// Sample offset within the current buffer
+    pub sample_offset: u32,
+    /// Status byte
+    pub status: MidiStatus,
+    /// Data byte 1 (note number, CC number, etc.)
+    pub data1: u8,
+    /// Data byte 2 (velocity, CC value, etc.)
+    pub data2: u8,
+}
+
+impl MidiMessage {
+    /// Create a Note On message
+    pub fn note_on(channel: u8, note: u8, velocity: u8) -> Self {
+        Self {
+            sample_offset: 0,
+            status: MidiStatus::NoteOn(channel & 0x0F),
+            data1: note & 0x7F,
+            data2: velocity & 0x7F,
+        }
+    }
+
+    /// Create a Note Off message
+    pub fn note_off(channel: u8, note: u8, velocity: u8) -> Self {
+        Self {
+            sample_offset: 0,
+            status: MidiStatus::NoteOff(channel & 0x0F),
+            data1: note & 0x7F,
+            data2: velocity & 0x7F,
+        }
+    }
+
+    /// Create a Control Change message
+    pub fn control_change(channel: u8, cc: u8, value: u8) -> Self {
+        Self {
+            sample_offset: 0,
+            status: MidiStatus::ControlChange(channel & 0x0F),
+            data1: cc & 0x7F,
+            data2: value & 0x7F,
+        }
+    }
+
+    /// Create a Pitch Bend message (value: -8192 to 8191)
+    pub fn pitch_bend(channel: u8, value: i16) -> Self {
+        let unsigned = (value + 8192).clamp(0, 16383) as u16;
+        Self {
+            sample_offset: 0,
+            status: MidiStatus::PitchBend(channel & 0x0F),
+            data1: (unsigned & 0x7F) as u8,
+            data2: ((unsigned >> 7) & 0x7F) as u8,
+        }
+    }
+
+    /// Set sample offset for sample-accurate timing
+    pub fn at_sample(mut self, offset: u32) -> Self {
+        self.sample_offset = offset;
+        self
+    }
+
+    /// Check if this is a Note On with non-zero velocity
+    pub fn is_note_on(&self) -> bool {
+        matches!(self.status, MidiStatus::NoteOn(_)) && self.data2 > 0
+    }
+
+    /// Check if this is a Note Off (or Note On with velocity 0)
+    pub fn is_note_off(&self) -> bool {
+        matches!(self.status, MidiStatus::NoteOff(_))
+            || (matches!(self.status, MidiStatus::NoteOn(_)) && self.data2 == 0)
+    }
+
+    /// Get the note number (0-127)
+    pub fn note(&self) -> u8 {
+        self.data1
+    }
+
+    /// Get the velocity (0-127)
+    pub fn velocity(&self) -> u8 {
+        self.data2
+    }
+
+    /// Convert note to frequency (A4 = 440Hz)
+    pub fn note_to_frequency(&self) -> f64 {
+        440.0 * 2.0_f64.powf((self.data1 as f64 - 69.0) / 12.0)
+    }
+
+    /// Convert note to V/Oct (0V = C4, 1V = C5, etc.)
+    pub fn note_to_volt_per_octave(&self) -> f64 {
+        (self.data1 as f64 - 60.0) / 12.0
+    }
+
+    /// Get pitch bend as -1.0 to 1.0 (for +/- 2 semitones typically)
+    pub fn pitch_bend_normalized(&self) -> f64 {
+        if !matches!(self.status, MidiStatus::PitchBend(_)) {
+            return 0.0;
+        }
+        let value = (self.data1 as i32) | ((self.data2 as i32) << 7);
+        (value - 8192) as f64 / 8192.0
+    }
+}
+
+/// MIDI event buffer for a processing block
+pub struct MidiBuffer {
+    /// Events sorted by sample offset
+    events: Vec<MidiMessage>,
+}
+
+impl MidiBuffer {
+    /// Create an empty MIDI buffer
+    pub fn new() -> Self {
+        Self { events: Vec::new() }
+    }
+
+    /// Create a buffer with capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            events: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Add an event
+    pub fn push(&mut self, event: MidiMessage) {
+        self.events.push(event);
+    }
+
+    /// Clear the buffer
+    pub fn clear(&mut self) {
+        self.events.clear();
+    }
+
+    /// Sort events by sample offset
+    pub fn sort(&mut self) {
+        self.events.sort_by_key(|e| e.sample_offset);
+    }
+
+    /// Get iterator over events
+    pub fn iter(&self) -> impl Iterator<Item = &MidiMessage> {
+        self.events.iter()
+    }
+
+    /// Get events at a specific sample offset
+    pub fn events_at(&self, sample: u32) -> impl Iterator<Item = &MidiMessage> {
+        self.events
+            .iter()
+            .filter(move |e| e.sample_offset == sample)
+    }
+
+    /// Get number of events
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+}
+
+impl Default for MidiBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Plugin Processor Trait
+// ============================================================================
+
+/// Processing context passed to plugin processor
+pub struct ProcessContext<'a> {
+    /// Sample rate
+    pub sample_rate: f64,
+    /// Number of samples in this block
+    pub num_samples: usize,
+    /// Current transport position in samples (if available)
+    pub transport_position: Option<u64>,
+    /// Current tempo in BPM (if available)
+    pub tempo: Option<f64>,
+    /// Whether transport is playing
+    pub is_playing: bool,
+    /// MIDI input events
+    pub midi_in: &'a MidiBuffer,
+    /// MIDI output events
+    pub midi_out: &'a mut MidiBuffer,
+}
+
+/// Trait for plugin audio processors
+///
+/// This trait provides the complete interface for implementing audio plugins.
+/// Implementations can be used with VST3, AU, or LV2 wrappers.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use quiver::extended_io::*;
+///
+/// struct MySynth {
+///     patch: Patch,
+///     sample_rate: f64,
+/// }
+///
+/// impl PluginProcessor for MySynth {
+///     fn initialize(&mut self, sample_rate: f64, max_block_size: usize) {
+///         self.sample_rate = sample_rate;
+///         self.patch.set_sample_rate(sample_rate);
+///     }
+///
+///     fn process(
+///         &mut self,
+///         inputs: &[&[f32]],
+///         outputs: &mut [&mut [f32]],
+///         context: &mut ProcessContext,
+///     ) {
+///         // Handle MIDI
+///         for event in context.midi_in.iter() {
+///             if event.is_note_on() {
+///                 // Trigger note...
+///             }
+///         }
+///
+///         // Process audio
+///         for i in 0..context.num_samples {
+///             let (left, right) = self.patch.tick();
+///             outputs[0][i] = left as f32;
+///             outputs[1][i] = right as f32;
+///         }
+///     }
+///
+///     fn reset(&mut self) {
+///         self.patch.reset();
+///     }
+/// }
+/// ```
+pub trait PluginProcessor: Send {
+    /// Initialize the processor
+    ///
+    /// Called once when the plugin is instantiated or when sample rate changes.
+    fn initialize(&mut self, sample_rate: f64, max_block_size: usize);
+
+    /// Process a block of audio
+    ///
+    /// `inputs`: Slice of input channel buffers (may be empty for synths)
+    /// `outputs`: Slice of output channel buffers
+    /// `context`: Processing context with timing and MIDI
+    fn process(
+        &mut self,
+        inputs: &[&[f32]],
+        outputs: &mut [&mut [f32]],
+        context: &mut ProcessContext,
+    );
+
+    /// Reset processor state
+    ///
+    /// Called when playback stops or when bypassed for a while.
+    fn reset(&mut self);
+
+    /// Set a parameter value
+    fn set_parameter(&mut self, id: u32, value: f64);
+
+    /// Get a parameter value
+    fn get_parameter(&self, id: u32) -> f64;
+
+    /// Get the number of parameters
+    fn parameter_count(&self) -> usize {
+        0
+    }
+
+    /// Get parameter info
+    fn parameter_info(&self, _id: u32) -> Option<PluginParameter> {
+        None
+    }
+
+    /// Get tail length in samples (for reverbs, delays, etc.)
+    fn tail_samples(&self) -> u32 {
+        0
+    }
+
+    /// Get latency in samples
+    fn latency_samples(&self) -> u32 {
+        0
+    }
+
+    /// Handle state save (return serialized state)
+    fn save_state(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Handle state load
+    fn load_state(&mut self, _data: &[u8]) -> bool {
+        false
+    }
 }
 
 // ============================================================================
@@ -796,6 +1158,182 @@ impl WebAudioWorklet {
 }
 
 impl Default for WebAudioWorklet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Web Audio block processor for AudioWorklet integration
+///
+/// This struct provides the sample-accurate processing required for
+/// Web Audio's AudioWorkletProcessor. It handles the 128-sample render
+/// quantum and provides efficient block processing.
+///
+/// # JavaScript Integration Example
+///
+/// ```javascript
+/// // In your AudioWorkletProcessor
+/// class QuiverProcessor extends AudioWorkletProcessor {
+///   constructor() {
+///     super();
+///     this.engine = new QuiverEngine(sampleRate);
+///     this.engine.load_patch(patchJson);
+///     this.engine.compile();
+///   }
+///
+///   process(inputs, outputs, parameters) {
+///     const output = outputs[0];
+///     const samples = this.engine.process_block(128);
+///
+///     // Deinterleave stereo output
+///     for (let i = 0; i < 128; i++) {
+///       output[0][i] = samples[i * 2];
+///       output[1][i] = samples[i * 2 + 1];
+///     }
+///     return true;
+///   }
+/// }
+/// ```
+pub struct WebAudioBlockProcessor {
+    /// Configuration
+    config: WebAudioConfig,
+    /// Left channel buffer
+    left_buffer: Vec<f64>,
+    /// Right channel buffer
+    right_buffer: Vec<f64>,
+    /// Interleaved output buffer (for f32)
+    interleaved_buffer: Vec<f32>,
+    /// Parameter map
+    parameters: HashMap<String, Arc<AtomicF64>>,
+    /// Active state
+    active: bool,
+}
+
+impl WebAudioBlockProcessor {
+    /// Create a new block processor with default Web Audio config (128 samples)
+    pub fn new() -> Self {
+        Self::with_config(WebAudioConfig::default())
+    }
+
+    /// Create a new block processor with custom configuration
+    pub fn with_config(config: WebAudioConfig) -> Self {
+        let block_size = config.block_size;
+        Self {
+            config,
+            left_buffer: vec![0.0; block_size],
+            right_buffer: vec![0.0; block_size],
+            interleaved_buffer: vec![0.0; block_size * 2],
+            parameters: HashMap::new(),
+            active: false,
+        }
+    }
+
+    /// Add a parameter
+    pub fn add_parameter(&mut self, name: &str, initial: f64) -> Arc<AtomicF64> {
+        let value = Arc::new(AtomicF64::new(initial));
+        self.parameters.insert(name.to_string(), value.clone());
+        value
+    }
+
+    /// Initialize/activate the processor
+    pub fn activate(&mut self) {
+        self.active = true;
+    }
+
+    /// Deactivate the processor
+    pub fn deactivate(&mut self) {
+        self.active = false;
+    }
+
+    /// Check if active
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Get configuration
+    pub fn config(&self) -> &WebAudioConfig {
+        &self.config
+    }
+
+    /// Get the block size
+    pub fn block_size(&self) -> usize {
+        self.config.block_size
+    }
+
+    /// Get the sample rate
+    pub fn sample_rate(&self) -> f64 {
+        self.config.sample_rate
+    }
+
+    /// Get a parameter value
+    pub fn get_parameter(&self, name: &str) -> Option<f64> {
+        self.parameters.get(name).map(|v| v.get())
+    }
+
+    /// Set a parameter value
+    pub fn set_parameter(&mut self, name: &str, value: f64) {
+        if let Some(param) = self.parameters.get(name) {
+            param.set(value);
+        }
+    }
+
+    /// Get all parameter names
+    pub fn parameter_names(&self) -> Vec<String> {
+        self.parameters.keys().cloned().collect()
+    }
+
+    /// Process a block using a closure that generates samples
+    ///
+    /// The closure receives the sample index and should return (left, right).
+    /// Returns a reference to the interleaved output buffer.
+    pub fn process_with<F>(&mut self, mut generator: F) -> &[f32]
+    where
+        F: FnMut(usize) -> (f64, f64),
+    {
+        for i in 0..self.config.block_size {
+            let (left, right) = generator(i);
+            self.left_buffer[i] = left;
+            self.right_buffer[i] = right;
+        }
+
+        interleave_stereo(
+            &self.left_buffer,
+            &self.right_buffer,
+            &mut self.interleaved_buffer,
+        );
+
+        &self.interleaved_buffer
+    }
+
+    /// Get the left channel buffer (for direct writing)
+    pub fn left_buffer_mut(&mut self) -> &mut [f64] {
+        &mut self.left_buffer
+    }
+
+    /// Get the right channel buffer (for direct writing)
+    pub fn right_buffer_mut(&mut self) -> &mut [f64] {
+        &mut self.right_buffer
+    }
+
+    /// Finalize and get interleaved output after writing to channel buffers
+    pub fn finalize(&mut self) -> &[f32] {
+        interleave_stereo(
+            &self.left_buffer,
+            &self.right_buffer,
+            &mut self.interleaved_buffer,
+        );
+        &self.interleaved_buffer
+    }
+
+    /// Clear all buffers
+    pub fn clear(&mut self) {
+        self.left_buffer.fill(0.0);
+        self.right_buffer.fill(0.0);
+        self.interleaved_buffer.fill(0.0);
+    }
+}
+
+impl Default for WebAudioBlockProcessor {
     fn default() -> Self {
         Self::new()
     }
@@ -1092,5 +1630,331 @@ mod tests {
         input.reset();
         input.set_sample_rate(48000.0);
         assert_eq!(input.type_id(), "osc_input");
+    }
+
+    // MIDI Tests
+    #[test]
+    fn test_midi_status_parsing() {
+        assert_eq!(MidiStatus::from_byte(0x90), Some(MidiStatus::NoteOn(0)));
+        assert_eq!(MidiStatus::from_byte(0x95), Some(MidiStatus::NoteOn(5)));
+        assert_eq!(MidiStatus::from_byte(0x80), Some(MidiStatus::NoteOff(0)));
+        assert_eq!(
+            MidiStatus::from_byte(0xB0),
+            Some(MidiStatus::ControlChange(0))
+        );
+        assert_eq!(MidiStatus::from_byte(0xE0), Some(MidiStatus::PitchBend(0)));
+        assert_eq!(MidiStatus::from_byte(0xF0), Some(MidiStatus::System(0xF0)));
+    }
+
+    #[test]
+    fn test_midi_status_channel() {
+        let note_on = MidiStatus::NoteOn(5);
+        assert_eq!(note_on.channel(), Some(5));
+
+        let system = MidiStatus::System(0xF0);
+        assert_eq!(system.channel(), None);
+    }
+
+    #[test]
+    fn test_midi_note_on() {
+        let msg = MidiMessage::note_on(0, 60, 100);
+        assert!(msg.is_note_on());
+        assert!(!msg.is_note_off());
+        assert_eq!(msg.note(), 60);
+        assert_eq!(msg.velocity(), 100);
+    }
+
+    #[test]
+    fn test_midi_note_off() {
+        let msg = MidiMessage::note_off(0, 60, 0);
+        assert!(!msg.is_note_on());
+        assert!(msg.is_note_off());
+    }
+
+    #[test]
+    fn test_midi_note_on_zero_velocity() {
+        // Note On with velocity 0 is treated as Note Off
+        let msg = MidiMessage::note_on(0, 60, 0);
+        assert!(!msg.is_note_on());
+        assert!(msg.is_note_off());
+    }
+
+    #[test]
+    fn test_midi_control_change() {
+        let msg = MidiMessage::control_change(0, 1, 64);
+        assert_eq!(msg.data1, 1); // CC number
+        assert_eq!(msg.data2, 64); // Value
+    }
+
+    #[test]
+    fn test_midi_pitch_bend() {
+        // Center position (0)
+        let msg = MidiMessage::pitch_bend(0, 0);
+        let normalized = msg.pitch_bend_normalized();
+        assert!(normalized.abs() < 0.001);
+
+        // Max positive
+        let msg = MidiMessage::pitch_bend(0, 8191);
+        let normalized = msg.pitch_bend_normalized();
+        assert!((normalized - 1.0).abs() < 0.01);
+
+        // Max negative
+        let msg = MidiMessage::pitch_bend(0, -8192);
+        let normalized = msg.pitch_bend_normalized();
+        assert!((normalized + 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_midi_note_to_frequency() {
+        let msg = MidiMessage::note_on(0, 69, 100); // A4
+        assert!((msg.note_to_frequency() - 440.0).abs() < 0.01);
+
+        let msg = MidiMessage::note_on(0, 60, 100); // C4
+        assert!((msg.note_to_frequency() - 261.63).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_midi_note_to_volt_per_octave() {
+        let msg = MidiMessage::note_on(0, 60, 100); // C4 = 0V
+        assert!(msg.note_to_volt_per_octave().abs() < 0.001);
+
+        let msg = MidiMessage::note_on(0, 72, 100); // C5 = 1V
+        assert!((msg.note_to_volt_per_octave() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_midi_at_sample() {
+        let msg = MidiMessage::note_on(0, 60, 100).at_sample(64);
+        assert_eq!(msg.sample_offset, 64);
+    }
+
+    #[test]
+    fn test_midi_buffer() {
+        let mut buffer = MidiBuffer::new();
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.len(), 0);
+
+        buffer.push(MidiMessage::note_on(0, 60, 100).at_sample(0));
+        buffer.push(MidiMessage::note_on(0, 64, 100).at_sample(32));
+        buffer.push(MidiMessage::note_on(0, 67, 100).at_sample(64));
+
+        assert_eq!(buffer.len(), 3);
+        assert!(!buffer.is_empty());
+
+        // Test events_at
+        let at_0: Vec<_> = buffer.events_at(0).collect();
+        assert_eq!(at_0.len(), 1);
+        assert_eq!(at_0[0].note(), 60);
+
+        // Test clear
+        buffer.clear();
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_midi_buffer_sort() {
+        let mut buffer = MidiBuffer::with_capacity(10);
+        buffer.push(MidiMessage::note_on(0, 60, 100).at_sample(64));
+        buffer.push(MidiMessage::note_on(0, 64, 100).at_sample(0));
+        buffer.push(MidiMessage::note_on(0, 67, 100).at_sample(32));
+
+        buffer.sort();
+
+        let events: Vec<_> = buffer.iter().collect();
+        assert_eq!(events[0].sample_offset, 0);
+        assert_eq!(events[1].sample_offset, 32);
+        assert_eq!(events[2].sample_offset, 64);
+    }
+
+    #[test]
+    fn test_midi_buffer_default() {
+        let buffer = MidiBuffer::default();
+        assert!(buffer.is_empty());
+    }
+
+    // Plugin Wrapper Extended Tests
+    #[test]
+    fn test_plugin_wrapper_latency() {
+        let info = PluginInfo::effect("com.quiver.test", "Test Effect", "Quiver");
+        let bus = AudioBusConfig::stereo_io();
+
+        let mut wrapper = PluginWrapper::new(info, bus);
+        assert_eq!(wrapper.latency(), 0);
+
+        wrapper.set_latency(256);
+        assert_eq!(wrapper.latency(), 256);
+    }
+
+    #[test]
+    fn test_plugin_wrapper_processing_state() {
+        let info = PluginInfo::synth("com.quiver.test", "Test Synth", "Quiver");
+        let bus = AudioBusConfig::stereo_out();
+        let wrapper = PluginWrapper::new(info, bus);
+
+        assert!(!wrapper.is_processing());
+        wrapper.start_processing();
+        assert!(wrapper.is_processing());
+        wrapper.stop_processing();
+        assert!(!wrapper.is_processing());
+    }
+
+    #[test]
+    fn test_audio_bus_config() {
+        let stereo_out = AudioBusConfig::stereo_out();
+        assert_eq!(stereo_out.inputs, 0);
+        assert_eq!(stereo_out.outputs, 2);
+
+        let stereo_io = AudioBusConfig::stereo_io();
+        assert_eq!(stereo_io.inputs, 2);
+        assert_eq!(stereo_io.outputs, 2);
+
+        let mono_out = AudioBusConfig::mono_out();
+        assert_eq!(mono_out.inputs, 0);
+        assert_eq!(mono_out.outputs, 1);
+    }
+
+    // Web Audio Block Processor Tests
+    #[test]
+    fn test_web_audio_block_processor_new() {
+        let processor = WebAudioBlockProcessor::new();
+        assert_eq!(processor.block_size(), 128);
+        assert!((processor.sample_rate() - 44100.0).abs() < 0.001);
+        assert!(!processor.is_active());
+    }
+
+    #[test]
+    fn test_web_audio_block_processor_with_config() {
+        let config = WebAudioConfig {
+            input_channels: 0,
+            output_channels: 2,
+            sample_rate: 48000.0,
+            block_size: 256,
+        };
+        let processor = WebAudioBlockProcessor::with_config(config);
+        assert_eq!(processor.block_size(), 256);
+        assert!((processor.sample_rate() - 48000.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_web_audio_block_processor_activate() {
+        let mut processor = WebAudioBlockProcessor::new();
+        assert!(!processor.is_active());
+
+        processor.activate();
+        assert!(processor.is_active());
+
+        processor.deactivate();
+        assert!(!processor.is_active());
+    }
+
+    #[test]
+    fn test_web_audio_block_processor_parameters() {
+        let mut processor = WebAudioBlockProcessor::new();
+        let freq = processor.add_parameter("frequency", 440.0);
+
+        assert!((processor.get_parameter("frequency").unwrap() - 440.0).abs() < 0.001);
+
+        processor.set_parameter("frequency", 880.0);
+        assert!((freq.get() - 880.0).abs() < 0.001);
+
+        let names = processor.parameter_names();
+        assert!(names.contains(&"frequency".to_string()));
+    }
+
+    #[test]
+    fn test_web_audio_block_processor_process_with() {
+        let mut processor = WebAudioBlockProcessor::new();
+        let mut phase = 0.0;
+
+        let output = processor.process_with(|_i| {
+            let sample = (phase * std::f64::consts::TAU).sin();
+            phase += 440.0 / 44100.0;
+            (sample, sample)
+        });
+
+        // Output is interleaved stereo, 128 * 2 = 256 samples
+        assert_eq!(output.len(), 256);
+
+        // First sample should be close to 0 (sin(0))
+        assert!(output[0].abs() < 0.1);
+    }
+
+    #[test]
+    fn test_web_audio_block_processor_direct_buffer() {
+        let mut processor = WebAudioBlockProcessor::new();
+
+        // Write directly to left buffer
+        {
+            let left = processor.left_buffer_mut();
+            for i in 0..128 {
+                left[i] = (i as f64) / 128.0;
+            }
+        }
+
+        // Write directly to right buffer
+        {
+            let right = processor.right_buffer_mut();
+            for i in 0..128 {
+                right[i] = 1.0 - (i as f64) / 128.0;
+            }
+        }
+
+        let output = processor.finalize();
+
+        // Check first sample pair
+        assert!(output[0].abs() < 0.01); // left[0] = 0
+        assert!((output[1] - 1.0).abs() < 0.01); // right[0] = 1
+
+        // Check last sample pair
+        assert!((output[254] - 127.0 / 128.0).abs() < 0.01);
+        assert!((output[255] - 1.0 / 128.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_web_audio_block_processor_clear() {
+        let mut processor = WebAudioBlockProcessor::new();
+
+        // Fill with non-zero values
+        processor.process_with(|_| (1.0, 1.0));
+
+        // Clear
+        processor.clear();
+
+        let output = processor.finalize();
+        for sample in output {
+            assert!(*sample < 0.001);
+        }
+    }
+
+    #[test]
+    fn test_web_audio_block_processor_default() {
+        let processor = WebAudioBlockProcessor::default();
+        assert_eq!(processor.block_size(), 128);
+    }
+
+    #[test]
+    fn test_f64_to_f32_block() {
+        let src = vec![0.5_f64, -0.5, 1.0, -1.0];
+        let mut dst = vec![0.0_f32; 4];
+
+        f64_to_f32_block(&src, &mut dst);
+
+        assert!((dst[0] - 0.5).abs() < 0.001);
+        assert!((dst[1] + 0.5).abs() < 0.001);
+        assert!((dst[2] - 1.0).abs() < 0.001);
+        assert!((dst[3] + 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_f32_to_f64_block() {
+        let src = vec![0.5_f32, -0.5, 1.0, -1.0];
+        let mut dst = vec![0.0_f64; 4];
+
+        f32_to_f64_block(&src, &mut dst);
+
+        assert!((dst[0] - 0.5).abs() < 0.001);
+        assert!((dst[1] + 0.5).abs() < 0.001);
+        assert!((dst[2] - 1.0).abs() < 0.001);
+        assert!((dst[3] + 1.0).abs() < 0.001);
     }
 }

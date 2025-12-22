@@ -188,9 +188,7 @@ impl PresetLibrary {
     /// }
     /// ```
     pub fn get(&self, name: &str) -> Option<Preset> {
-        let info = Self::all_presets()
-            .into_iter()
-            .find(|p| p.name == name)?;
+        let info = Self::all_presets().into_iter().find(|p| p.name == name)?;
         let def = Self::load(name)?;
         Some(Preset { info, def })
     }
@@ -210,7 +208,9 @@ impl PresetLibrary {
             .filter(|p| {
                 tags.iter().any(|search_tag| {
                     let search_lower = search_tag.to_lowercase();
-                    p.tags.iter().any(|t| t.to_lowercase().contains(&search_lower))
+                    p.tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&search_lower))
                 })
             })
             .collect()

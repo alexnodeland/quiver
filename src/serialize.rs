@@ -454,7 +454,14 @@ impl ModuleRegistry {
             "Chorus",
             "Effects",
             "Classic chorus effect with modulated delay lines",
-            &["chorus", "modulation", "detune", "ensemble", "effect", "stereo"],
+            &[
+                "chorus",
+                "modulation",
+                "detune",
+                "ensemble",
+                "effect",
+                "stereo",
+            ],
             &[],
             |sr| Box::new(Chorus::new(sr)),
         );
