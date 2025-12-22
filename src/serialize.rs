@@ -536,6 +536,79 @@ impl ModuleRegistry {
             |_| Box::new(Bitcrusher::new()),
         );
 
+        // P3 Effects
+        self.register_factory_with_keywords(
+            "tremolo",
+            "Tremolo",
+            "Effects",
+            "Amplitude modulation effect with rate and depth control",
+            &["tremolo", "amplitude", "modulation", "wobble", "lfo"],
+            &[],
+            |sr| Box::new(Tremolo::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "vibrato",
+            "Vibrato",
+            "Effects",
+            "Pitch modulation effect using modulated delay",
+            &["vibrato", "pitch", "modulation", "wobble", "lfo"],
+            &[],
+            |sr| Box::new(Vibrato::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "distortion",
+            "Distortion",
+            "Effects",
+            "Waveshaping distortion with multiple modes",
+            &["distortion", "overdrive", "fuzz", "saturation", "clip"],
+            &[],
+            |sr| Box::new(Distortion::new(sr)),
+        );
+
+        // P3 Oscillators
+        self.register_factory_with_keywords(
+            "supersaw",
+            "Supersaw",
+            "Oscillators",
+            "JP-8000 style 7-voice detuned supersaw oscillator",
+            &["supersaw", "trance", "unison", "detune", "thick"],
+            &[],
+            |sr| Box::new(Supersaw::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "karplus_strong",
+            "Karplus-Strong",
+            "Oscillators",
+            "Physical modeling plucked string synthesis",
+            &["karplus", "string", "pluck", "physical", "modeling"],
+            &[],
+            |sr| Box::new(KarplusStrong::new(sr)),
+        );
+
+        // P3 Utilities
+        self.register_factory_with_keywords(
+            "scale_quantizer",
+            "Scale Quantizer",
+            "Utilities",
+            "Quantize CV to musical scale notes",
+            &["quantizer", "scale", "music", "notes", "pitch"],
+            &[],
+            |sr| Box::new(ScaleQuantizer::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "euclidean",
+            "Euclidean Rhythm",
+            "Sequencers",
+            "Euclidean rhythm generator for evenly distributed pulses",
+            &["euclidean", "rhythm", "pattern", "trigger", "clock"],
+            &[],
+            |sr| Box::new(Euclidean::new(sr)),
+        );
+
         self.register_factory_with_keywords(
             "attenuverter",
             "Attenuverter",

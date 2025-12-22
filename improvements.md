@@ -163,36 +163,36 @@ JavaScript integration example included in documentation.
 
 ---
 
-## P3: Low Priority - Enhancements
+## P3: Low Priority - Enhancements ✅ PARTIALLY COMPLETE
 
 ### Additional Effects
 
-| Module | Description |
-|--------|-------------|
-| Tremolo | Amplitude modulation effect |
-| Vibrato | Pitch modulation effect |
-| Distortion | Waveshaping/overdrive |
-| EQ | Parametric equalizer |
-| Vocoder | Spectral processing |
-| Granular | Granular synthesis engine |
+| Module | Description | Status |
+|--------|-------------|--------|
+| Tremolo | Amplitude modulation effect with rate/depth/shape controls | ✅ Done |
+| Vibrato | Delay-based pitch modulation effect | ✅ Done |
+| Distortion | Waveshaping/overdrive with 4 modes (soft, hard, foldback, asymmetric) | ✅ Done |
+| EQ | Parametric equalizer | Pending |
+| Vocoder | Spectral processing | Pending |
+| Granular | Granular synthesis engine | Pending |
 
 ### Additional Oscillators
 
-| Module | Description |
-|--------|-------------|
-| Wavetable | Wavetable oscillator with morphing |
-| Supersaw | Detuned saw stack (like JP-8000) |
-| Formant | Formant oscillator for vocal sounds |
-| Karplus-Strong | Physical modeling string |
+| Module | Description | Status |
+|--------|-------------|--------|
+| Wavetable | Wavetable oscillator with morphing | Pending |
+| Supersaw | Detuned saw stack (like JP-8000), 7-voice with polyblep | ✅ Done |
+| Formant | Formant oscillator for vocal sounds | Pending |
+| Karplus-Strong | Physical modeling plucked string with excitation, damping, stretch | ✅ Done |
 
 ### Additional Utilities
 
-| Module | Description |
-|--------|-------------|
-| Arpeggiator | Pattern-based note sequencer |
-| ChordMemory | Chord voicing generator |
-| ScaleQuantizer | Musical scale quantization |
-| Euclidean | Euclidean rhythm generator |
+| Module | Description | Status |
+|--------|-------------|--------|
+| Arpeggiator | Pattern-based note sequencer | Pending |
+| ChordMemory | Chord voicing generator | Pending |
+| ScaleQuantizer | Musical scale quantization (7 scales: chromatic, major, minor, pentatonics, dorian, blues) | ✅ Done |
+| Euclidean | Euclidean rhythm generator (Bresenham algorithm) | ✅ Done |
 
 ---
 
@@ -330,6 +330,13 @@ When implementing features from this list:
 | PluginProcessor trait | ✅ Complete | - | Full plugin interface with MIDI, state, parameters |
 | WebAudioBlockProcessor | ✅ Complete | - | 128-sample block processing for AudioWorklet |
 | WASM MIDI | ✅ Complete | - | `midi_note_on/off`, CC, pitch bend in QuiverEngine |
+| Tremolo | ✅ Complete | - | LFO-based amplitude modulation with shape blend |
+| Vibrato | ✅ Complete | - | Delay-based pitch modulation with interpolation |
+| Distortion | ✅ Complete | - | 4 waveshaping modes (soft, hard, foldback, asymmetric) |
+| Supersaw | ✅ Complete | - | JP-8000 style 7-voice detuned oscillator with polyblep |
+| Karplus-Strong | ✅ Complete | - | Physical modeling plucked string synthesis |
+| ScaleQuantizer | ✅ Complete | - | Quantize to 7 musical scales |
+| Euclidean | ✅ Complete | - | Euclidean rhythm generator with Bresenham algorithm |
 | Reverb | Not started | - | High complexity |
 | PitchShifter | Not started | - | High complexity |
 | WASM browser examples | Not started | - | Requires project setup |

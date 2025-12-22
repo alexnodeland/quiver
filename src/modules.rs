@@ -1803,6 +1803,854 @@ impl GraphModule for Phaser {
     }
 }
 
+// ============================================================================
+// P3 Effects: Tremolo, Vibrato, Distortion
+// ============================================================================
+
+/// Tremolo
+///
+/// Amplitude modulation effect with adjustable rate, depth, and waveform.
+/// Creates classic "wobbly" volume effect.
+pub struct Tremolo {
+    lfo_phase: f64,
+    sample_rate: f64,
+    spec: PortSpec,
+}
+
+impl Tremolo {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            lfo_phase: 0.0,
+            sample_rate,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "rate", SignalKind::CvUnipolar)
+                        .with_default(0.3)
+                        .with_attenuverter(),
+                    PortDef::new(2, "depth", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(3, "shape", SignalKind::CvUnipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+            },
+        }
+    }
+}
+
+impl Default for Tremolo {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Tremolo {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let rate_cv = inputs.get_or(1, 0.3).clamp(0.0, 1.0);
+        let depth = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
+        let shape = inputs.get_or(3, 0.0).clamp(0.0, 1.0);
+
+        // Rate: 0.1Hz to 20Hz (exponential)
+        let lfo_freq = 0.1 * Libm::<f64>::pow(200.0, rate_cv);
+
+        // Generate LFO: blend between sine and triangle based on shape
+        let phase_rad = self.lfo_phase * TAU;
+        let sine = Libm::<f64>::sin(phase_rad);
+        let triangle = 1.0 - 4.0 * Libm::<f64>::fabs(self.lfo_phase - 0.5);
+        let lfo = sine * (1.0 - shape) + triangle * shape;
+
+        // Advance phase
+        self.lfo_phase += lfo_freq / self.sample_rate;
+        if self.lfo_phase >= 1.0 {
+            self.lfo_phase -= 1.0;
+        }
+
+        // Apply amplitude modulation
+        // LFO ranges -1 to 1, convert to modulation amount
+        let modulation = 1.0 - depth * 0.5 * (1.0 - lfo);
+        outputs.set(10, input * modulation);
+    }
+
+    fn reset(&mut self) {
+        self.lfo_phase = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "tremolo"
+    }
+}
+
+/// Vibrato
+///
+/// Pitch modulation effect using a modulated delay line.
+/// Creates classic pitch wobble effect.
+pub struct Vibrato {
+    buffer: Vec<f64>,
+    write_pos: usize,
+    lfo_phase: f64,
+    sample_rate: f64,
+    spec: PortSpec,
+}
+
+impl Vibrato {
+    const MAX_DELAY_MS: f64 = 20.0;
+
+    pub fn new(sample_rate: f64) -> Self {
+        let buffer_size = (sample_rate * Self::MAX_DELAY_MS / 1000.0) as usize + 10;
+        Self {
+            buffer: vec![0.0; buffer_size],
+            write_pos: 0,
+            lfo_phase: 0.0,
+            sample_rate,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "rate", SignalKind::CvUnipolar)
+                        .with_default(0.3)
+                        .with_attenuverter(),
+                    PortDef::new(2, "depth", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(3, "mix", SignalKind::CvUnipolar)
+                        .with_default(1.0)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+            },
+        }
+    }
+
+    fn read_interpolated(&self, delay_samples: f64) -> f64 {
+        let buffer_len = self.buffer.len();
+        let delay_int = delay_samples as usize;
+        let frac = delay_samples - delay_int as f64;
+        let read_pos1 = (self.write_pos + buffer_len - delay_int) % buffer_len;
+        let read_pos2 = (self.write_pos + buffer_len - delay_int - 1) % buffer_len;
+        self.buffer[read_pos1] * (1.0 - frac) + self.buffer[read_pos2] * frac
+    }
+}
+
+impl Default for Vibrato {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Vibrato {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let rate_cv = inputs.get_or(1, 0.3).clamp(0.0, 1.0);
+        let depth = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
+        let mix = inputs.get_or(3, 1.0).clamp(0.0, 1.0);
+
+        // Rate: 0.1Hz to 15Hz (exponential)
+        let lfo_freq = 0.1 * Libm::<f64>::pow(150.0, rate_cv);
+
+        // Base delay at center of modulation range
+        let base_delay_ms = Self::MAX_DELAY_MS * 0.5;
+        let mod_depth_ms = depth * base_delay_ms * 0.9;
+
+        // Sinusoidal LFO
+        let lfo = Libm::<f64>::sin(self.lfo_phase * TAU);
+        self.lfo_phase += lfo_freq / self.sample_rate;
+        if self.lfo_phase >= 1.0 {
+            self.lfo_phase -= 1.0;
+        }
+
+        // Write to buffer
+        self.buffer[self.write_pos] = input;
+        self.write_pos = (self.write_pos + 1) % self.buffer.len();
+
+        // Calculate modulated delay
+        let delay_ms = base_delay_ms + lfo * mod_depth_ms;
+        let delay_samples =
+            (delay_ms * self.sample_rate / 1000.0).clamp(1.0, (self.buffer.len() - 1) as f64);
+
+        let delayed = self.read_interpolated(delay_samples);
+        outputs.set(10, input * (1.0 - mix) + delayed * mix);
+    }
+
+    fn reset(&mut self) {
+        self.buffer.fill(0.0);
+        self.write_pos = 0;
+        self.lfo_phase = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+        let buffer_size = (sample_rate * Self::MAX_DELAY_MS / 1000.0) as usize + 10;
+        self.buffer.resize(buffer_size, 0.0);
+    }
+
+    fn type_id(&self) -> &'static str {
+        "vibrato"
+    }
+}
+
+/// Distortion
+///
+/// Waveshaping distortion with multiple algorithms:
+/// - Soft clip (tanh-style)
+/// - Hard clip
+/// - Foldback
+/// - Asymmetric (tube-style)
+pub struct Distortion {
+    spec: PortSpec,
+}
+
+impl Distortion {
+    pub fn new(_sample_rate: f64) -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "drive", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(2, "tone", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(3, "mode", SignalKind::CvUnipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                    PortDef::new(4, "mix", SignalKind::CvUnipolar)
+                        .with_default(1.0)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+            },
+        }
+    }
+
+    // Soft clip using tanh-style curve
+    fn soft_clip(x: f64, drive: f64) -> f64 {
+        let gained = x * (1.0 + drive * 10.0);
+        // Fast tanh approximation
+        let x2 = gained * gained;
+        gained * (27.0 + x2) / (27.0 + 9.0 * x2)
+    }
+
+    // Hard clip
+    fn hard_clip(x: f64, drive: f64) -> f64 {
+        let gained = x * (1.0 + drive * 10.0);
+        gained.clamp(-1.0, 1.0)
+    }
+
+    // Foldback distortion
+    fn foldback(x: f64, drive: f64) -> f64 {
+        let gained = x * (1.0 + drive * 5.0);
+        let threshold = 1.0;
+        let mut folded = gained;
+        while folded > threshold || folded < -threshold {
+            if folded > threshold {
+                folded = 2.0 * threshold - folded;
+            } else if folded < -threshold {
+                folded = -2.0 * threshold - folded;
+            }
+        }
+        folded
+    }
+
+    // Asymmetric tube-style distortion
+    fn asymmetric(x: f64, drive: f64) -> f64 {
+        let gained = x * (1.0 + drive * 8.0);
+        if gained >= 0.0 {
+            // Softer positive clipping
+            1.0 - Libm::<f64>::exp(-gained)
+        } else {
+            // Harder negative clipping
+            -Self::soft_clip(-gained, drive * 0.5)
+        }
+    }
+}
+
+impl Default for Distortion {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Distortion {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let drive = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
+        let tone = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
+        let mode = inputs.get_or(3, 0.0).clamp(0.0, 1.0);
+        let mix = inputs.get_or(4, 1.0).clamp(0.0, 1.0);
+
+        // Select distortion mode (quantized to 4 modes)
+        let mode_idx = (mode * 3.99) as u8;
+        let distorted = match mode_idx {
+            0 => Self::soft_clip(input, drive),
+            1 => Self::hard_clip(input, drive),
+            2 => Self::foldback(input, drive),
+            _ => Self::asymmetric(input, drive),
+        };
+
+        // Simple tone control: blend between original and low-passed
+        // Higher tone = more highs preserved
+        let filtered = distorted * tone + distorted * (1.0 - tone) * 0.7;
+
+        outputs.set(10, input * (1.0 - mix) + filtered * mix);
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "distortion"
+    }
+}
+
+// ============================================================================
+// P3 Oscillators: Supersaw, Karplus-Strong
+// ============================================================================
+
+/// Supersaw Oscillator
+///
+/// JP-8000 style supersaw with 7 detuned oscillators.
+/// Creates thick, wide sounds.
+pub struct Supersaw {
+    phases: [f64; 7],
+    sample_rate: f64,
+    spec: PortSpec,
+}
+
+impl Supersaw {
+    // Detune amounts for 7 oscillators (center + 3 pairs)
+    // Based on Roland JP-8000 analysis
+    const DETUNE_RATIOS: [f64; 7] = [
+        -0.11002313, // -1 octave pair 1
+        -0.06288439, // -1 octave pair 2
+        -0.01952356, // -1 octave pair 3
+        0.0,         // Center
+        0.01991221,  // +1 octave pair 3
+        0.06216538,  // +1 octave pair 2
+        0.10745242,  // +1 octave pair 1
+    ];
+
+    // Mix levels for each oscillator
+    const MIX_LEVELS: [f64; 7] = [0.5, 0.7, 0.9, 1.0, 0.9, 0.7, 0.5];
+
+    pub fn new(sample_rate: f64) -> Self {
+        // Start each oscillator at different phases for immediate thickness
+        let mut phases = [0.0; 7];
+        for (i, phase) in phases.iter_mut().enumerate() {
+            *phase = (i as f64) / 7.0;
+        }
+
+        Self {
+            phases,
+            sample_rate,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "voct", SignalKind::VoltPerOctave).with_default(0.0),
+                    PortDef::new(1, "detune", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(2, "mix", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Audio),
+                    PortDef::new(11, "sub", SignalKind::Audio),
+                ],
+            },
+        }
+    }
+
+    // Polyblep anti-aliasing for saw wave
+    fn polyblep(t: f64, dt: f64) -> f64 {
+        if t < dt {
+            let t = t / dt;
+            2.0 * t - t * t - 1.0
+        } else if t > 1.0 - dt {
+            let t = (t - 1.0) / dt;
+            t * t + 2.0 * t + 1.0
+        } else {
+            0.0
+        }
+    }
+}
+
+impl Default for Supersaw {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Supersaw {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let voct = inputs.get_or(0, 0.0);
+        let detune = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
+        let mix = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
+
+        // Base frequency from V/Oct
+        let base_freq = 261.63 * Libm::<f64>::pow(2.0, voct); // C4 at 0V
+
+        let mut sum = 0.0;
+        let mut total_mix = 0.0;
+
+        for i in 0..7 {
+            // Apply detune
+            let detune_amount = Self::DETUNE_RATIOS[i] * detune;
+            let freq = base_freq * (1.0 + detune_amount);
+            let dt = freq / self.sample_rate;
+
+            // Generate saw with polyblep
+            let raw_saw = 2.0 * self.phases[i] - 1.0;
+            let blep = Self::polyblep(self.phases[i], dt);
+            let saw = raw_saw - blep;
+
+            // Mix with level
+            sum += saw * Self::MIX_LEVELS[i];
+            total_mix += Self::MIX_LEVELS[i];
+
+            // Advance phase
+            self.phases[i] += dt;
+            if self.phases[i] >= 1.0 {
+                self.phases[i] -= 1.0;
+            }
+        }
+
+        // Normalize and apply mix (blend between center oscillator and full supersaw)
+        let normalized = sum / total_mix;
+        let center_saw = 2.0 * self.phases[3] - 1.0;
+        let output = center_saw * (1.0 - mix) + normalized * mix;
+
+        // Sub oscillator (octave down from center)
+        let sub_phase = (self.phases[3] * 0.5) % 1.0;
+        let sub = 2.0 * sub_phase - 1.0;
+
+        outputs.set(10, output);
+        outputs.set(11, sub);
+    }
+
+    fn reset(&mut self) {
+        for (i, phase) in self.phases.iter_mut().enumerate() {
+            *phase = (i as f64) / 7.0;
+        }
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn type_id(&self) -> &'static str {
+        "supersaw"
+    }
+}
+
+/// Karplus-Strong String
+///
+/// Physical modeling plucked string synthesis.
+/// Creates realistic plucked string and percussion sounds.
+pub struct KarplusStrong {
+    buffer: Vec<f64>,
+    write_pos: usize,
+    sample_rate: f64,
+    last_output: f64,
+    spec: PortSpec,
+}
+
+impl KarplusStrong {
+    pub fn new(sample_rate: f64) -> Self {
+        // Buffer for lowest frequency (around 20Hz)
+        let buffer_size = (sample_rate / 20.0) as usize + 10;
+        Self {
+            buffer: vec![0.0; buffer_size],
+            write_pos: 0,
+            sample_rate,
+            last_output: 0.0,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "voct", SignalKind::VoltPerOctave).with_default(0.0),
+                    PortDef::new(1, "trigger", SignalKind::Trigger),
+                    PortDef::new(2, "damping", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(3, "brightness", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(4, "stretch", SignalKind::CvBipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+            },
+        }
+    }
+
+    fn excite(&mut self, brightness: f64) {
+        // Fill buffer with noise (excitation)
+        let period = self.buffer.len();
+        for i in 0..period {
+            // Blend between noise and impulse based on brightness
+            let noise = rng::random_bipolar();
+            let impulse = if i < period / 4 { 1.0 } else { 0.0 };
+            self.buffer[i] = noise * brightness + impulse * (1.0 - brightness);
+        }
+    }
+}
+
+impl Default for KarplusStrong {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for KarplusStrong {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let voct = inputs.get_or(0, 0.0);
+        let trigger = inputs.get_or(1, 0.0);
+        let damping = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
+        let brightness = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
+        let stretch = inputs.get_or(4, 0.0).clamp(-1.0, 1.0);
+
+        // Calculate period from frequency
+        let freq = 261.63 * Libm::<f64>::pow(2.0, voct);
+        let period = (self.sample_rate / freq).clamp(2.0, self.buffer.len() as f64 - 1.0);
+        let period_int = period as usize;
+
+        // Trigger excitation
+        if trigger > 0.5 {
+            // Resize buffer for this frequency
+            self.buffer.truncate(period_int + 2);
+            self.buffer.resize(period_int + 2, 0.0);
+            self.excite(brightness);
+            self.write_pos = 0;
+        }
+
+        // Read from buffer with interpolation
+        let read_pos = (self.write_pos + 1) % self.buffer.len();
+        let read_pos2 = (self.write_pos + 2) % self.buffer.len();
+        let frac = period.fract();
+        let sample = self.buffer[read_pos] * (1.0 - frac) + self.buffer[read_pos2] * frac;
+
+        // Lowpass filter (simple averaging with damping control)
+        // Higher damping = more filtering = faster decay
+        let filter_coef = 0.5 + damping * 0.49; // 0.5 to 0.99
+        let filtered = sample * filter_coef + self.last_output * (1.0 - filter_coef);
+
+        // All-pass filter for stretch factor (inharmonicity)
+        let stretch_coef = stretch * 0.5;
+        let stretched = filtered + stretch_coef * (filtered - self.last_output);
+
+        self.last_output = stretched;
+
+        // Write back to buffer
+        self.buffer[self.write_pos] = stretched;
+        self.write_pos = (self.write_pos + 1) % self.buffer.len();
+
+        outputs.set(10, stretched);
+    }
+
+    fn reset(&mut self) {
+        self.buffer.fill(0.0);
+        self.write_pos = 0;
+        self.last_output = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+        let buffer_size = (sample_rate / 20.0) as usize + 10;
+        self.buffer.resize(buffer_size, 0.0);
+    }
+
+    fn type_id(&self) -> &'static str {
+        "karplus_strong"
+    }
+}
+
+// ============================================================================
+// P3 Utilities: ScaleQuantizer, Euclidean
+// ============================================================================
+
+/// Scale Quantizer
+///
+/// Quantizes CV input to musical scale notes.
+/// Supports major, minor, pentatonic, and chromatic scales.
+pub struct ScaleQuantizer {
+    spec: PortSpec,
+}
+
+impl ScaleQuantizer {
+    // Scale intervals (semitones from root)
+    const CHROMATIC: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    const MAJOR: [u8; 7] = [0, 2, 4, 5, 7, 9, 11];
+    const MINOR: [u8; 7] = [0, 2, 3, 5, 7, 8, 10];
+    const PENT_MAJOR: [u8; 5] = [0, 2, 4, 7, 9];
+    const PENT_MINOR: [u8; 5] = [0, 3, 5, 7, 10];
+    const DORIAN: [u8; 7] = [0, 2, 3, 5, 7, 9, 10];
+    const BLUES: [u8; 6] = [0, 3, 5, 6, 7, 10];
+
+    pub fn new(_sample_rate: f64) -> Self {
+        Self {
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::VoltPerOctave),
+                    PortDef::new(1, "root", SignalKind::CvUnipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                    PortDef::new(2, "scale", SignalKind::CvUnipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::VoltPerOctave),
+                    PortDef::new(11, "trigger", SignalKind::Trigger),
+                ],
+            },
+        }
+    }
+
+    fn quantize_to_scale(note: i32, scale: &[u8]) -> i32 {
+        let octave = if note >= 0 {
+            note / 12
+        } else {
+            (note - 11) / 12
+        };
+        let semitone = note.rem_euclid(12);
+
+        // Find closest note in scale
+        let mut closest = scale[0] as i32;
+        let mut min_dist = i32::MAX;
+
+        for &s in scale {
+            let dist = (semitone - s as i32).abs();
+            let wrap_dist = (12 - dist).min(dist);
+            if wrap_dist < min_dist {
+                min_dist = wrap_dist;
+                closest = s as i32;
+            }
+        }
+
+        octave * 12 + closest
+    }
+}
+
+impl Default for ScaleQuantizer {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for ScaleQuantizer {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let root_cv = inputs.get_or(1, 0.0).clamp(0.0, 1.0);
+        let scale_cv = inputs.get_or(2, 0.0).clamp(0.0, 1.0);
+
+        // Root note (0-11 semitones)
+        let root = (root_cv * 11.99) as i32;
+
+        // Convert V/Oct to semitones from C4
+        let semitones_from_c4 = (input * 12.0).round() as i32;
+
+        // Adjust for root
+        let relative_note = semitones_from_c4 - root;
+
+        // Select scale
+        let scale_idx = (scale_cv * 6.99) as u8;
+        let quantized = match scale_idx {
+            0 => Self::quantize_to_scale(relative_note, &Self::CHROMATIC),
+            1 => Self::quantize_to_scale(relative_note, &Self::MAJOR),
+            2 => Self::quantize_to_scale(relative_note, &Self::MINOR),
+            3 => Self::quantize_to_scale(relative_note, &Self::PENT_MAJOR),
+            4 => Self::quantize_to_scale(relative_note, &Self::PENT_MINOR),
+            5 => Self::quantize_to_scale(relative_note, &Self::DORIAN),
+            _ => Self::quantize_to_scale(relative_note, &Self::BLUES),
+        };
+
+        // Convert back to V/Oct with root offset
+        let output_voct = (quantized + root) as f64 / 12.0;
+
+        // Generate trigger on note change (simple comparison)
+        let trigger = if (output_voct - input).abs() > 0.001 {
+            5.0
+        } else {
+            0.0
+        };
+
+        outputs.set(10, output_voct);
+        outputs.set(11, trigger);
+    }
+
+    fn reset(&mut self) {}
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "scale_quantizer"
+    }
+}
+
+/// Euclidean Rhythm Generator
+///
+/// Generates euclidean rhythms - evenly distributed pulses.
+/// Classic algorithm used in many world music traditions.
+pub struct Euclidean {
+    step: usize,
+    pattern: Vec<bool>,
+    last_clock: f64,
+    spec: PortSpec,
+}
+
+impl Euclidean {
+    pub fn new(_sample_rate: f64) -> Self {
+        Self {
+            step: 0,
+            pattern: vec![true; 16],
+            last_clock: 0.0,
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "clock", SignalKind::Trigger),
+                    PortDef::new(1, "steps", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
+                    PortDef::new(2, "pulses", SignalKind::CvUnipolar)
+                        .with_default(0.25)
+                        .with_attenuverter(),
+                    PortDef::new(3, "rotation", SignalKind::CvUnipolar)
+                        .with_default(0.0)
+                        .with_attenuverter(),
+                    PortDef::new(4, "reset", SignalKind::Trigger),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Trigger),
+                    PortDef::new(11, "accent", SignalKind::Trigger),
+                ],
+            },
+        }
+    }
+
+    fn generate_pattern(steps: usize, pulses: usize) -> Vec<bool> {
+        if steps == 0 || pulses == 0 {
+            return vec![false; steps.max(1)];
+        }
+
+        let pulses = pulses.min(steps);
+        let mut pattern = vec![false; steps];
+
+        // Bresenham-style euclidean distribution
+        let mut bucket = 0;
+        for slot in pattern.iter_mut().take(steps) {
+            bucket += pulses;
+            if bucket >= steps {
+                bucket -= steps;
+                *slot = true;
+            }
+        }
+
+        pattern
+    }
+}
+
+impl Default for Euclidean {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Euclidean {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let clock = inputs.get_or(0, 0.0);
+        let steps_cv = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
+        let pulses_cv = inputs.get_or(2, 0.25).clamp(0.0, 1.0);
+        let rotation_cv = inputs.get_or(3, 0.0).clamp(0.0, 1.0);
+        let reset = inputs.get_or(4, 0.0);
+
+        // Calculate steps (2-16) and pulses
+        let steps = 2 + (steps_cv * 14.99) as usize;
+        let pulses = (pulses_cv * steps as f64) as usize;
+
+        // Regenerate pattern if parameters changed
+        if self.pattern.len() != steps {
+            self.pattern = Self::generate_pattern(steps, pulses);
+        }
+
+        // Handle reset
+        if reset > 0.5 {
+            self.step = 0;
+        }
+
+        // Detect clock rising edge
+        let trigger = clock > 0.5 && self.last_clock <= 0.5;
+        self.last_clock = clock;
+
+        let mut out = 0.0;
+        let mut accent = 0.0;
+
+        if trigger {
+            // Apply rotation
+            let rotation = (rotation_cv * (steps - 1) as f64) as usize;
+            let rotated_step = (self.step + rotation) % steps;
+
+            if self.pattern[rotated_step] {
+                out = 5.0;
+                // Accent on downbeat (step 0)
+                if self.step == 0 {
+                    accent = 5.0;
+                }
+            }
+
+            self.step = (self.step + 1) % steps;
+        }
+
+        outputs.set(10, out);
+        outputs.set(11, accent);
+    }
+
+    fn reset(&mut self) {
+        self.step = 0;
+        self.last_clock = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, _: f64) {}
+
+    fn type_id(&self) -> &'static str {
+        "euclidean"
+    }
+}
+
 /// Pink noise generator state
 struct PinkNoiseState {
     rows: [f64; 16],
