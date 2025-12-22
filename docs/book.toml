@@ -1,6 +1,6 @@
 [book]
 title = "Quiver: Modular Audio Synthesis"
-authors = ["Quiver Contributors"]
+authors = ["Alex Nodeland"]
 description = "A comprehensive guide to building modular audio synthesis systems with mathematical elegance"
 language = "en"
 src = "src"

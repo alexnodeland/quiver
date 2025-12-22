@@ -4,7 +4,7 @@
 [![Documentation](https://github.com/alexnodeland/quiver/actions/workflows/docs.yml/badge.svg)](https://github.com/alexnodeland/quiver/actions/workflows/docs.yml)
 [![Coverage](https://img.shields.io/badge/coverage-%E2%89%A580%25-brightgreen)](https://github.com/alexnodeland/quiver/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org/)
 
 A modular audio synthesis library using Arrow-style combinators and graph-based patching.
 

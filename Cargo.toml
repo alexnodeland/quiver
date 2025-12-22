@@ -2,10 +2,10 @@
 name = "quiver"
 version = "0.1.0"
 edition = "2021"
-authors = ["Quiver Contributors"]
+authors = ["Alex Nodeland"]
 description = "A modular audio synthesis library using Arrow-style combinators and graph-based patching"
 license = "MIT"
-repository = "https://github.com/quiver-audio/quiver"
+repository = "https://github.com/alexnodeland/quiver"
 keywords = ["audio", "synthesis", "modular", "dsp", "music"]
 categories = ["multimedia::audio", "game-development"]
 
