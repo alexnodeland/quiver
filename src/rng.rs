@@ -260,7 +260,7 @@ mod tests {
 
         for _ in 0..1000 {
             let v = rng.next_f64();
-            assert!(v >= 0.0 && v < 1.0, "Value {} out of range", v);
+            assert!((0.0..1.0).contains(&v), "Value {} out of range", v);
         }
     }
 
@@ -270,7 +270,7 @@ mod tests {
 
         for _ in 0..1000 {
             let v = rng.next_f64_bipolar();
-            assert!(v >= -1.0 && v < 1.0, "Value {} out of range", v);
+            assert!((-1.0..1.0).contains(&v), "Value {} out of range", v);
         }
     }
 
@@ -299,8 +299,8 @@ mod tests {
         assert_ne!(v1, v2);
 
         // Should be in valid range
-        assert!(v1 >= 0.0 && v1 < 1.0);
-        assert!(v2 >= 0.0 && v2 < 1.0);
+        assert!((0.0..1.0).contains(&v1));
+        assert!((0.0..1.0).contains(&v2));
     }
 
     #[test]
@@ -308,7 +308,7 @@ mod tests {
         seed(42);
         for _ in 0..100 {
             let v = random_bipolar();
-            assert!(v >= -1.0 && v < 1.0);
+            assert!((-1.0..1.0).contains(&v));
         }
     }
 
@@ -349,6 +349,6 @@ mod tests {
         // Zero seeds should still produce valid output
         let mut rng = Rng::new(0, 0);
         let v = rng.next_f64();
-        assert!(v >= 0.0 && v < 1.0);
+        assert!((0.0..1.0).contains(&v));
     }
 }

@@ -4,7 +4,7 @@
 //! that bridge the typed combinator layer with the graph-based patching system.
 
 use crate::StdMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use libm::Libm;
@@ -18,6 +18,7 @@ pub type ParamId = u32;
 
 /// Semantic signal classification following hardware modular conventions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 pub enum SignalKind {
     /// Audio signal, AC-coupled, typically ±5V peak
     Audio,
@@ -84,6 +85,8 @@ impl SignalKind {
 
 /// CSS hex color values for each signal type (for cable coloring in UI)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct SignalColors {
     /// Audio signal color (default: red #e94560)
     pub audio: String,
@@ -132,6 +135,8 @@ impl SignalColors {
 
 /// Enhanced port information for GUI display
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct PortInfo {
     /// Unique identifier within the module
     pub id: u32,
@@ -184,6 +189,8 @@ impl From<&PortDef> for PortInfo {
 
 /// Compatibility status for port connections
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum Compatibility {
     /// Exact signal type match
@@ -235,6 +242,7 @@ pub fn ports_compatible(from: SignalKind, to: SignalKind) -> Compatibility {
 
 /// Definition of a single port (input or output)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 pub struct PortDef {
     /// Unique identifier within the module
     pub id: PortId,
@@ -285,6 +293,8 @@ impl PortDef {
 
 /// Specification of all ports for a module
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct PortSpec {
     pub inputs: Vec<PortDef>,
     pub outputs: Vec<PortDef>,

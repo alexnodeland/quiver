@@ -1,0 +1,27 @@
+{
+  "name": "quiver-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Quiver modular audio synthesis library",
+  "workspaces": [
+    "packages/@quiver/*"
+  ],
+  "scripts": {
+    "build:wasm": "make wasm",
+    "build:wasm:dev": "make wasm-dev",
+    "build:types": "cd packages/@quiver/types && npm run build",
+    "build:react": "cd packages/@quiver/react && npm run build",
+    "build": "npm run build:wasm && npm run build:types && npm run build:react"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "audio",
+    "synthesizer",
+    "modular",
+    "wasm",
+    "rust"
+  ],
+  "license": "MIT"
+}

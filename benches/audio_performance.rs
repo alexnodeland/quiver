@@ -594,7 +594,8 @@ fn bench_patch_compilation(c: &mut Criterion) {
             let output = patch.add("output", StereoOutput::new());
             patch.connect(vco.out("saw"), output.in_("left")).unwrap();
             patch.set_output(output.id());
-            black_box(patch.compile().unwrap());
+            patch.compile().unwrap();
+            black_box(());
         });
     });
 

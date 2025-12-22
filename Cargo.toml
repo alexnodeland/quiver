@@ -2,12 +2,15 @@
 name = "quiver"
 version = "0.1.0"
 edition = "2021"
-authors = ["Quiver Contributors"]
+authors = ["Alex Nodeland"]
 description = "A modular audio synthesis library using Arrow-style combinators and graph-based patching"
 license = "MIT"
-repository = "https://github.com/quiver-audio/quiver"
+repository = "https://github.com/alexnodeland/quiver"
 keywords = ["audio", "synthesis", "modular", "dsp", "music"]
 categories = ["multimedia::audio", "game-development"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
@@ -15,6 +18,13 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"], 
 slotmap = { version = "1.0", default-features = false, features = ["serde"] }
 rand = { version = "0.8", optional = true }
 libm = "0.2"
+
+# WASM dependencies (optional)
+wasm-bindgen = { version = "0.2", optional = true }
+tsify = { version = "0.4", features = ["js"], optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+js-sys = { version = "0.3", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
@@ -32,7 +42,21 @@ std = ["alloc", "serde/std", "slotmap/std", "rand"]
 alloc = ["serde_json"]
 # SIMD vectorization (works with any feature combination)
 simd = []
+# WASM target (browser) - enables wasm-bindgen bindings and TypeScript type generation
+wasm = [
+    "alloc",
+    "wasm-bindgen",
+    "tsify",
+    "serde-wasm-bindgen",
+    "js-sys",
+    "console_error_panic_hook",
+]
 
 [[example]]
 name = "simple_patch"
 path = "examples/simple_patch.rs"
+
+# Optimize for WASM size in release builds
+[profile.release]
+opt-level = "z"
+lto = true

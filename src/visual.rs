@@ -642,13 +642,7 @@ impl Scope {
 
     /// Get the display buffer
     pub fn get_buffer(&self) -> &[f64] {
-        if let Some(ref frozen) = self.frozen_buffer {
-            frozen
-        } else {
-            // Convert VecDeque to slice via make_contiguous would need &mut
-            // For now, return empty if frozen, otherwise caller should use iter
-            &[]
-        }
+        self.frozen_buffer.as_deref().unwrap_or_default()
     }
 
     /// Get buffer as Vec

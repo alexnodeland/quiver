@@ -3,7 +3,8 @@
 //! This module provides types and traits for exposing module metadata to UIs,
 //! enabling automatic generation of appropriate controls (knobs, sliders, etc.).
 
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +16,7 @@ use crate::port::GraphModule;
 
 /// How to format parameter values for display
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ValueFormat {
     /// Decimal number with specified precision
@@ -95,6 +97,7 @@ impl ValueFormat {
 
 /// How parameter values are scaled between min and max
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ParamCurve {
     /// Linear interpolation between min and max
@@ -181,6 +184,7 @@ impl ParamCurve {
 
 /// Suggested UI control type for a parameter
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[serde(rename_all = "snake_case")]
 pub enum ControlType {
     /// Rotary knob (most common for synth parameters)
@@ -200,6 +204,8 @@ pub enum ControlType {
 
 /// Complete parameter descriptor for UI generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct ParamInfo {
     /// Unique identifier within module (e.g., "frequency", "resonance")
     pub id: String,

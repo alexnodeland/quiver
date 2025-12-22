@@ -179,8 +179,7 @@ fn main() {
     // Pattern matching
     let pattern = OscPattern::new("/synth/*");
     println!(
-        "\nPattern '{}' matches '{}': {}",
-        "/synth/*",
+        "\nPattern '/synth/*' matches '{}': {}",
         msg.address,
         pattern.matches(&msg.address)
     );
