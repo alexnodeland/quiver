@@ -2,7 +2,7 @@
 # Common development commands
 
 .PHONY: all build test check fmt lint lint-fix clippy doc bench coverage clean setup help
-.PHONY: install-hooks changelog examples wasm wasm-dev wasm-check
+.PHONY: install-hooks changelog examples wasm wasm-dev wasm-check ts-check
 
 # Default target
 all: check
@@ -86,7 +86,9 @@ coverage-html:
 clean:
 	cargo clean
 	rm -rf docs/book/
+	rm -rf pkg/
 	rm -f tarpaulin-report.html
+	rm -f packages/@quiver/wasm/quiver*.js packages/@quiver/wasm/quiver*.wasm packages/@quiver/wasm/quiver*.d.ts
 
 # Setup development environment
 setup: install-hooks
@@ -153,6 +155,12 @@ wasm-dev:
 wasm-check:
 	cargo check --target wasm32-unknown-unknown --no-default-features --features wasm
 
+# Check TypeScript compilation
+ts-check:
+	@echo "Checking TypeScript..."
+	@cd packages/@quiver/types && npx tsc --noEmit 2>/dev/null || (npm install --silent && npx tsc --noEmit)
+	@echo "TypeScript OK"
+
 # Print help
 help:
 	@echo "Quiver Development Commands"
@@ -163,6 +171,7 @@ help:
 	@echo "  make wasm         - Build WASM package (release)"
 	@echo "  make wasm-dev     - Build WASM package (development)"
 	@echo "  make wasm-check   - Check WASM compilation"
+	@echo "  make ts-check     - Check TypeScript compilation"
 	@echo "  make clean        - Clean build artifacts"
 	@echo ""
 	@echo "Testing:"
