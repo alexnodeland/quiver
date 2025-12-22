@@ -74,13 +74,14 @@ bench:
 bench-test:
 	cargo bench -- --test
 
-# Run tests with coverage (uses tarpaulin.toml config)
+# Run tests with coverage (requires: rustup component add llvm-tools-preview && cargo install cargo-llvm-cov)
 coverage:
-	cargo tarpaulin
+	cargo llvm-cov --all-features --ignore-filename-regex 'src/wasm/.*' --fail-under-lines 80
 
 # Run coverage and generate HTML report
 coverage-html:
-	cargo tarpaulin --out Html
+	cargo llvm-cov --all-features --ignore-filename-regex 'src/wasm/.*' --html
+	@echo "Coverage report: target/llvm-cov/html/index.html"
 
 # Clean build artifacts
 clean:
@@ -92,9 +93,9 @@ clean:
 
 # Setup development environment
 setup: install-hooks
-	rustup component add rustfmt clippy
-	@echo "Installing cargo-tarpaulin for coverage..."
-	cargo install cargo-tarpaulin || true
+	rustup component add rustfmt clippy llvm-tools-preview
+	@echo "Installing cargo-llvm-cov for coverage..."
+	cargo install cargo-llvm-cov || true
 	@echo "Installing mdbook for documentation..."
 	cargo install mdbook mdbook-mermaid || true
 	@echo "Installing git-cliff for changelog generation..."
@@ -178,7 +179,7 @@ help:
 	@echo "  make test         - Run all tests"
 	@echo "  make test-verbose - Run tests with output"
 	@echo "  make test-doc     - Run documentation tests"
-	@echo "  make coverage     - Run tests with coverage (80% threshold)"
+	@echo "  make coverage     - Run tests with coverage (80% line threshold)"
 	@echo "  make coverage-html- Generate HTML coverage report"
 	@echo "  make bench        - Run benchmarks"
 	@echo ""

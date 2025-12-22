@@ -107,8 +107,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-tarpaulin
-        uses: taiki-e/install-action@cargo-tarpaulin
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
       - name: Run coverage
-        run: cargo tarpaulin
+        run: |
+          cargo llvm-cov --all-features \
+            --ignore-filename-regex 'src/wasm/.*' \
+            --fail-under-lines 80
