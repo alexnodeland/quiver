@@ -97,7 +97,7 @@ setup: install-hooks
 	@echo "Installing cargo-llvm-cov for coverage..."
 	cargo install cargo-llvm-cov || true
 	@echo "Installing mdbook for documentation..."
-	cargo install mdbook mdbook-mermaid || true
+	cargo install mdbook mdbook-mermaid mdbook-katex || true
 	@echo "Installing git-cliff for changelog generation..."
 	cargo install git-cliff || true
 	@echo "Development environment ready!"

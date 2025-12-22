@@ -34,6 +34,8 @@ hidelines = { rust = "#" }
 [preprocessor.mermaid]
 command = "mdbook-mermaid"
 
+[preprocessor.katex]
+
 [output.html.search]
 enable = true
 limit-results = 30
