@@ -39,16 +39,18 @@ jobs:
         with:
           mdbook-version: 'latest'
 
-      - name: Cache mdbook-mermaid
-        id: cache-mermaid
+      - name: Cache mdbook plugins
+        id: cache-mdbook-plugins
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin/mdbook-mermaid
-          key: mdbook-mermaid-${{ runner.os }}
+          path: |
+            ~/.cargo/bin/mdbook-mermaid
+            ~/.cargo/bin/mdbook-katex
+          key: mdbook-plugins-${{ runner.os }}-v1
 
-      - name: Install mdbook-mermaid
-        if: steps.cache-mermaid.outputs.cache-hit != 'true'
-        run: cargo install mdbook-mermaid
+      - name: Install mdbook plugins
+        if: steps.cache-mdbook-plugins.outputs.cache-hit != 'true'
+        run: cargo install mdbook-mermaid mdbook-katex
 
       - name: Setup mdbook-mermaid
         run: mdbook-mermaid install docs/
