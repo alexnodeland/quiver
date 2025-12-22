@@ -74,13 +74,13 @@ bench:
 bench-test:
 	cargo bench -- --test
 
-# Run tests with coverage
+# Run tests with coverage (uses tarpaulin.toml config)
 coverage:
-	cargo tarpaulin --all-features --fail-under 80
+	cargo tarpaulin
 
 # Run coverage and generate HTML report
 coverage-html:
-	cargo tarpaulin --all-features --out Html
+	cargo tarpaulin --out Html
 
 # Clean build artifacts
 clean:
