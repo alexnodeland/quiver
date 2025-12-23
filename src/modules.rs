@@ -7,6 +7,7 @@ use crate::port::{GraphModule, ParamDef, ParamId, PortDef, PortSpec, PortValues,
 use crate::rng;
 use alloc::format;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 use libm::Libm;
 
@@ -295,17 +296,27 @@ impl GraphModule for Svf {
         self.low += f * self.band;
         let notch = high + self.low;
 
-        // Soft clip to prevent runaway in self-oscillation mode
-        let band_out = if res > 0.95 {
-            Libm::<f64>::tanh(self.band * 0.5) * 2.0
-        } else {
-            self.band
-        };
+        // Safety soft-clipping function: smooth limiting at ±limit volts
+        // Uses tanh for gradual saturation, preserving sound quality
+        #[inline]
+        fn safe_clip(x: f64, limit: f64) -> f64 {
+            if x.abs() <= limit {
+                x
+            } else {
+                // Soft clip: asymptotic approach to limit
+                limit * Libm::<f64>::tanh(x / limit)
+            }
+        }
 
-        outputs.set(10, self.low);
-        outputs.set(11, band_out);
-        outputs.set(12, high);
-        outputs.set(13, notch);
+        // Apply different clipping thresholds based on resonance
+        // High resonance (self-oscillation): clip at ±5V to prevent runaway
+        // Normal operation: clip at ±10V as safety net
+        let clip_limit = if res > 0.95 { 5.0 } else { 10.0 };
+
+        outputs.set(10, safe_clip(self.low, clip_limit)); // LP
+        outputs.set(11, safe_clip(self.band, clip_limit)); // BP
+        outputs.set(12, safe_clip(high, clip_limit)); // HP
+        outputs.set(13, safe_clip(notch, clip_limit)); // Notch
     }
 
     fn reset(&mut self) {
@@ -6384,6 +6395,7 @@ impl GraphModule for Granular {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analog::Saturator;
 
     #[test]
     fn test_vco_frequency() {
@@ -9577,5 +9589,331 @@ mod tests {
         assert!(!grain.active);
         assert_eq!(grain.phase, 0.0);
         assert_eq!(grain.speed, 1.0);
+    }
+
+    // =========================================================================
+    // AUDIO SAFETY TESTS
+    // These tests verify that modules don't produce dangerous output levels
+    // that could damage speakers or hearing. Safe range is ±10V (2x nominal).
+    // =========================================================================
+
+    const SAFE_AUDIO_LIMIT: f64 = 10.0; // Max safe output voltage
+
+    /// Helper to run a module for N samples and track max output
+    fn measure_max_output<F>(samples: usize, mut tick_fn: F) -> f64
+    where
+        F: FnMut() -> f64,
+    {
+        let mut max_abs = 0.0f64;
+        for _ in 0..samples {
+            let out = tick_fn();
+            max_abs = max_abs.max(out.abs());
+        }
+        max_abs
+    }
+
+    #[test]
+    fn test_svf_high_resonance_bounded() {
+        // Test that SVF outputs stay bounded at various high resonance values
+        // This catches the gap between 0.8-0.95 where no clipping was applied
+        let test_resonances = [0.8, 0.85, 0.9, 0.92, 0.94, 0.96, 0.98, 1.0];
+
+        for &res in &test_resonances {
+            let mut svf = Svf::new(44100.0);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+
+            inputs.set(0, 5.0); // Full scale input
+            inputs.set(1, 0.5); // Mid cutoff
+            inputs.set(2, res); // Resonance
+
+            let max = measure_max_output(10000, || {
+                svf.tick(&inputs, &mut outputs);
+                // Check all outputs: LP, BP, HP, Notch
+                let lp = outputs.get(10).unwrap_or(0.0).abs();
+                let bp = outputs.get(11).unwrap_or(0.0).abs();
+                let hp = outputs.get(12).unwrap_or(0.0).abs();
+                let notch = outputs.get(13).unwrap_or(0.0).abs();
+                lp.max(bp).max(hp).max(notch)
+            });
+
+            assert!(
+                max <= SAFE_AUDIO_LIMIT,
+                "SVF output {} exceeds safe limit {} at resonance {}",
+                max,
+                SAFE_AUDIO_LIMIT,
+                res
+            );
+        }
+    }
+
+    #[test]
+    fn test_svf_low_cutoff_transient_bounded() {
+        // Low cutoff + high resonance + step input = potential for ringing
+        let mut svf = Svf::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Very low cutoff (20Hz range)
+        inputs.set(1, 0.0); // Minimum cutoff CV
+        inputs.set(2, 0.9); // High resonance
+
+        // Step input from 0 to 5V
+        inputs.set(0, 0.0);
+        for _ in 0..100 {
+            svf.tick(&inputs, &mut outputs);
+        }
+
+        inputs.set(0, 5.0); // Step!
+        let max = measure_max_output(5000, || {
+            svf.tick(&inputs, &mut outputs);
+            outputs.get(10).unwrap_or(0.0).abs()
+        });
+
+        assert!(
+            max <= SAFE_AUDIO_LIMIT,
+            "SVF transient response {} exceeds safe limit {} at low cutoff",
+            max,
+            SAFE_AUDIO_LIMIT
+        );
+    }
+
+    #[test]
+    fn test_svf_self_oscillation_bounded() {
+        // Self-oscillation mode should produce bounded output
+        let mut svf = Svf::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 0.0); // No input - pure self-oscillation
+        inputs.set(1, 0.5); // Mid cutoff
+        inputs.set(2, 1.0); // Maximum resonance
+
+        // Kick-start oscillation with a brief impulse
+        inputs.set(0, 1.0);
+        svf.tick(&inputs, &mut outputs);
+        inputs.set(0, 0.0);
+
+        // Let it oscillate for a while
+        let max = measure_max_output(20000, || {
+            svf.tick(&inputs, &mut outputs);
+            outputs.get(10).unwrap_or(0.0).abs()
+        });
+
+        assert!(
+            max <= SAFE_AUDIO_LIMIT,
+            "SVF self-oscillation {} exceeds safe limit {}",
+            max,
+            SAFE_AUDIO_LIMIT
+        );
+    }
+
+    #[test]
+    fn test_svf_extreme_input_bounded() {
+        // Even with garbage input (20V), output should be bounded
+        let mut svf = Svf::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 20.0); // Way over nominal!
+        inputs.set(1, 0.5);
+        inputs.set(2, 0.9);
+
+        let max = measure_max_output(1000, || {
+            svf.tick(&inputs, &mut outputs);
+            outputs.get(10).unwrap_or(0.0).abs()
+        });
+
+        assert!(
+            max <= SAFE_AUDIO_LIMIT * 2.0, // Allow 2x for extreme input
+            "SVF with extreme input {} exceeds limit {}",
+            max,
+            SAFE_AUDIO_LIMIT * 2.0
+        );
+    }
+
+    #[test]
+    fn test_mixer_summation_bounded() {
+        // Mixer should not produce unbounded output when summing multiple channels
+        let mut mixer = Mixer::new(4);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // 4 channels at full scale
+        for i in 0..4 {
+            inputs.set(i as u32, 5.0);
+        }
+
+        mixer.tick(&inputs, &mut outputs);
+        let out = outputs.get(100).unwrap_or(0.0);
+
+        // Note: This test documents current behavior (20V output)
+        // If mixer adds limiting, update this test
+        assert!(
+            out.abs() <= SAFE_AUDIO_LIMIT * 2.0,
+            "Mixer output {} is very high - consider adding limiting",
+            out
+        );
+    }
+
+    #[test]
+    fn test_diode_ladder_high_resonance_bounded() {
+        // Diode ladder filter should also be bounded
+        let mut filter = DiodeLadderFilter::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 5.0); // Input
+        inputs.set(1, 0.5); // Cutoff
+        inputs.set(2, 1.0); // Max resonance
+
+        let max = measure_max_output(10000, || {
+            filter.tick(&inputs, &mut outputs);
+            outputs.get(10).unwrap_or(0.0).abs()
+        });
+
+        assert!(
+            max <= SAFE_AUDIO_LIMIT,
+            "Diode ladder output {} exceeds safe limit {}",
+            max,
+            SAFE_AUDIO_LIMIT
+        );
+    }
+
+    #[test]
+    fn test_vco_output_bounded() {
+        // VCO outputs should always be in safe range
+        let mut vco = Vco::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Test various pitches
+        for voct in [-2.0, 0.0, 2.0, 4.0] {
+            inputs.set(0, voct);
+
+            let max = measure_max_output(1000, || {
+                vco.tick(&inputs, &mut outputs);
+                let sin = outputs.get(10).unwrap_or(0.0).abs();
+                let tri = outputs.get(11).unwrap_or(0.0).abs();
+                let saw = outputs.get(12).unwrap_or(0.0).abs();
+                let sqr = outputs.get(13).unwrap_or(0.0).abs();
+                sin.max(tri).max(saw).max(sqr)
+            });
+
+            assert!(
+                max <= 5.5, // VCO should output ±5V
+                "VCO output {} exceeds expected range at voct={}",
+                max,
+                voct
+            );
+        }
+    }
+
+    #[test]
+    fn test_lfo_output_bounded() {
+        let mut lfo = Lfo::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 1.0); // 1Hz rate
+
+        let max = measure_max_output(50000, || {
+            lfo.tick(&inputs, &mut outputs);
+            outputs.get(10).unwrap_or(0.0).abs()
+        });
+
+        assert!(
+            max <= 5.5,
+            "LFO output {} exceeds expected ±5V range",
+            max
+        );
+    }
+
+    #[test]
+    fn test_adsr_output_bounded() {
+        let mut adsr = Adsr::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Fast attack, instant release
+        inputs.set(2, 0.0); // Attack
+        inputs.set(3, 0.0); // Decay
+        inputs.set(4, 1.0); // Sustain
+        inputs.set(5, 0.0); // Release
+
+        // Gate on
+        inputs.set(0, 5.0);
+
+        let max = measure_max_output(10000, || {
+            adsr.tick(&inputs, &mut outputs);
+            outputs.get(10).unwrap_or(0.0).abs()
+        });
+
+        assert!(
+            max <= 10.5, // ADSR outputs 0-10V
+            "ADSR output {} exceeds expected 0-10V range",
+            max
+        );
+    }
+
+    #[test]
+    fn test_noise_output_bounded() {
+        let mut noise = NoiseGenerator::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        let max = measure_max_output(10000, || {
+            noise.tick(&inputs, &mut outputs);
+            let white = outputs.get(10).unwrap_or(0.0).abs();
+            let pink = outputs.get(11).unwrap_or(0.0).abs();
+            white.max(pink)
+        });
+
+        assert!(
+            max <= 5.5,
+            "Noise output {} exceeds expected ±5V range",
+            max
+        );
+    }
+
+    #[test]
+    fn test_limiter_prevents_spikes() {
+        let mut limiter = Limiter::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Set threshold to 3V
+        inputs.set(1, 0.3); // Threshold CV (0-1 maps to 0-5V)
+
+        // Feed in a 10V spike
+        inputs.set(0, 10.0);
+
+        limiter.tick(&inputs, &mut outputs);
+        let out = outputs.get(10).unwrap_or(0.0);
+
+        assert!(
+            out.abs() <= 5.0,
+            "Limiter failed to limit 10V input, got {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_saturator_prevents_spikes() {
+        let mut sat = Saturator::new(0.8); // High drive
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Large input
+        inputs.set(0, 20.0);
+
+        sat.tick(&inputs, &mut outputs);
+        let out = outputs.get(10).unwrap_or(0.0);
+
+        assert!(
+            out.abs() <= SAFE_AUDIO_LIMIT,
+            "Saturator failed to limit input, got {}",
+            out
+        );
     }
 }

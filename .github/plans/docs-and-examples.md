@@ -13,12 +13,6 @@ Missing examples and documentation.
 | `wasm_browser.rs` | Browser integration with Web Audio |
 | `web_audio.rs` | Web Audio API integration patterns |
 
-### Plugin Development
-
-| File | Description |
-|------|-------------|
-| `plugin_template.rs` | Plugin wrapper usage template |
-
 ### Effects Usage
 
 | File | Description |
@@ -34,7 +28,6 @@ Missing examples and documentation.
 
 | Topic | Description |
 |-------|-------------|
-| Plugin development | How to use `PluginProcessor` and `PluginWrapper` |
 | Web Audio integration | How to use `WebAudioBlockProcessor` and WASM |
 | WASM deployment | Building and deploying WASM packages |
 
@@ -44,7 +37,6 @@ Missing examples and documentation.
 |-------|-------------|
 | Building a Delay Effect | Step-by-step custom module creation |
 | Browser Audio with WASM | Web synth from scratch |
-| Creating a VST Plugin | Full plugin development workflow |
 
 ---
 
@@ -112,7 +104,6 @@ Suggested location for new docs:
 ```
 docs/src/
 ├── how-to/
-│   ├── plugin-development.md   # Plugin wrapper guide
 │   ├── wasm-deployment.md      # WASM build & deploy
 │   └── web-audio.md            # Browser audio guide
 └── tutorials/

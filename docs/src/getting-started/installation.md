@@ -36,7 +36,7 @@ quiver = { git = "https://github.com/alexnodeland/quiver", features = ["simd"] }
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `std` | Yes | Full functionality including OSC, plugins, visualization (implies `alloc`) |
+| `std` | Yes | Full functionality including OSC, visualization (implies `alloc`) |
 | `alloc` | No | Serialization, presets, and I/O for `no_std` + heap environments |
 | `simd` | No | SIMD vectorization for block processing (works with any tier) |
 
@@ -71,7 +71,7 @@ Adds:
 
 #### Tier 3: Full Std (default)
 
-For desktop applications and DAW plugins:
+For desktop applications:
 
 ```toml
 [dependencies]
@@ -79,14 +79,14 @@ quiver = { git = "https://github.com/alexnodeland/quiver" }
 ```
 
 Adds:
-- **Extended I/O** - OSC protocol, plugin wrappers, Web Audio interfaces
+- **Extended I/O** - OSC protocol, Web Audio interfaces
 - **Visual Tools** - Scope, Spectrum Analyzer, Level Meter, Automation Recorder
 - **MDK** - Module Development Kit for creating custom modules
 
 #### Feature Matrix
 
-| Tier | DSP | Serialize | Presets | I/O | OSC/Plugins | Visual | MDK |
-|------|-----|-----------|---------|-----|-------------|--------|-----|
+| Tier | DSP | Serialize | Presets | I/O | OSC | Visual | MDK |
+|------|-----|-----------|---------|-----|-----|--------|-----|
 | Core | ✓ | | | | | | |
 | `alloc` | ✓ | ✓ | ✓ | ✓ | | | |
 | `std` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |

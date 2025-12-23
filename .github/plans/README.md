@@ -7,7 +7,6 @@ Actionable plans for extending the Quiver audio synthesis library.
 | Document | Description |
 |----------|-------------|
 | [modules.md](modules.md) | DSP modules to implement (Reverb, EQ, Wavetable, etc.) |
-| [integration.md](integration.md) | Plugin formats (VST3, AU, LV2) and WASM infrastructure |
 | [docs-and-examples.md](docs-and-examples.md) | Missing examples and documentation |
 
 ## Contributing

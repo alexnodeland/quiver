@@ -12,7 +12,9 @@
 //! - **Scope**: Oscilloscope waveform capture for visualization
 //! - **Spectrum**: Frequency spectrum via DFT for analyzer display
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
+#[cfg(feature = "wasm")]
+use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::f64::consts::PI;

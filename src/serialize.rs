@@ -420,6 +420,16 @@ impl ModuleRegistry {
         );
 
         self.register_factory_with_keywords(
+            "mixer8",
+            "Mixer 8",
+            "Utilities",
+            "8-channel audio mixer for polyphony",
+            &["mix", "combine", "sum", "blend", "audio", "poly", "voices"],
+            &[],
+            |_| Box::new(Mixer::new(8)),
+        );
+
+        self.register_factory_with_keywords(
             "offset",
             "Offset",
             "Utilities",

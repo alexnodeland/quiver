@@ -189,6 +189,19 @@ impl QuiverEngine {
         self.patch.cable_count()
     }
 
+    /// Set the output module (required for audio output)
+    ///
+    /// The specified module's outputs will be read as the patch's stereo output.
+    /// Port 0 is left channel, port 1 is right channel.
+    pub fn set_output(&mut self, name: &str) -> Result<(), JsValue> {
+        let node_id = self
+            .get_node_id_by_name(name)
+            .ok_or_else(|| JsValue::from_str(&format!("Unknown module: {}", name)))?;
+
+        self.patch.set_output(node_id);
+        Ok(())
+    }
+
     // =========================================================================
     // Cable Operations
     // =========================================================================
@@ -362,6 +375,42 @@ impl QuiverEngine {
             .ok_or_else(|| JsValue::from_str(&format!("Param {} not found", param_index)))
     }
 
+    /// Set a parameter value by name
+    ///
+    /// This is a convenience method that looks up the parameter index by name.
+    pub fn set_param_by_name(
+        &mut self,
+        node_name: &str,
+        param_name: &str,
+        value: f64,
+    ) -> Result<(), JsValue> {
+        // Find the module and get its param definitions
+        let param_id = self
+            .patch
+            .nodes()
+            .find(|(_, name, _)| *name == node_name)
+            .and_then(|(_, _, module)| {
+                module
+                    .params()
+                    .iter()
+                    .find(|p| p.name == param_name)
+                    .map(|p| p.id)
+            })
+            .ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "Unknown parameter '{}' on module '{}'",
+                    param_name, node_name
+                ))
+            })?;
+
+        // Set the parameter
+        let node_id = self
+            .get_node_id_by_name(node_name)
+            .ok_or_else(|| JsValue::from_str(&format!("Unknown module: {}", node_name)))?;
+        self.patch.set_param(node_id, param_id, value);
+        Ok(())
+    }
+
     // =========================================================================
     // Real-Time Bridge API
     // =========================================================================
@@ -411,13 +460,21 @@ impl QuiverEngine {
     }
 
     /// Process a block of samples and return interleaved stereo Float32Array
+    ///
+    /// Output is safety-clamped to ±10V to prevent speaker/hearing damage
+    /// from runaway signals or edge cases.
     pub fn process_block(&mut self, num_samples: usize) -> js_sys::Float32Array {
+        const SAFETY_LIMIT: f64 = 10.0; // Max output voltage
+
         let output = js_sys::Float32Array::new_with_length((num_samples * 2) as u32);
 
         for i in 0..num_samples {
             let (left, right) = self.patch.tick();
-            output.set_index((i * 2) as u32, left as f32);
-            output.set_index((i * 2 + 1) as u32, right as f32);
+            // Safety clamp to prevent dangerous audio levels
+            let left_safe = left.clamp(-SAFETY_LIMIT, SAFETY_LIMIT);
+            let right_safe = right.clamp(-SAFETY_LIMIT, SAFETY_LIMIT);
+            output.set_index((i * 2) as u32, left_safe as f32);
+            output.set_index((i * 2 + 1) as u32, right_safe as f32);
         }
 
         // Collect observer updates after processing

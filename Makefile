@@ -3,6 +3,7 @@
 
 .PHONY: all build test check fmt lint lint-fix clippy doc bench coverage clean setup help
 .PHONY: install-hooks changelog examples wasm wasm-dev wasm-check ts-check
+.PHONY: test-browser browser-synth
 
 # Default target
 all: check
@@ -162,6 +163,21 @@ ts-check:
 	@cd packages/@quiver/types && npx tsc --noEmit 2>/dev/null || (npm install --silent && npx tsc --noEmit)
 	@echo "TypeScript OK"
 
+# Run browser tests with Playwright
+test-browser: wasm
+	@echo "Running browser tests..."
+	@cd demos/browser/tests && npm install --silent && npx playwright install --with-deps chromium && npx playwright test --project=chromium
+
+# Run browser tests on all browsers
+test-browser-all: wasm
+	@echo "Running browser tests on all browsers..."
+	@cd demos/browser/tests && npm install --silent && npx playwright install --with-deps && npx playwright test
+
+# Run browser synth demo
+browser-synth: wasm
+	@echo "Starting browser synth demo..."
+	@cd demos/browser && npm install --silent && npm run dev
+
 # Print help
 help:
 	@echo "Quiver Development Commands"
@@ -200,6 +216,13 @@ help:
 	@echo "  make examples     - Build all examples"
 	@echo "  make quick-taste  - Run quick_taste example"
 	@echo "  make run-example NAME=<name> - Run specific example"
+	@echo ""
+	@echo "Demos:"
+	@echo "  make browser-synth- Run browser synth demo (demos/browser/)"
+	@echo ""
+	@echo "Browser Testing:"
+	@echo "  make test-browser - Run browser tests (Chromium only)"
+	@echo "  make test-browser-all - Run browser tests (all browsers)"
 	@echo ""
 	@echo "Setup:"
 	@echo "  make setup        - Setup development environment"

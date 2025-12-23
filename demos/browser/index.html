@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quiver Browser Synth</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      margin: 0;
+      padding: 20px;
+      min-height: 100vh;
+    }
+    h1 {
+      color: #7b68ee;
+      margin: 0 0 20px 0;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    .panel {
+      background: #16213e;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .panel h2 {
+      margin: 0 0 15px 0;
+      font-size: 16px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 15px;
+    }
+    .control {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .control label {
+      font-size: 12px;
+      color: #888;
+    }
+    .control input[type="range"] {
+      width: 100%;
+      accent-color: #7b68ee;
+    }
+    .control .value {
+      font-size: 14px;
+      font-family: monospace;
+      color: #7b68ee;
+    }
+    .keyboard {
+      display: flex;
+      gap: 2px;
+      margin-top: 10px;
+    }
+    .key {
+      width: 50px;
+      height: 150px;
+      background: linear-gradient(to bottom, #f0f0f0, #d0d0d0);
+      border: 1px solid #888;
+      border-radius: 0 0 6px 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      padding-bottom: 10px;
+      font-size: 12px;
+      color: #333;
+      transition: background 0.1s;
+    }
+    .key:active, .key.active {
+      background: linear-gradient(to bottom, #e0e0ff, #c0c0ff);
+    }
+    .key.black {
+      width: 35px;
+      height: 100px;
+      background: linear-gradient(to bottom, #333, #111);
+      color: #888;
+      margin-left: -18px;
+      margin-right: -18px;
+      z-index: 1;
+    }
+    .key.black:active, .key.black.active {
+      background: linear-gradient(to bottom, #444, #222);
+    }
+    button {
+      background: #7b68ee;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 6px;
+      font-size: 16px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover {
+      background: #9d8dfc;
+    }
+    button:disabled {
+      background: #444;
+      cursor: not-allowed;
+    }
+    .status {
+      padding: 10px 15px;
+      border-radius: 6px;
+      margin-bottom: 15px;
+    }
+    .status.loading {
+      background: #3a3a5a;
+    }
+    .status.ready {
+      background: #1e4d2b;
+    }
+    .status.error {
+      background: #4d1e1e;
+    }
+    .scope-container {
+      display: flex;
+      gap: 20px;
+    }
+    canvas {
+      background: #0a0a1a;
+      border-radius: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Quiver Browser Synth</h1>
+
+    <div id="status" class="status loading">Loading WASM module...</div>
+
+    <button id="start" disabled>Start Audio</button>
+
+    <div class="panel">
+      <h2>Oscillator</h2>
+      <div class="controls">
+        <div class="control">
+          <label>Waveform</label>
+          <select id="waveform">
+            <option value="saw">Sawtooth</option>
+            <option value="pulse">Pulse</option>
+            <option value="tri">Triangle</option>
+            <option value="sine">Sine</option>
+          </select>
+        </div>
+        <div class="control">
+          <label>Pulse Width</label>
+          <input type="range" id="pulseWidth" min="0.01" max="0.99" step="0.01" value="0.5">
+          <span class="value" id="pulseWidthValue">0.50</span>
+        </div>
+        <div class="control">
+          <label>Detune (cents)</label>
+          <input type="range" id="detune" min="-100" max="100" step="1" value="0">
+          <span class="value" id="detuneValue">0</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Filter</h2>
+      <div class="controls">
+        <div class="control">
+          <label>Cutoff (Hz)</label>
+          <input type="range" id="cutoff" min="20" max="20000" step="1" value="2000">
+          <span class="value" id="cutoffValue">2000</span>
+        </div>
+        <div class="control">
+          <label>Resonance</label>
+          <input type="range" id="resonance" min="0" max="0.99" step="0.01" value="0.3">
+          <span class="value" id="resonanceValue">0.30</span>
+        </div>
+        <div class="control">
+          <label>Envelope Amount</label>
+          <input type="range" id="filterEnv" min="0" max="10000" step="100" value="3000">
+          <span class="value" id="filterEnvValue">3000</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Envelope</h2>
+      <div class="controls">
+        <div class="control">
+          <label>Attack (ms)</label>
+          <input type="range" id="attack" min="1" max="2000" step="1" value="10">
+          <span class="value" id="attackValue">10</span>
+        </div>
+        <div class="control">
+          <label>Decay (ms)</label>
+          <input type="range" id="decay" min="1" max="2000" step="1" value="200">
+          <span class="value" id="decayValue">200</span>
+        </div>
+        <div class="control">
+          <label>Sustain</label>
+          <input type="range" id="sustain" min="0" max="1" step="0.01" value="0.5">
+          <span class="value" id="sustainValue">0.50</span>
+        </div>
+        <div class="control">
+          <label>Release (ms)</label>
+          <input type="range" id="release" min="1" max="5000" step="1" value="300">
+          <span class="value" id="releaseValue">300</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Output</h2>
+      <div class="controls">
+        <div class="control">
+          <label>Volume</label>
+          <input type="range" id="volume" min="0" max="1" step="0.01" value="0.5">
+          <span class="value" id="volumeValue">0.50</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Keyboard</h2>
+      <p style="color: #666; font-size: 12px; margin: 0 0 10px 0;">
+        Use computer keyboard (A-S-D-F-G-H-J-K) or click keys
+      </p>
+      <div class="keyboard" id="keyboard">
+        <div class="key" data-note="60">C</div>
+        <div class="key black" data-note="61">C#</div>
+        <div class="key" data-note="62">D</div>
+        <div class="key black" data-note="63">D#</div>
+        <div class="key" data-note="64">E</div>
+        <div class="key" data-note="65">F</div>
+        <div class="key black" data-note="66">F#</div>
+        <div class="key" data-note="67">G</div>
+        <div class="key black" data-note="68">G#</div>
+        <div class="key" data-note="69">A</div>
+        <div class="key black" data-note="70">A#</div>
+        <div class="key" data-note="71">B</div>
+        <div class="key" data-note="72">C</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Scope</h2>
+      <div class="scope-container">
+        <canvas id="scope" width="400" height="200"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>

@@ -26,7 +26,7 @@
 
 use crate::graph::Patch;
 use crate::serialize::{CableDef, ModuleDef, ModuleRegistry, PatchDef};
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 

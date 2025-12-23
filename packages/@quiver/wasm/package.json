@@ -14,7 +14,8 @@
   ],
   "scripts": {
     "build": "cd ../../.. && make wasm",
-    "build:dev": "cd ../../.. && make wasm-dev"
+    "build:dev": "cd ../../.. && make wasm-dev",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "wasm",
@@ -29,6 +30,13 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/alexnodeland/quiver"
+  },
+  "homepage": "https://github.com/alexnodeland/quiver#readme",
+  "bugs": {
+    "url": "https://github.com/alexnodeland/quiver/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "sideEffects": false
 }

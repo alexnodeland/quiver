@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quiver Browser Tests</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 800px;
+      margin: 40px auto;
+      padding: 20px;
+    }
+    pre {
+      background: #f4f4f4;
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+    }
+    .status {
+      padding: 8px 16px;
+      border-radius: 4px;
+      margin: 10px 0;
+    }
+    .success { background: #d4edda; color: #155724; }
+    .error { background: #f8d7da; color: #721c24; }
+    .pending { background: #fff3cd; color: #856404; }
+  </style>
+</head>
+<body>
+  <h1>Quiver WASM Test Harness</h1>
+
+  <div id="status" class="status pending">Loading WASM module...</div>
+
+  <h2>Test Results</h2>
+  <pre id="results">Waiting for tests to run...</pre>
+
+  <h2>Engine Info</h2>
+  <pre id="info">Loading...</pre>
+
+  <script type="module">
+    // Import the WASM module from the built package
+    import init, { QuiverEngine } from '../../../../packages/@quiver/wasm/quiver.js';
+
+    const statusEl = document.getElementById('status');
+    const resultsEl = document.getElementById('results');
+    const infoEl = document.getElementById('info');
+
+    // Make engine available globally for Playwright tests
+    window.QuiverEngine = null;
+    window.engine = null;
+    window.testResults = {};
+
+    async function initWasm() {
+      try {
+        await init();
+        window.QuiverEngine = QuiverEngine;
+        statusEl.className = 'status success';
+        statusEl.textContent = 'WASM module loaded successfully!';
+        return true;
+      } catch (error) {
+        statusEl.className = 'status error';
+        statusEl.textContent = `Failed to load WASM: ${error.message}`;
+        console.error('WASM init failed:', error);
+        return false;
+      }
+    }
+
+    async function runTests() {
+      const results = {};
+
+      // Test 1: Engine creation
+      try {
+        const engine = new QuiverEngine(44100.0);
+        window.engine = engine;
+        results.engineCreation = { pass: true, message: 'Engine created at 44100 Hz' };
+      } catch (error) {
+        results.engineCreation = { pass: false, message: error.message };
+      }
+
+      // Test 2: Module catalog
+      try {
+        const catalog = JSON.parse(window.engine.get_catalog());
+        results.moduleCatalog = {
+          pass: catalog.modules.length > 0,
+          message: `Found ${catalog.modules.length} modules`
+        };
+      } catch (error) {
+        results.moduleCatalog = { pass: false, message: error.message };
+      }
+
+      // Test 3: Add module
+      try {
+        window.engine.add_module('vco', 'test_vco');
+        const count = window.engine.module_count();
+        results.addModule = {
+          pass: count === 1,
+          message: `Module count: ${count}`
+        };
+      } catch (error) {
+        results.addModule = { pass: false, message: error.message };
+      }
+
+      // Test 4: Process audio
+      try {
+        window.engine.add_module('stereo_output', 'output');
+        window.engine.connect('test_vco:saw', 'output:left');
+        window.engine.connect('test_vco:saw', 'output:right');
+        window.engine.compile();
+
+        const samples = window.engine.process_block(128);
+        const hasAudio = samples.some(s => Math.abs(s) > 0.001);
+        results.processAudio = {
+          pass: hasAudio,
+          message: `Processed 128 samples, has audio: ${hasAudio}`
+        };
+      } catch (error) {
+        results.processAudio = { pass: false, message: error.message };
+      }
+
+      // Test 5: MIDI
+      try {
+        window.engine.midi_note_on(60, 100);
+        const note = window.engine.midi_note;
+        const gate = window.engine.midi_gate;
+        results.midi = {
+          pass: note === 60 && gate > 0,
+          message: `Note: ${note}, Gate: ${gate}`
+        };
+        window.engine.midi_note_off(60, 0);
+      } catch (error) {
+        results.midi = { pass: false, message: error.message };
+      }
+
+      window.testResults = results;
+      return results;
+    }
+
+    function displayResults(results) {
+      let output = '';
+      let allPassed = true;
+
+      for (const [name, result] of Object.entries(results)) {
+        const status = result.pass ? '✓' : '✗';
+        output += `${status} ${name}: ${result.message}\n`;
+        if (!result.pass) allPassed = false;
+      }
+
+      resultsEl.textContent = output;
+
+      if (Object.keys(results).length > 0) {
+        statusEl.className = allPassed ? 'status success' : 'status error';
+        statusEl.textContent = allPassed ? 'All tests passed!' : 'Some tests failed';
+      }
+    }
+
+    function displayEngineInfo() {
+      if (!window.engine) {
+        infoEl.textContent = 'Engine not initialized';
+        return;
+      }
+
+      try {
+        const info = {
+          moduleCount: window.engine.module_count(),
+          cableCount: window.engine.cable_count(),
+          categories: JSON.parse(window.engine.get_categories()),
+        };
+        infoEl.textContent = JSON.stringify(info, null, 2);
+      } catch (error) {
+        infoEl.textContent = `Error getting info: ${error.message}`;
+      }
+    }
+
+    // Run everything
+    (async () => {
+      const wasmLoaded = await initWasm();
+      if (wasmLoaded) {
+        const results = await runTests();
+        displayResults(results);
+        displayEngineInfo();
+      }
+    })();
+  </script>
+</body>
+</html>

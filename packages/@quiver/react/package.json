@@ -20,7 +20,8 @@
     "build": "tsup src/index.ts --format cjs,esm --dts",
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
     "lint": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "quiver",
@@ -32,6 +33,17 @@
   ],
   "author": "Quiver Contributors",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alexnodeland/quiver"
+  },
+  "homepage": "https://github.com/alexnodeland/quiver#readme",
+  "bugs": {
+    "url": "https://github.com/alexnodeland/quiver/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@quiver/types": "workspace:*"
   },

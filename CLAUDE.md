@@ -34,7 +34,7 @@ src/
 ├── introspection.rs    # GUI parameter discovery [alloc]
 ├── serialize.rs        # JSON serialization, ModuleRegistry [alloc]
 ├── presets.rs          # Preset library [alloc]
-├── extended_io.rs      # OSC, plugins, WebAudio [std]
+├── extended_io.rs      # OSC, WebAudio [std]
 ├── mdk.rs              # Module Development Kit [std]
 ├── visual.rs           # Scope, spectrum analyzer, automation [std]
 └── wasm/               # WebAssembly bindings [wasm feature]
@@ -42,7 +42,11 @@ src/
     ├── engine.rs
     └── error.rs
 
-examples/               # Runnable example patches
+demos/                  # Full working demo applications
+└── browser/            # Browser synth demo (WASM + TypeScript)
+    └── tests/          # Playwright E2E tests
+
+examples/               # Runnable Rust example patches
 benches/                # Criterion benchmarks for real-time validation
 schemas/                # JSON schemas for patch format
 docs/                   # mdbook documentation source
@@ -53,7 +57,7 @@ packages/@quiver/       # TypeScript/React packages for WASM
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `std`   | Yes     | Full functionality including OSC, plugins, visualization (implies `alloc`) |
+| `std`   | Yes     | Full functionality including OSC, visualization (implies `alloc`) |
 | `alloc` | No      | Serialization, presets, I/O for `no_std` + heap environments |
 | `simd`  | No      | SIMD vectorization for block processing |
 | `wasm`  | No      | WebAssembly bindings with wasm-bindgen and TypeScript types |
@@ -245,6 +249,8 @@ The `wasm` feature enables JavaScript bindings via `wasm-bindgen` and TypeScript
 
 - **User Guide**: `docs/` directory (mdbook format)
 - **API Reference**: Generated with `cargo doc`
-- **Examples**: `examples/` directory with runnable patches
+- **Examples**: `examples/` directory with runnable Rust patches
+- **Demos**: `demos/` directory with full working applications (e.g., browser synth)
 
 Run `make doc-serve` to serve documentation locally.
+Run `make browser-synth` to start the browser synth demo.

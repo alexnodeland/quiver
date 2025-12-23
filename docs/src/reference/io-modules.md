@@ -164,45 +164,6 @@ for binding in &bindings {
 
 ---
 
-## Plugin Wrappers
-
-### PluginWrapper
-
-Bridge to VST/AU/LV2 plugin formats.
-
-```rust,ignore
-let info = PluginInfo {
-    name: "QuiverSynth".to_string(),
-    vendor: "My Company".to_string(),
-    unique_id: 12345,
-    version: (1, 0, 0),
-    category: PluginCategory::Instrument,
-    num_inputs: 0,
-    num_outputs: 2,
-    has_editor: false,
-};
-
-let wrapper = PluginWrapper::new(info, sample_rate);
-```
-
-### PluginParameter
-
-Expose parameters to host DAW.
-
-```rust,ignore
-let params = vec![
-    PluginParameter {
-        name: "Cutoff".to_string(),
-        default: 0.5,
-        min: 0.0,
-        max: 1.0,
-        unit: "".to_string(),
-    },
-];
-```
-
----
-
 ## Web Audio
 
 ### WebAudioProcessor
@@ -240,23 +201,6 @@ let interleaved = interleave_stereo(&left, &right);
 
 // Convert to separate channels
 let (left, right) = deinterleave_stereo(&interleaved);
-```
-
----
-
-## Audio Bus Configuration
-
-For multi-bus plugins.
-
-```rust,ignore
-let config = AudioBusConfig {
-    main_inputs: 0,
-    main_outputs: 2,
-    aux_inputs: vec![
-        ("Sidechain".to_string(), 2),
-    ],
-    aux_outputs: vec![],
-};
 ```
 
 ---
