@@ -178,6 +178,9 @@ browser-synth: wasm
 	@echo "Starting browser synth demo..."
 	@cd demos/browser && npm install --silent && npm run dev
 
+# Run demo
+demo: browser-synth
+
 # Print help
 help:
 	@echo "Quiver Development Commands"
