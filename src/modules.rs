@@ -9822,11 +9822,7 @@ mod tests {
             outputs.get(10).unwrap_or(0.0).abs()
         });
 
-        assert!(
-            max <= 5.5,
-            "LFO output {} exceeds expected ±5V range",
-            max
-        );
+        assert!(max <= 5.5, "LFO output {} exceeds expected ±5V range", max);
     }
 
     #[test]
