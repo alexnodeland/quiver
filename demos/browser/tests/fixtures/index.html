@@ -80,7 +80,8 @@
 
       // Test 2: Module catalog
       try {
-        const catalog = JSON.parse(window.engine.get_catalog());
+        // get_catalog() returns an object, not a JSON string
+        const catalog = window.engine.get_catalog();
         results.moduleCatalog = {
           pass: catalog.modules.length > 0,
           message: `Found ${catalog.modules.length} modules`
@@ -104,8 +105,10 @@
       // Test 4: Process audio
       try {
         window.engine.add_module('stereo_output', 'output');
-        window.engine.connect('test_vco:saw', 'output:left');
-        window.engine.connect('test_vco:saw', 'output:right');
+        // Use dot notation for port references
+        window.engine.connect('test_vco.saw', 'output.left');
+        window.engine.connect('test_vco.saw', 'output.right');
+        window.engine.set_output('output');
         window.engine.compile();
 
         const samples = window.engine.process_block(128);
@@ -121,11 +124,12 @@
       // Test 5: MIDI
       try {
         window.engine.midi_note_on(60, 100);
+        // midi_note returns V/Oct (0 = C4/MIDI 60), midi_gate is boolean
         const note = window.engine.midi_note;
         const gate = window.engine.midi_gate;
         results.midi = {
-          pass: note === 60 && gate > 0,
-          message: `Note: ${note}, Gate: ${gate}`
+          pass: note === 0 && gate === true,
+          message: `Note: ${note} V/Oct, Gate: ${gate}`
         };
         window.engine.midi_note_off(60, 0);
       } catch (error) {
@@ -164,7 +168,8 @@
         const info = {
           moduleCount: window.engine.module_count(),
           cableCount: window.engine.cable_count(),
-          categories: JSON.parse(window.engine.get_categories()),
+          // get_categories() returns an array, not a JSON string
+          categories: window.engine.get_categories(),
         };
         infoEl.textContent = JSON.stringify(info, null, 2);
       } catch (error) {

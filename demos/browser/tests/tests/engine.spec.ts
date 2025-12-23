@@ -12,7 +12,8 @@ test.describe('QuiverEngine', () => {
 
   test('WASM module loads successfully', async ({ page }) => {
     const statusText = await page.locator('#status').textContent();
-    expect(statusText).toContain('WASM module loaded successfully');
+    // Status shows "All tests passed!" after inline tests complete
+    expect(statusText).toMatch(/WASM module loaded successfully|All tests passed/);
   });
 
   test('creates engine at specified sample rate', async ({ page }) => {
@@ -29,36 +30,36 @@ test.describe('QuiverEngine', () => {
   test('returns module catalog', async ({ page }) => {
     const catalog = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
-      const catalogJson = engine.get_catalog();
+      const catalog = engine.get_catalog();
       engine.free();
-      return JSON.parse(catalogJson);
+      return catalog;
     });
 
     expect(catalog.modules).toBeDefined();
     expect(Array.isArray(catalog.modules)).toBe(true);
     expect(catalog.modules.length).toBeGreaterThan(0);
 
-    // Verify essential modules exist
-    const moduleNames = catalog.modules.map((m: { name: string }) => m.name);
-    expect(moduleNames).toContain('vco');
-    expect(moduleNames).toContain('vcf');
-    expect(moduleNames).toContain('vca');
-    expect(moduleNames).toContain('adsr');
+    // Verify essential modules exist (use type_id, not display name)
+    const moduleTypeIds = catalog.modules.map((m: { type_id: string }) => m.type_id);
+    expect(moduleTypeIds).toContain('vco');
+    expect(moduleTypeIds).toContain('svf');  // 'vcf' is actually 'svf' type
+    expect(moduleTypeIds).toContain('vca');
+    expect(moduleTypeIds).toContain('adsr');
   });
 
   test('returns module categories', async ({ page }) => {
     const categories = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
-      const categoriesJson = engine.get_categories();
+      const categories = engine.get_categories();
       engine.free();
-      return JSON.parse(categoriesJson);
+      return categories;
     });
 
     expect(Array.isArray(categories)).toBe(true);
     expect(categories.length).toBeGreaterThan(0);
-    expect(categories).toContain('oscillator');
-    expect(categories).toContain('filter');
-    expect(categories).toContain('envelope');
+    expect(categories).toContain('Oscillators');
+    expect(categories).toContain('Filters');
+    expect(categories).toContain('Envelopes');
   });
 
   test('adds modules to graph', async ({ page }) => {
@@ -78,8 +79,8 @@ test.describe('QuiverEngine', () => {
       const engine = new window.QuiverEngine(44100.0);
       engine.add_module('vco', 'osc');
       engine.add_module('stereo_output', 'out');
-      engine.connect('osc:saw', 'out:left');
-      engine.connect('osc:saw', 'out:right');
+      engine.connect('osc.saw', 'out.left');
+      engine.connect('osc.saw', 'out.right');
       const cableCount = engine.cable_count();
       engine.free();
       return cableCount;
@@ -92,8 +93,8 @@ test.describe('QuiverEngine', () => {
       const engine = new window.QuiverEngine(44100.0);
       engine.add_module('vco', 'osc');
       engine.add_module('stereo_output', 'out');
-      engine.connect('osc:saw', 'out:left');
-      engine.connect('osc:saw', 'out:right');
+      engine.connect('osc.saw', 'out.left');
+      engine.connect('osc.saw', 'out.right');
       engine.compile();
       return { compiled: true };
     });
@@ -105,8 +106,9 @@ test.describe('QuiverEngine', () => {
       const engine = new window.QuiverEngine(44100.0);
       engine.add_module('vco', 'osc');
       engine.add_module('stereo_output', 'out');
-      engine.connect('osc:saw', 'out:left');
-      engine.connect('osc:saw', 'out:right');
+      engine.connect('osc.saw', 'out.left');
+      engine.connect('osc.saw', 'out.right');
+      engine.set_output('out');
       engine.compile();
       const output = engine.process_block(128);
       const result = Array.from(output);
@@ -120,17 +122,18 @@ test.describe('QuiverEngine', () => {
     expect(hasAudio).toBe(true);
   });
 
-  test('sets parameter values', async ({ page }) => {
+  test('sets parameter values via set_param', async ({ page }) => {
     const result = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
-      engine.add_module('vco', 'osc');
-      engine.set_param_by_name('osc', 'frequency', 880.0);
-      engine.set_param_by_name('osc', 'pulse_width', 0.25);
-      // Getting params would require additional API
+      engine.add_module('offset', 'offset1');
+      // Use set_param with param ID directly (more reliable)
+      engine.set_param('offset1', 0, 1.5);
+      const value = engine.get_param('offset1', 0);
       engine.free();
-      return { set: true };
+      return { set: true, value };
     });
     expect(result.set).toBe(true);
+    expect(result.value).toBe(1.5);
   });
 
   test('removes modules', async ({ page }) => {
@@ -154,7 +157,7 @@ test.describe('QuiverEngine', () => {
       engine.add_module('vco', 'osc1');
       engine.add_module('vco', 'osc2');
       engine.add_module('vca', 'amp');
-      engine.clear();
+      engine.clear_patch();
       const count = engine.module_count();
       engine.free();
       return count;
@@ -173,13 +176,16 @@ test.describe('MIDI', () => {
     const result = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
       engine.midi_note_on(60, 100);
+      // midi_note returns V/Oct where 0V = C4 (MIDI 60)
+      // So MIDI 60 -> 0V, MIDI 72 -> 1V, etc.
       const note = engine.midi_note;
       const gate = engine.midi_gate;
       engine.free();
       return { note, gate };
     });
-    expect(result.note).toBe(60);
-    expect(result.gate).toBeGreaterThan(0);
+    // MIDI note 60 (C4) = 0 V/Oct
+    expect(result.note).toBe(0);
+    expect(result.gate).toBe(true);
   });
 
   test('handles note off', async ({ page }) => {
@@ -191,29 +197,31 @@ test.describe('MIDI', () => {
       engine.free();
       return { gate };
     });
-    expect(result.gate).toBe(0);
+    expect(result.gate).toBe(false);
   });
 
   test('handles pitch bend', async ({ page }) => {
     const result = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
-      engine.midi_pitch_bend(8192); // Center position
-      const bend = engine.midi_pitch_bend;
+      engine.midi_pitch_bend(0.5); // Takes -1 to 1, not raw MIDI value
+      const bend = engine.pitch_bend; // Getter is 'pitch_bend', not 'midi_pitch_bend'
       engine.free();
       return { bend };
     });
-    expect(result.bend).toBeDefined();
+    expect(result.bend).toBe(0.5);
   });
 
   test('handles mod wheel', async ({ page }) => {
     const result = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
-      engine.midi_mod_wheel(64);
-      const mod = engine.midi_mod_wheel;
+      // Mod wheel is CC #1
+      engine.midi_cc(1, 64);
+      const mod = engine.get_midi_cc(1);
       engine.free();
       return { mod };
     });
-    expect(result.mod).toBeDefined();
+    // CC value 64 normalized to 0-1 = 64/127 ≈ 0.504
+    expect(result.mod).toBeCloseTo(64 / 127, 2);
   });
 });
 
@@ -224,17 +232,17 @@ test.describe('Patch Serialization', () => {
   });
 
   test('exports patch to JSON', async ({ page }) => {
-    const patchJson = await page.evaluate(() => {
+    const patch = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
       engine.add_module('vco', 'osc');
       engine.add_module('stereo_output', 'out');
-      engine.connect('osc:saw', 'out:left');
-      const json = engine.export_patch('Test Patch');
+      engine.connect('osc.saw', 'out.left');
+      // save_patch returns a JS object, not a string
+      const patchDef = engine.save_patch('Test Patch');
       engine.free();
-      return json;
+      return patchDef;
     });
 
-    const patch = JSON.parse(patchJson);
     expect(patch.name).toBe('Test Patch');
     expect(patch.modules).toBeDefined();
     expect(patch.cables).toBeDefined();
@@ -247,12 +255,12 @@ test.describe('Patch Serialization', () => {
       // Create and export a patch
       engine.add_module('vco', 'osc');
       engine.add_module('stereo_output', 'out');
-      engine.connect('osc:saw', 'out:left');
-      const json = engine.export_patch('Test');
+      engine.connect('osc.saw', 'out.left');
+      const patchDef = engine.save_patch('Test');
 
       // Clear and reimport
-      engine.clear();
-      engine.import_patch(json);
+      engine.clear_patch();
+      engine.load_patch(patchDef);
       const moduleCount = engine.module_count();
       engine.free();
       return { moduleCount };
@@ -277,26 +285,28 @@ interface QuiverEngineInstance {
   free(): void;
   module_count(): number;
   cable_count(): number;
-  get_catalog(): string;
-  get_categories(): string;
+  get_catalog(): { modules: { name: string; category: string }[] };
+  get_categories(): string[];
   add_module(moduleType: string, id: string): void;
   remove_module(id: string): void;
   connect(from: string, to: string): void;
+  set_output(name: string): void;
   compile(): void;
   process_block(samples: number): Float32Array;
   set_param(moduleId: string, paramIndex: number, value: number): void;
   set_param_by_name(moduleId: string, paramName: string, value: number): void;
-  clear(): void;
+  clear_patch(): void;
   midi_note_on(note: number, velocity: number): void;
   midi_note_off(note: number, velocity: number): void;
   midi_pitch_bend(value: number): void;
-  midi_mod_wheel(value: number): void;
+  midi_cc(cc: number, value: number): void;
+  get_midi_cc(cc: number): number;
   midi_note: number;
-  midi_gate: number;
-  midi_pitch_bend: number;
-  midi_mod_wheel: number;
-  export_patch(name: string): string;
-  import_patch(json: string): void;
+  midi_gate: boolean;
+  midi_velocity: number;
+  pitch_bend: number;
+  save_patch(name: string): { name: string; modules: unknown[]; cables: unknown[] };
+  load_patch(patchDef: unknown): void;
 }
 
 export {};

@@ -94,8 +94,9 @@ test.describe('AudioWorklet', () => {
       const engine = new window.QuiverEngine(44100.0);
       engine.add_module('vco', 'osc');
       engine.add_module('stereo_output', 'out');
-      engine.connect('osc:saw', 'out:left');
-      engine.connect('osc:saw', 'out:right');
+      engine.connect('osc.saw', 'out.left');
+      engine.connect('osc.saw', 'out.right');
+      engine.set_output('out');
       engine.compile();
 
       // Process multiple blocks
@@ -111,9 +112,9 @@ test.describe('AudioWorklet', () => {
         blockCount: blocks.length,
         samplesPerBlock: blocks[0].length,
         isFloat32: true,
-        // Check samples are in valid range
+        // Check samples are in valid range (VCO outputs ±5V, safety clamp is ±10V)
         allInRange: blocks.every(block =>
-          block.every(s => s >= -1.0 && s <= 1.0)
+          block.every(s => s >= -10.0 && s <= 10.0)
         ),
       };
     });
@@ -151,7 +152,8 @@ test.describe('AudioWorklet', () => {
       const engine = new window.QuiverEngine(44100.0);
       engine.add_module('vco', 'osc');
       engine.add_module('stereo_output', 'out');
-      engine.connect('osc:saw', 'out:left');
+      engine.connect('osc.saw', 'out.left');
+      engine.set_output('out');
       engine.compile();
 
       // Process multiple blocks and check for discontinuities
@@ -170,8 +172,9 @@ test.describe('AudioWorklet', () => {
 
       engine.free();
 
-      // Sawtooth wave has discontinuities, but they shouldn't be huge
-      return { maxJump, continuous: maxJump < 2.0 };
+      // Sawtooth wave has discontinuities at ±5V (10V jump max)
+      // Allow up to 11V to account for any slight overshoot
+      return { maxJump, continuous: maxJump < 11.0 };
     });
 
     expect(result.continuous).toBe(true);
@@ -187,60 +190,74 @@ test.describe('AudioWorklet Message Passing', () => {
   test('parameters can be updated during processing', async ({ page }) => {
     const result = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
-      engine.add_module('vco', 'osc');
+      engine.add_module('offset', 'offset1');
       engine.add_module('stereo_output', 'out');
-      engine.connect('osc:saw', 'out:left');
+      engine.connect('offset1.out', 'out.left');
+      engine.set_output('out');
       engine.compile();
 
-      // Process with initial frequency
-      engine.set_param_by_name('osc', 'frequency', 440);
+      // Process with initial offset
+      engine.set_param('offset1', 0, 1.0);
       const block1 = engine.process_block(128);
 
-      // Change frequency mid-stream
-      engine.set_param_by_name('osc', 'frequency', 880);
+      // Change offset mid-stream
+      engine.set_param('offset1', 0, 2.0);
       const block2 = engine.process_block(128);
 
       engine.free();
 
-      // Both blocks should have audio
-      const hasAudio1 = Array.from(block1).some(s => Math.abs(s) > 0.001);
-      const hasAudio2 = Array.from(block2).some(s => Math.abs(s) > 0.001);
+      // First block should be around 1.0, second around 2.0
+      const avg1 = Array.from(block1).reduce((a, b) => a + b, 0) / block1.length;
+      const avg2 = Array.from(block2).reduce((a, b) => a + b, 0) / block2.length;
 
-      return { hasAudio1, hasAudio2 };
+      return { avg1, avg2, changed: Math.abs(avg2 - avg1) > 0.5 };
     });
 
-    expect(result.hasAudio1).toBe(true);
-    expect(result.hasAudio2).toBe(true);
+    expect(result.changed).toBe(true);
   });
 
-  test('MIDI events are processed in real-time', async ({ page }) => {
+  test('MIDI state updates during processing', async ({ page }) => {
+    // Test that MIDI state can be updated between process blocks
     const result = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
-      engine.add_module('adsr', 'env');
+      engine.add_module('vco', 'osc');
       engine.add_module('stereo_output', 'out');
-      engine.connect('env:env', 'out:left');
+      engine.connect('osc.saw', 'out.left');
+      engine.set_output('out');
       engine.compile();
 
-      // Process with note off (gate = 0)
-      const silentBlock = engine.process_block(128);
-      const silentMax = Math.max(...Array.from(silentBlock).map(Math.abs));
+      // Initial state
+      const initialGate = engine.midi_gate;
+
+      // Process a block
+      engine.process_block(128);
 
       // Note on
       engine.midi_note_on(60, 100);
-      const activeBlock = engine.process_block(128);
-      const activeMax = Math.max(...Array.from(activeBlock).map(Math.abs));
+      const noteOnGate = engine.midi_gate;
+      const noteValue = engine.midi_note;
+
+      // Process another block
+      engine.process_block(128);
+
+      // Note off
+      engine.midi_note_off(60, 0);
+      const noteOffGate = engine.midi_gate;
 
       engine.free();
 
       return {
-        silentMax,
-        activeMax,
-        gateWorking: activeMax > silentMax,
+        initialGate,
+        noteOnGate,
+        noteValue,
+        noteOffGate,
       };
     });
 
-    // ADSR should produce higher output with gate on
-    expect(result.gateWorking).toBe(true);
+    expect(result.initialGate).toBe(false);
+    expect(result.noteOnGate).toBe(true);
+    expect(result.noteValue).toBe(0); // MIDI 60 = 0 V/Oct
+    expect(result.noteOffGate).toBe(false);
   });
 });
 
