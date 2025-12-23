@@ -903,6 +903,112 @@ impl ModuleRegistry {
             &["analog"],
             |sr| Box::new(GroundLoop::new(sr)),
         );
+
+        // =====================================================================
+        // Phase 4: Advanced DSP Modules
+        // =====================================================================
+
+        // Oscillators
+        self.register_factory_with_keywords(
+            "wavetable",
+            "Wavetable",
+            "Oscillators",
+            "Wavetable oscillator with 8 tables and morphing",
+            &["wavetable", "oscillator", "morph", "digital", "synthesis"],
+            &[],
+            |sr| Box::new(Wavetable::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "formant_osc",
+            "Formant Oscillator",
+            "Oscillators",
+            "Formant oscillator for vocal synthesis (a/e/i/o/u)",
+            &["formant", "vocal", "vowel", "voice", "speech", "oscillator"],
+            &[],
+            |sr| Box::new(FormantOsc::new(sr)),
+        );
+
+        // Effects
+        self.register_factory_with_keywords(
+            "reverb",
+            "Reverb",
+            "Effects",
+            "Algorithmic reverb (Freeverb-style) with stereo output",
+            &["reverb", "room", "hall", "space", "ambience", "freeverb"],
+            &["essential"],
+            |sr| Box::new(Reverb::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "parametric_eq",
+            "Parametric EQ",
+            "Effects",
+            "3-band parametric equalizer (low shelf, mid peak, high shelf)",
+            &["eq", "equalizer", "tone", "parametric", "shelf", "filter"],
+            &[],
+            |sr| Box::new(ParametricEq::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "vocoder",
+            "Vocoder",
+            "Effects",
+            "16-band vocoder with carrier/modulator inputs",
+            &["vocoder", "voice", "robot", "spectral", "filter", "bands"],
+            &[],
+            |sr| Box::new(Vocoder::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "pitch_shifter",
+            "Pitch Shifter",
+            "Effects",
+            "Granular pitch shifter (±24 semitones)",
+            &["pitch", "shift", "transpose", "semitone", "granular"],
+            &[],
+            |sr| Box::new(PitchShifter::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "granular",
+            "Granular",
+            "Effects",
+            "Granular synthesis/processing with 16 concurrent grains",
+            &[
+                "granular", "grain", "texture", "freeze", "clouds", "ambient",
+            ],
+            &["advanced"],
+            |sr| Box::new(Granular::new(sr)),
+        );
+
+        // Utilities
+        self.register_factory_with_keywords(
+            "chord_memory",
+            "Chord Memory",
+            "Utilities",
+            "Generate chord voicings from root note (9 chord types)",
+            &["chord", "harmony", "voicing", "major", "minor", "seventh"],
+            &[],
+            |_| Box::new(ChordMemory::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "arpeggiator",
+            "Arpeggiator",
+            "Sequencers",
+            "Pattern-based arpeggiator (up/down/up-down/random)",
+            &[
+                "arpeggiator",
+                "arp",
+                "pattern",
+                "sequence",
+                "melody",
+                "clock",
+            ],
+            &[],
+            |sr| Box::new(Arpeggiator::new(sr)),
+        );
     }
 
     /// Register a module factory with metadata

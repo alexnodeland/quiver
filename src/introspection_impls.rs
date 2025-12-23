@@ -13,10 +13,12 @@ use crate::introspection::{ControlType, ModuleIntrospection, ParamCurve, ParamIn
 
 use crate::analog::{AnalogVco, Saturator, Wavefolder};
 use crate::modules::{
-    Adsr, Attenuverter, BernoulliGate, Clock, Comparator, Crossfader, Crosstalk, DiodeLadderFilter,
-    GroundLoop, Lfo, LogicAnd, LogicNot, LogicOr, LogicXor, Max, Min, Mixer, Multiple,
-    NoiseGenerator, Offset, PrecisionAdder, Quantizer, Rectifier, RingModulator, SampleAndHold,
-    Scale, SlewLimiter, StepSequencer, StereoOutput, Svf, UnitDelay, VcSwitch, Vca, Vco,
+    Adsr, Arpeggiator, Attenuverter, BernoulliGate, ChordMemory, Clock, Comparator, Crossfader,
+    Crosstalk, DiodeLadderFilter, FormantOsc, Granular, GroundLoop, Lfo, LogicAnd, LogicNot,
+    LogicOr, LogicXor, Max, Min, Mixer, Multiple, NoiseGenerator, Offset, ParametricEq,
+    PitchShifter, PrecisionAdder, Quantizer, Rectifier, Reverb, RingModulator, SampleAndHold,
+    Scale, SlewLimiter, StepSequencer, StereoOutput, Svf, UnitDelay, VcSwitch, Vca, Vco, Vocoder,
+    Wavetable,
 };
 
 // =============================================================================
@@ -65,6 +67,17 @@ impl ModuleIntrospection for BernoulliGate {}
 // Sequencing & I/O
 impl ModuleIntrospection for Clock {}
 impl ModuleIntrospection for StereoOutput {}
+impl ModuleIntrospection for Arpeggiator {}
+
+// Phase 4: Advanced DSP Modules (all CV-controlled)
+impl ModuleIntrospection for ChordMemory {}
+impl ModuleIntrospection for ParametricEq {}
+impl ModuleIntrospection for Wavetable {}
+impl ModuleIntrospection for FormantOsc {}
+impl ModuleIntrospection for PitchShifter {}
+impl ModuleIntrospection for Reverb {}
+impl ModuleIntrospection for Vocoder {}
+impl ModuleIntrospection for Granular {}
 
 // =============================================================================
 // Modules with Parameters

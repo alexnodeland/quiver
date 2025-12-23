@@ -99,6 +99,12 @@ pub mod prelude {
     // Phase 3 Modules
     pub use crate::modules::{Crosstalk, DiodeLadderFilter, GroundLoop};
 
+    // Phase 4 Modules: Advanced DSP
+    pub use crate::modules::{
+        ArpPattern, Arpeggiator, ChordMemory, ChordType, FormantOsc, Granular, ParametricEq,
+        PitchShifter, Reverb, Vocoder, Wavetable, WavetableType,
+    };
+
     // Analog Modeling
     pub use crate::analog::{noise, saturation, AnalogVco, ComponentModel, ThermalModel};
 
