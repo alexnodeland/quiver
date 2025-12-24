@@ -72,9 +72,8 @@ schemas/                # JSON schemas for patch format
 docs/                   # mdbook documentation source
 
 packages/@quiver/       # TypeScript/React packages for WASM
-├── wasm/               # WASM bindings package
-├── types/              # TypeScript type definitions
-└── react/              # React hooks and components
+├── wasm/               # WASM bindings package (includes types.ts)
+└── react/              # React hooks and components (inlined types)
 ```
 
 ## Feature Flags
@@ -382,8 +381,7 @@ The `wasm` feature enables JavaScript bindings via `wasm-bindgen` and TypeScript
 ### TypeScript Packages
 
 The `packages/@quiver/` directory contains npm packages:
-- `@quiver/wasm` - Core WASM bindings and audio worklet
-- `@quiver/types` - TypeScript type definitions
+- `@quiver/wasm` - Core WASM bindings, TypeScript types, and audio worklet
 - `@quiver/react` - React hooks for Quiver integration
 
 ## Documentation

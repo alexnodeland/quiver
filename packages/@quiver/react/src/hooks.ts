@@ -6,39 +6,110 @@
  */
 
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import type {
-  ObservableValue,
-  SubscriptionTarget,
-  CatalogResponse,
-  ModuleCatalogEntry,
-} from '@quiver/types';
-import {
-  getObservableValueKey,
-  getSubscriptionTargetKey,
-} from '@quiver/types';
+
+// =============================================================================
+// Type Definitions (inlined to avoid monorepo resolution issues)
+// =============================================================================
+
+/** Observable value from state bridge */
+export type ObservableValue =
+  | { type: 'param'; node_id: string; param_id: string; value: number }
+  | { type: 'level'; node_id: string; port_id: number; rms_db: number; peak_db: number }
+  | { type: 'gate'; node_id: string; port_id: number; active: boolean }
+  | { type: 'scope'; node_id: string; port_id: number; samples: number[] }
+  | { type: 'spectrum'; node_id: string; port_id: number; bins: number[]; freq_range: [number, number] };
+
+/** Subscription target */
+export type SubscriptionTarget =
+  | { type: 'param'; node_id: string; param_id: string }
+  | { type: 'level'; node_id: string; port_id: number }
+  | { type: 'gate'; node_id: string; port_id: number }
+  | { type: 'scope'; node_id: string; port_id: number; buffer_size: number }
+  | { type: 'spectrum'; node_id: string; port_id: number; fft_size: number };
+
+/** Port summary for catalog */
+export interface PortSummary {
+  inputs: number;
+  outputs: number;
+  has_audio_in: boolean;
+  has_audio_out: boolean;
+}
+
+/** Module catalog entry */
+export interface ModuleCatalogEntry {
+  type_id: string;
+  name: string;
+  category: string;
+  description: string;
+  keywords: string[];
+  ports: PortSummary;
+  tags: string[];
+}
+
+/** Catalog response */
+export interface CatalogResponse {
+  modules: ModuleCatalogEntry[];
+  categories: string[];
+}
+
+/** Get a unique key for an observable value */
+export function getObservableValueKey(value: ObservableValue): string {
+  switch (value.type) {
+    case 'param':
+      return `param:${value.node_id}:${value.param_id}`;
+    case 'level':
+      return `level:${value.node_id}:${value.port_id}`;
+    case 'gate':
+      return `gate:${value.node_id}:${value.port_id}`;
+    case 'scope':
+      return `scope:${value.node_id}:${value.port_id}`;
+    case 'spectrum':
+      return `spectrum:${value.node_id}:${value.port_id}`;
+  }
+}
+
+/** Get a unique key for a subscription target */
+export function getSubscriptionTargetKey(target: SubscriptionTarget): string {
+  switch (target.type) {
+    case 'param':
+      return `param:${target.node_id}:${target.param_id}`;
+    case 'level':
+      return `level:${target.node_id}:${target.port_id}`;
+    case 'gate':
+      return `gate:${target.node_id}:${target.port_id}`;
+    case 'scope':
+      return `scope:${target.node_id}:${target.port_id}`;
+    case 'spectrum':
+      return `spectrum:${target.node_id}:${target.port_id}`;
+  }
+}
 
 /**
  * Type for the QuiverEngine WASM instance
- * This matches the API exposed by the Rust wasm-bindgen bindings
+ * This matches the API exposed by the Rust wasm-bindgen bindings in src/wasm/engine.rs
+ *
+ * Methods returning Result<JsValue, JsValue> in Rust will throw on error.
+ * The serde_wasm_bindgen serialization returns plain JS objects matching the Rust structs.
  */
 export interface QuiverEngine {
-  // Catalog
+  // Catalog & Introspection (all may throw on error)
   get_catalog(): CatalogResponse;
   search_modules(query: string): ModuleCatalogEntry[];
   get_modules_by_category(category: string): ModuleCatalogEntry[];
   get_categories(): string[];
+  get_port_spec(typeId: string): unknown;
 
-  // Signal semantics
+  // Signal semantics (may throw on error)
   get_signal_colors(): unknown;
   check_compatibility(from: string, to: string): unknown;
 
-  // Patch operations
+  // Patch operations (may throw on error)
   load_patch(patch: unknown): void;
   save_patch(name: string): unknown;
   validate_patch(patch: unknown): unknown;
   clear_patch(): void;
 
-  // Module operations
+  // Module operations (may throw on error)
   add_module(typeId: string, name: string): void;
   remove_module(name: string): void;
   set_module_position(name: string, x: number, y: number): void;
@@ -46,8 +117,9 @@ export interface QuiverEngine {
   module_count(): number;
   cable_count(): number;
   get_module_names(): string[];
+  set_output(name: string): void;
 
-  // Cable operations
+  // Cable operations (may throw on error)
   connect(from: string, to: string): void;
   connect_attenuated(from: string, to: string, attenuation: number): void;
   connect_modulated(
@@ -59,12 +131,13 @@ export interface QuiverEngine {
   disconnect(from: string, to: string): void;
   disconnect_by_index(index: number): void;
 
-  // Parameters
+  // Parameters (may throw on error)
   get_params(nodeName: string): unknown;
   set_param(nodeName: string, paramIndex: number, value: number): void;
   get_param(nodeName: string, paramIndex: number): number;
+  set_param_by_name(nodeName: string, paramName: string, value: number): void;
 
-  // Observer
+  // Observer / Real-time bridge (may throw on error)
   subscribe(targets: SubscriptionTarget[]): void;
   unsubscribe(targetIds: string[]): void;
   clear_subscriptions(): void;
@@ -72,16 +145,29 @@ export interface QuiverEngine {
   pending_update_count(): number;
 
   // Audio processing
-  tick(): [number, number];
+  tick(): Float64Array;
   process_block(numSamples: number): Float32Array;
   reset(): void;
   compile(): void;
 
-  // Port info
-  get_port_spec(typeId: string): unknown;
+  // MIDI (may throw on error for invalid values)
+  create_midi_input(): void;
+  create_midi_cc_input(cc: number): void;
+  midi_note_on(note: number, velocity: number): void;
+  midi_note_off(note: number, velocity: number): void;
+  midi_cc(cc: number, value: number): void;
+  get_midi_cc(cc: number): number;
+  midi_pitch_bend(value: number): void;
 
-  // Properties
-  sample_rate: number;
+  // Properties (getters)
+  readonly sample_rate: number;
+  readonly midi_note: number;
+  readonly midi_velocity: number;
+  readonly midi_gate: boolean;
+  readonly pitch_bend: number;
+
+  // Cleanup
+  free(): void;
 }
 
 /**

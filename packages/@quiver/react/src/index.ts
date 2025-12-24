@@ -6,161 +6,316 @@
  */
 
 import type { Node, Edge, XYPosition } from '@xyflow/react';
-import type {
-  PatchDef,
-  ModuleDef,
-  CableDef,
-  PortReference,
-  SignalKind,
-  ModuleTypeId,
-} from '@quiver/types';
-import {
-  parsePortReference,
-  createPortReference,
-  getSignalColor,
-  DEFAULT_SIGNAL_COLORS,
-} from '@quiver/types';
+
+// =============================================================================
+// Core Type Definitions (inlined to avoid monorepo resolution issues)
+// =============================================================================
+
+/** Signal type classification */
+export type SignalKind =
+  | 'Audio'
+  | 'CvBipolar'
+  | 'CvUnipolar'
+  | 'VoltPerOctave'
+  | 'Gate'
+  | 'Trigger'
+  | 'Clock';
+
+/** CSS hex color values for each signal type */
+export interface SignalColors {
+  audio: string;
+  cv_bipolar: string;
+  cv_unipolar: string;
+  volt_per_octave: string;
+  gate: string;
+  trigger: string;
+  clock: string;
+}
+
+/** Port definition */
+export interface PortDef {
+  id: number;
+  name: string;
+  kind: SignalKind;
+  default: number;
+  normalled_to?: number;
+  has_attenuverter: boolean;
+}
+
+/** Port specification for a module */
+export interface PortSpec {
+  inputs: PortDef[];
+  outputs: PortDef[];
+}
+
+/** Compatibility status for port connections */
+export type Compatibility =
+  | { status: 'exact' }
+  | { status: 'allowed' }
+  | { status: 'warning'; message: string };
+
+/** Module definition for serialization */
+export interface ModuleDef {
+  name: string;
+  module_type: string;
+  position?: [number, number];
+  state?: unknown;
+}
+
+/** Cable definition for serialization */
+export interface CableDef {
+  from: string;
+  to: string;
+  attenuation?: number;
+  offset?: number;
+}
+
+/** Patch definition for serialization */
+export interface PatchDef {
+  version: number;
+  name: string;
+  author?: string;
+  description?: string;
+  tags: string[];
+  modules: ModuleDef[];
+  cables: CableDef[];
+  parameters: Record<string, number>;
+}
+
+/** Validation error */
+export interface ValidationError {
+  path: string;
+  message: string;
+}
+
+/** Validation result */
+export interface ValidationResult {
+  valid: boolean;
+  errors: ValidationError[];
+}
+
+/** Port reference string in format 'module_name.port_name' */
+export type PortReference = `${string}.${string}`;
+
+/** Module type identifier */
+export type ModuleTypeId = string;
+
+/** Module category */
+export type ModuleCategory = string;
+
+// =============================================================================
+// Signal Colors
+// =============================================================================
+
+/** Default signal colors following modular synth conventions */
+export const DEFAULT_SIGNAL_COLORS: SignalColors = {
+  audio: '#e94560',
+  cv_bipolar: '#0f3460',
+  cv_unipolar: '#00b4d8',
+  volt_per_octave: '#90be6d',
+  gate: '#f9c74f',
+  trigger: '#f8961e',
+  clock: '#9d4edd',
+};
+
+/** Get the color for a signal kind */
+export function getSignalColor(
+  kind: SignalKind,
+  colors: SignalColors = DEFAULT_SIGNAL_COLORS
+): string {
+  const keyMap: Record<SignalKind, keyof SignalColors> = {
+    Audio: 'audio',
+    CvBipolar: 'cv_bipolar',
+    CvUnipolar: 'cv_unipolar',
+    VoltPerOctave: 'volt_per_octave',
+    Gate: 'gate',
+    Trigger: 'trigger',
+    Clock: 'clock',
+  };
+  return colors[keyMap[kind]];
+}
+
+// =============================================================================
+// Port Reference Utilities
+// =============================================================================
+
+/** Parse a port reference string into module name and port name */
+export function parsePortReference(ref: PortReference): {
+  moduleName: string;
+  portName: string;
+} {
+  const parts = ref.split('.');
+  if (parts.length !== 2) {
+    throw new Error(`Invalid port reference: ${ref}`);
+  }
+  return {
+    moduleName: parts[0],
+    portName: parts[1],
+  };
+}
+
+/** Create a port reference string from module and port names */
+export function createPortReference(
+  moduleName: string,
+  portName: string
+): PortReference {
+  return `${moduleName}.${portName}` as PortReference;
+}
+
+// =============================================================================
+// Patch Utilities
+// =============================================================================
+
+/** Create a new empty patch definition */
+export function createPatchDef(name: string): PatchDef {
+  return {
+    version: 1,
+    name,
+    author: undefined,
+    description: undefined,
+    tags: [],
+    modules: [],
+    cables: [],
+    parameters: {},
+  };
+}
+
+/** Create a new module definition */
+export function createModuleDef(
+  name: string,
+  moduleType: ModuleTypeId,
+  position?: [number, number]
+): ModuleDef {
+  return {
+    name,
+    module_type: moduleType,
+    position,
+    state: undefined,
+  };
+}
+
+/** Create a new cable definition */
+export function createCableDef(
+  from: PortReference,
+  to: PortReference,
+  options?: { attenuation?: number; offset?: number }
+): CableDef {
+  return {
+    from,
+    to,
+    attenuation: options?.attenuation,
+    offset: options?.offset,
+  };
+}
+
+// =============================================================================
+// Compatibility Checking
+// =============================================================================
+
+/** Check if two signal kinds are compatible for connection */
+export function checkPortCompatibility(
+  from: SignalKind,
+  to: SignalKind
+): Compatibility {
+  if (from === to) {
+    return { status: 'exact' };
+  }
+  if (from === 'Audio') {
+    return { status: 'allowed' };
+  }
+  if (
+    (from === 'CvBipolar' && to === 'CvUnipolar') ||
+    (from === 'CvUnipolar' && to === 'CvBipolar')
+  ) {
+    return { status: 'allowed' };
+  }
+  if (from === 'VoltPerOctave' && (to === 'CvBipolar' || to === 'CvUnipolar')) {
+    return { status: 'allowed' };
+  }
+  if ((from === 'Gate' && to === 'Trigger') || (from === 'Trigger' && to === 'Gate')) {
+    return { status: 'allowed' };
+  }
+  if ((from === 'Clock' && to === 'Gate') || (from === 'Clock' && to === 'Trigger')) {
+    return { status: 'allowed' };
+  }
+  if ((from === 'Gate' || from === 'Trigger') && to === 'Audio') {
+    return { status: 'warning', message: 'Gate/Trigger to Audio may cause clicks' };
+  }
+  if (from === 'CvBipolar' && to === 'VoltPerOctave') {
+    return { status: 'warning', message: 'CV to V/Oct may cause tuning issues' };
+  }
+  return { status: 'allowed' };
+}
 
 // =============================================================================
 // React Flow Types
 // =============================================================================
 
-/**
- * Data payload for Quiver module nodes
- */
-export interface QuiverNodeData {
-  /** Module type identifier */
-  moduleType: ModuleTypeId;
-  /** Module-specific state */
-  state?: Record<string, unknown>;
-  /** Display label (defaults to node id) */
-  label?: string;
+/** Data payload for Quiver module nodes */
+export interface QuiverNodeData extends Record<string, unknown> {
+  typeId: ModuleTypeId;
+  name: string;
+  category?: ModuleCategory;
+  inputs?: string[];
+  outputs?: string[];
 }
 
-/**
- * Data payload for Quiver cable edges
- */
-export interface QuiverEdgeData {
-  /** Source port name */
-  sourcePort: string;
-  /** Target port name */
-  targetPort: string;
-  /** Signal type for coloring */
+/** Data payload for Quiver cable edges */
+export interface QuiverEdgeData extends Record<string, unknown> {
+  fromPort: string;
+  toPort: string;
   signalKind?: SignalKind;
-  /** Attenuation value (-2.0 to 2.0) */
   attenuation?: number;
-  /** DC offset value (-10.0 to 10.0V) */
   offset?: number;
 }
 
-/**
- * Quiver-typed React Flow Node
- */
-export type QuiverNode = Node<QuiverNodeData, 'quiverModule'>;
+/** Quiver module node type for React Flow */
+export type QuiverNode = Node<QuiverNodeData, 'quiver-module'>;
 
-/**
- * Quiver-typed React Flow Edge
- */
+/** Quiver cable edge type for React Flow */
 export type QuiverEdge = Edge<QuiverEdgeData>;
 
 // =============================================================================
-// Patch to React Flow Conversion
+// Patch <-> React Flow Conversion
 // =============================================================================
 
-/**
- * Options for converting a patch to React Flow format
- */
-export interface PatchToReactFlowOptions {
-  /** Default position for modules without position data */
+export interface PatchToFlowOptions {
   defaultPosition?: XYPosition;
-  /** Spacing between modules when auto-positioning */
   moduleSpacing?: number;
-  /** Signal colors for edge styling */
-  signalColors?: typeof DEFAULT_SIGNAL_COLORS;
-  /** Callback to determine signal kind for a port */
-  getPortSignalKind?: (
-    moduleType: ModuleTypeId,
-    portName: string,
-    isOutput: boolean
-  ) => SignalKind | undefined;
 }
 
-/**
- * Result of converting a patch to React Flow format
- */
-export interface ReactFlowPatch {
-  nodes: QuiverNode[];
-  edges: QuiverEdge[];
-}
-
-/**
- * Convert a Quiver patch definition to React Flow nodes and edges
- */
+/** Convert a Quiver PatchDef to React Flow nodes and edges */
 export function patchToReactFlow(
   patch: PatchDef,
-  options: PatchToReactFlowOptions = {}
-): ReactFlowPatch {
-  const {
-    defaultPosition = { x: 0, y: 0 },
-    moduleSpacing = 250,
-    signalColors = DEFAULT_SIGNAL_COLORS,
-    getPortSignalKind,
-  } = options;
+  options: PatchToFlowOptions = {}
+): { nodes: QuiverNode[]; edges: QuiverEdge[] } {
+  const { defaultPosition = { x: 100, y: 100 }, moduleSpacing = 250 } = options;
 
-  // Convert modules to nodes
-  const nodes: QuiverNode[] = patch.modules.map((module, index) => {
-    // Auto-position if no position specified
-    const position: XYPosition = module.position
+  const nodes: QuiverNode[] = patch.modules.map((module: ModuleDef, index: number) => ({
+    id: module.name,
+    type: 'quiver-module',
+    position: module.position
       ? { x: module.position[0], y: module.position[1] }
-      : {
-          x: defaultPosition.x + (index % 4) * moduleSpacing,
-          y: defaultPosition.y + Math.floor(index / 4) * moduleSpacing,
-        };
+      : { x: defaultPosition.x + index * moduleSpacing, y: defaultPosition.y },
+    data: {
+      typeId: module.module_type,
+      name: module.name,
+    },
+  }));
 
-    return {
-      id: module.name,
-      type: 'quiverModule',
-      position,
-      data: {
-        moduleType: module.module_type,
-        state: module.state,
-        label: module.name,
-      },
-    };
-  });
-
-  // Convert cables to edges
-  const edges: QuiverEdge[] = patch.cables.map((cable, index) => {
-    const { moduleName: sourceModule, portName: sourcePort } = parsePortReference(
-      cable.from
-    );
-    const { moduleName: targetModule, portName: targetPort } = parsePortReference(
-      cable.to
-    );
-
-    // Try to determine signal kind for coloring
-    let signalKind: SignalKind | undefined;
-    if (getPortSignalKind) {
-      const sourceModuleDef = patch.modules.find((m) => m.name === sourceModule);
-      if (sourceModuleDef) {
-        signalKind = getPortSignalKind(sourceModuleDef.module_type, sourcePort, true);
-      }
-    }
+  const edges: QuiverEdge[] = patch.cables.map((cable: CableDef, index: number) => {
+    const fromParsed = parsePortReference(cable.from as PortReference);
+    const toParsed = parsePortReference(cable.to as PortReference);
 
     return {
       id: `cable-${index}`,
-      source: sourceModule,
-      sourceHandle: sourcePort,
-      target: targetModule,
-      targetHandle: targetPort,
-      type: 'default',
-      style: signalKind
-        ? { stroke: getSignalColor(signalKind, signalColors), strokeWidth: 2 }
-        : undefined,
+      source: fromParsed.moduleName,
+      target: toParsed.moduleName,
+      sourceHandle: fromParsed.portName,
+      targetHandle: toParsed.portName,
       data: {
-        sourcePort,
-        targetPort,
-        signalKind,
+        fromPort: cable.from,
+        toPort: cable.to,
         attenuation: cable.attenuation,
         offset: cable.offset,
       },
@@ -170,65 +325,39 @@ export function patchToReactFlow(
   return { nodes, edges };
 }
 
-// =============================================================================
-// React Flow to Patch Conversion
-// =============================================================================
-
-/**
- * Metadata for the patch when converting from React Flow
- */
-export interface PatchMetadata {
+export interface FlowToPatchOptions {
   name: string;
   author?: string;
   description?: string;
   tags?: string[];
 }
 
-/**
- * Convert React Flow nodes and edges back to a Quiver patch definition
- */
+/** Convert React Flow nodes and edges back to a PatchDef */
 export function reactFlowToPatch(
   nodes: QuiverNode[],
   edges: QuiverEdge[],
-  metadata: PatchMetadata
+  options: FlowToPatchOptions
 ): PatchDef {
-  // Convert nodes to modules
   const modules: ModuleDef[] = nodes.map((node) => ({
     name: node.id,
-    module_type: node.data.moduleType,
+    module_type: node.data.typeId,
     position: [node.position.x, node.position.y] as [number, number],
-    state: node.data.state,
+    state: undefined,
   }));
 
-  // Convert edges to cables
-  const cables: CableDef[] = edges.map((edge) => {
-    const from = createPortReference(
-      edge.source,
-      edge.sourceHandle || edge.data?.sourcePort || 'out'
-    );
-    const to = createPortReference(
-      edge.target,
-      edge.targetHandle || edge.data?.targetPort || 'in'
-    );
-
-    const cable: CableDef = { from, to };
-
-    if (edge.data?.attenuation !== undefined) {
-      cable.attenuation = edge.data.attenuation;
-    }
-    if (edge.data?.offset !== undefined) {
-      cable.offset = edge.data.offset;
-    }
-
-    return cable;
-  });
+  const cables: CableDef[] = edges.map((edge) => ({
+    from: edge.data?.fromPort ?? createPortReference(edge.source, edge.sourceHandle ?? ''),
+    to: edge.data?.toPort ?? createPortReference(edge.target, edge.targetHandle ?? ''),
+    attenuation: edge.data?.attenuation,
+    offset: edge.data?.offset,
+  }));
 
   return {
     version: 1,
-    name: metadata.name,
-    author: metadata.author,
-    description: metadata.description,
-    tags: metadata.tags || [],
+    name: options.name,
+    author: options.author,
+    description: options.description,
+    tags: options.tags ?? [],
     modules,
     cables,
     parameters: {},
@@ -236,143 +365,104 @@ export function reactFlowToPatch(
 }
 
 // =============================================================================
-// Utility Functions
+// React Flow Helpers
 // =============================================================================
 
-/**
- * Generate a unique module name
- */
+/** Generate a unique module name */
 export function generateModuleName(
-  moduleType: ModuleTypeId,
+  typeId: ModuleTypeId,
   existingNames: Set<string>
 ): string {
   let counter = 1;
-  let name = moduleType;
+  let name = typeId.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
   while (existingNames.has(name)) {
-    name = `${moduleType}_${counter}`;
+    name = `${typeId.toLowerCase().replace(/[^a-z0-9]/g, '_')}_${counter}`;
     counter++;
   }
 
   return name;
 }
 
-/**
- * Create a new Quiver node for adding to the graph
- */
+/** Create a new Quiver module node */
 export function createQuiverNode(
-  moduleType: ModuleTypeId,
+  typeId: ModuleTypeId,
   position: XYPosition,
   existingNames: Set<string>
 ): QuiverNode {
-  const name = generateModuleName(moduleType, existingNames);
+  const name = generateModuleName(typeId, existingNames);
 
   return {
     id: name,
-    type: 'quiverModule',
+    type: 'quiver-module',
     position,
     data: {
-      moduleType,
-      label: name,
+      typeId,
+      name,
     },
   };
 }
 
-/**
- * Create a new Quiver edge for adding to the graph
- */
+/** Create a new Quiver cable edge */
 export function createQuiverEdge(
-  sourceNode: string,
+  sourceModule: string,
   sourcePort: string,
-  targetNode: string,
+  targetModule: string,
   targetPort: string,
-  options?: {
-    signalKind?: SignalKind;
-    attenuation?: number;
-    offset?: number;
-  }
+  signalKind?: SignalKind
 ): QuiverEdge {
-  const id = `cable-${sourceNode}-${sourcePort}-${targetNode}-${targetPort}`;
-
   return {
-    id,
-    source: sourceNode,
+    id: `${sourceModule}.${sourcePort}-${targetModule}.${targetPort}`,
+    source: sourceModule,
+    target: targetModule,
     sourceHandle: sourcePort,
-    target: targetNode,
     targetHandle: targetPort,
-    style: options?.signalKind
-      ? { stroke: getSignalColor(options.signalKind), strokeWidth: 2 }
-      : undefined,
     data: {
-      sourcePort,
-      targetPort,
-      signalKind: options?.signalKind,
-      attenuation: options?.attenuation,
-      offset: options?.offset,
+      fromPort: createPortReference(sourceModule, sourcePort),
+      toPort: createPortReference(targetModule, targetPort),
+      signalKind,
     },
   };
 }
 
-/**
- * Update node positions in a patch definition
- */
-export function updatePatchPositions(
-  patch: PatchDef,
-  positions: Map<string, XYPosition>
-): PatchDef {
+/** Update module positions in a patch from React Flow nodes */
+export function updatePatchPositions(patch: PatchDef, nodes: QuiverNode[]): PatchDef {
+  const positionMap = new Map(
+    nodes.map((n) => [n.id, [n.position.x, n.position.y] as [number, number]])
+  );
+
   return {
     ...patch,
-    modules: patch.modules.map((module) => {
-      const position = positions.get(module.name);
-      if (position) {
-        return {
-          ...module,
-          position: [position.x, position.y] as [number, number],
-        };
-      }
-      return module;
-    }),
+    modules: patch.modules.map((m: ModuleDef) => ({
+      ...m,
+      position: positionMap.get(m.name) ?? m.position,
+    })),
   };
 }
 
-/**
- * Find all cables connected to a module
- */
+/** Get all cables connected to a module */
 export function getCablesForModule(
-  cables: CableDef[],
+  patch: PatchDef,
   moduleName: string
-): { incoming: CableDef[]; outgoing: CableDef[] } {
-  const incoming: CableDef[] = [];
-  const outgoing: CableDef[] = [];
-
-  for (const cable of cables) {
-    const from = parsePortReference(cable.from);
-    const to = parsePortReference(cable.to);
-
-    if (from.moduleName === moduleName) {
-      outgoing.push(cable);
-    }
-    if (to.moduleName === moduleName) {
-      incoming.push(cable);
-    }
-  }
-
-  return { incoming, outgoing };
+): CableDef[] {
+  return patch.cables.filter((c: CableDef) => {
+    const from = parsePortReference(c.from as PortReference);
+    const to = parsePortReference(c.to as PortReference);
+    return from.moduleName === moduleName || to.moduleName === moduleName;
+  });
 }
 
-/**
- * Remove a module and all its cables from a patch
- */
+/** Remove a module and its cables from a patch */
 export function removeModuleFromPatch(
   patch: PatchDef,
   moduleName: string
 ): PatchDef {
   return {
     ...patch,
-    modules: patch.modules.filter((m) => m.name !== moduleName),
-    cables: patch.cables.filter((c) => {
-      const from = parsePortReference(c.from);
-      const to = parsePortReference(c.to);
+    modules: patch.modules.filter((m: ModuleDef) => m.name !== moduleName),
+    cables: patch.cables.filter((c: CableDef) => {
+      const from = parsePortReference(c.from as PortReference);
+      const to = parsePortReference(c.to as PortReference);
       return from.moduleName !== moduleName && to.moduleName !== moduleName;
     }),
   };
@@ -385,6 +475,14 @@ export function removeModuleFromPatch(
 export {
   // Types
   type QuiverEngine,
+  type ObservableValue,
+  type SubscriptionTarget,
+  type CatalogResponse,
+  type ModuleCatalogEntry,
+  type PortSummary,
+  // Functions
+  getObservableValueKey,
+  getSubscriptionTargetKey,
   // Hooks
   useQuiverUpdates,
   useQuiverParam,
@@ -395,37 +493,3 @@ export {
   useQuiverPatch,
   useQuiverEngine,
 } from './hooks';
-
-// =============================================================================
-// Re-exports from @quiver/types
-// =============================================================================
-
-export {
-  // Types
-  type PatchDef,
-  type ModuleDef,
-  type CableDef,
-  type PortReference,
-  type SignalKind,
-  type ModuleTypeId,
-  type ModuleCategory,
-  type ModuleMetadata,
-  type PortDef,
-  type PortSpec,
-  type SignalColors,
-  type Compatibility,
-  type ValidationResult,
-  type ValidationError,
-  // Constants
-  SIGNAL_KINDS,
-  DEFAULT_SIGNAL_COLORS,
-  // Functions
-  parsePortReference,
-  createPortReference,
-  createPatchDef,
-  createModuleDef,
-  createCableDef,
-  getSignalColor,
-  checkPortCompatibility,
-  validatePatchDef,
-} from '@quiver/types';

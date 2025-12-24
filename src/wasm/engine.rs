@@ -1,12 +1,14 @@
 //! QuiverEngine - Main WASM interface for Quiver audio engine
 
 use crate::graph::{NodeId, Patch};
+use crate::io::{AtomicF64, ExternalInput};
 use crate::observer::{StateObserver, SubscriptionTarget};
 use crate::port::{ports_compatible, SignalColors, SignalKind};
 use crate::serialize::{ModuleRegistry, PatchDef};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use wasm_bindgen::prelude::*;
 
@@ -17,12 +19,15 @@ pub struct QuiverEngine {
     registry: ModuleRegistry,
     observer: StateObserver,
     sample_rate: f64,
-    // MIDI state for worklet integration
-    midi_note: Option<f64>,
-    midi_velocity: Option<f64>,
-    midi_gate: bool,
-    midi_cc_values: [f64; 128],
-    midi_pitch_bend_value: f64,
+    // MIDI state with atomic values for routing to ExternalInput modules
+    midi_voct: Arc<AtomicF64>,
+    midi_velocity_val: Arc<AtomicF64>,
+    midi_gate_val: Arc<AtomicF64>,
+    midi_pitch_bend_val: Arc<AtomicF64>,
+    midi_mod_wheel: Arc<AtomicF64>,
+    midi_cc_values: [Arc<AtomicF64>; 128],
+    // Track which MIDI inputs have been created
+    midi_inputs_created: bool,
 }
 
 #[wasm_bindgen]
@@ -33,16 +38,22 @@ impl QuiverEngine {
         // Initialize panic hook for better error messages
         console_error_panic_hook::set_once();
 
+        // Initialize CC array with Arc<AtomicF64>
+        let midi_cc_values: [Arc<AtomicF64>; 128] =
+            core::array::from_fn(|_| Arc::new(AtomicF64::new(0.0)));
+
         Self {
             patch: Patch::new(sample_rate),
             registry: ModuleRegistry::new(),
             observer: StateObserver::new(),
             sample_rate,
-            midi_note: None,
-            midi_velocity: None,
-            midi_gate: false,
-            midi_cc_values: [0.0; 128],
-            midi_pitch_bend_value: 0.0,
+            midi_voct: Arc::new(AtomicF64::new(0.0)),
+            midi_velocity_val: Arc::new(AtomicF64::new(0.0)),
+            midi_gate_val: Arc::new(AtomicF64::new(0.0)),
+            midi_pitch_bend_val: Arc::new(AtomicF64::new(0.0)),
+            midi_mod_wheel: Arc::new(AtomicF64::new(0.0)),
+            midi_cc_values,
+            midi_inputs_created: false,
         }
     }
 
@@ -463,10 +474,16 @@ impl QuiverEngine {
     ///
     /// Output is safety-clamped to ±10V to prevent speaker/hearing damage
     /// from runaway signals or edge cases.
+    ///
+    /// This method also collects samples for observer subscriptions (Level, Scope,
+    /// Spectrum) to enable accurate block-based metering.
     pub fn process_block(&mut self, num_samples: usize) -> js_sys::Float32Array {
         const SAFETY_LIMIT: f64 = 10.0; // Max output voltage
 
         let output = js_sys::Float32Array::new_with_length((num_samples * 2) as u32);
+
+        // Collect samples for observer during processing
+        let mut observer_samples: Vec<(f32, f32)> = Vec::with_capacity(num_samples);
 
         for i in 0..num_samples {
             let (left, right) = self.patch.tick();
@@ -475,10 +492,13 @@ impl QuiverEngine {
             let right_safe = right.clamp(-SAFETY_LIMIT, SAFETY_LIMIT);
             output.set_index((i * 2) as u32, left_safe as f32);
             output.set_index((i * 2 + 1) as u32, right_safe as f32);
+
+            // Collect for observer
+            observer_samples.push((left_safe as f32, right_safe as f32));
         }
 
-        // Collect observer updates after processing
-        self.observer.collect_from_patch(&self.patch);
+        // Pass full block to observer for accurate metering
+        self.observer.collect_block(&observer_samples, &self.patch);
 
         output
     }
@@ -499,71 +519,150 @@ impl QuiverEngine {
     // MIDI Support for Worklet Integration
     // =========================================================================
 
+    /// Create MIDI input modules in the patch
+    ///
+    /// This adds four modules to the patch that output MIDI CV signals:
+    /// - `midi_voct`: V/Oct pitch output (0V = C4)
+    /// - `midi_gate`: Gate signal (0V or 5V)
+    /// - `midi_velocity`: Velocity CV (0-10V)
+    /// - `midi_pitch_bend`: Pitch bend CV (±2 semitones as V/Oct)
+    ///
+    /// These modules are automatically updated when MIDI messages are received
+    /// via `midi_note_on`, `midi_note_off`, and `midi_pitch_bend`.
+    ///
+    /// Call this once after creating the engine, before building your patch.
+    pub fn create_midi_input(&mut self) -> Result<(), JsValue> {
+        if self.midi_inputs_created {
+            return Err(JsValue::from_str("MIDI inputs already created"));
+        }
+
+        // Create ExternalInput modules connected to our atomic values
+        let voct_input = ExternalInput::voct(Arc::clone(&self.midi_voct));
+        let gate_input = ExternalInput::gate(Arc::clone(&self.midi_gate_val));
+        let velocity_input = ExternalInput::cv(Arc::clone(&self.midi_velocity_val));
+        let pitch_bend_input = ExternalInput::cv_bipolar(Arc::clone(&self.midi_pitch_bend_val));
+        let mod_wheel_input = ExternalInput::cv(Arc::clone(&self.midi_mod_wheel));
+
+        // Add them to the patch
+        self.patch.add_boxed("midi_voct", Box::new(voct_input));
+        self.patch.add_boxed("midi_gate", Box::new(gate_input));
+        self.patch
+            .add_boxed("midi_velocity", Box::new(velocity_input));
+        self.patch
+            .add_boxed("midi_pitch_bend", Box::new(pitch_bend_input));
+        self.patch
+            .add_boxed("midi_mod_wheel", Box::new(mod_wheel_input));
+
+        self.midi_inputs_created = true;
+        Ok(())
+    }
+
+    /// Create a MIDI CC input module
+    ///
+    /// Creates an external input module for a specific MIDI CC number.
+    /// The module is named `midi_cc_{cc}` and outputs 0-10V CV.
+    pub fn create_midi_cc_input(&mut self, cc: u8) -> Result<(), JsValue> {
+        if cc >= 128 {
+            return Err(JsValue::from_str("CC number must be 0-127"));
+        }
+
+        let name = format!("midi_cc_{}", cc);
+        let cc_input = ExternalInput::cv(Arc::clone(&self.midi_cc_values[cc as usize]));
+        self.patch.add_boxed(&name, Box::new(cc_input));
+        Ok(())
+    }
+
     /// Handle a MIDI Note On message
     ///
-    /// This is a convenience method for AudioWorklet MIDI handling.
-    /// The note and velocity are normalized to the typical synth CV ranges.
+    /// Updates the MIDI input modules with the new note values.
+    /// The note is converted to V/Oct (0V = C4, 1V = C5).
+    /// Velocity is normalized to 0-10V range.
     pub fn midi_note_on(&mut self, note: u8, velocity: u8) -> Result<(), JsValue> {
         // Convert MIDI note to V/Oct (0V = C4, 1V = C5)
         let v_oct = (note as f64 - 60.0) / 12.0;
-        // Convert velocity to 0-1 range
-        let vel = velocity as f64 / 127.0;
+        // Convert velocity to 0-10V range (modular standard)
+        let vel = (velocity as f64 / 127.0) * 10.0;
 
-        // These would typically be connected to external inputs
-        // For now, just store them for retrieval
-        self.midi_note = Some(v_oct);
-        self.midi_velocity = Some(vel);
-        self.midi_gate = true;
+        // Update atomic values - these automatically propagate to ExternalInput modules
+        self.midi_voct.set(v_oct);
+        self.midi_velocity_val.set(vel);
+        self.midi_gate_val.set(5.0); // Gate high (5V)
 
         Ok(())
     }
 
     /// Handle a MIDI Note Off message
+    ///
+    /// Sets the gate to 0V. Note and velocity values are preserved.
     pub fn midi_note_off(&mut self, _note: u8, _velocity: u8) -> Result<(), JsValue> {
-        self.midi_gate = false;
+        self.midi_gate_val.set(0.0); // Gate low
         Ok(())
     }
 
     /// Get the current MIDI note as V/Oct (for connecting to VCO)
     #[wasm_bindgen(getter)]
     pub fn midi_note(&self) -> f64 {
-        self.midi_note.unwrap_or(0.0)
+        self.midi_voct.get()
     }
 
-    /// Get the current MIDI velocity (0-1)
+    /// Get the current MIDI velocity (0-10V)
     #[wasm_bindgen(getter)]
     pub fn midi_velocity(&self) -> f64 {
-        self.midi_velocity.unwrap_or(0.0)
+        self.midi_velocity_val.get()
     }
 
     /// Get the current MIDI gate state
     #[wasm_bindgen(getter)]
     pub fn midi_gate(&self) -> bool {
-        self.midi_gate
+        self.midi_gate_val.get() > 2.5 // Threshold at 2.5V
     }
 
     /// Handle a MIDI Control Change message
+    ///
+    /// Updates the CC value. If a CC input module was created with
+    /// `create_midi_cc_input`, it will automatically receive this value.
+    /// CC 1 (mod wheel) also updates the `midi_mod_wheel` input.
     pub fn midi_cc(&mut self, cc: u8, value: u8) -> Result<(), JsValue> {
-        // Store CC values for retrieval
-        self.midi_cc_values[cc as usize] = value as f64 / 127.0;
+        if cc >= 128 {
+            return Err(JsValue::from_str("CC number must be 0-127"));
+        }
+
+        // Convert to 0-10V range
+        let cv_value = (value as f64 / 127.0) * 10.0;
+        self.midi_cc_values[cc as usize].set(cv_value);
+
+        // Special handling for mod wheel (CC 1)
+        if cc == 1 {
+            self.midi_mod_wheel.set(cv_value);
+        }
+
         Ok(())
     }
 
-    /// Get a MIDI CC value (0-1 normalized)
+    /// Get a MIDI CC value (0-10V)
     pub fn get_midi_cc(&self, cc: u8) -> f64 {
-        self.midi_cc_values.get(cc as usize).copied().unwrap_or(0.0)
+        self.midi_cc_values
+            .get(cc as usize)
+            .map(|v| v.get())
+            .unwrap_or(0.0)
     }
 
-    /// Handle a MIDI Pitch Bend message (-1 to 1)
+    /// Handle a MIDI Pitch Bend message
+    ///
+    /// Value should be in the range -1.0 to 1.0.
+    /// This is converted to V/Oct (±2 semitones by default).
     pub fn midi_pitch_bend(&mut self, value: f64) -> Result<(), JsValue> {
-        self.midi_pitch_bend_value = value;
+        // Convert to V/Oct: ±2 semitones = ±2/12 V = ±0.167V
+        let bend_semitones = 2.0; // Standard pitch bend range
+        let v_oct = value * (bend_semitones / 12.0);
+        self.midi_pitch_bend_val.set(v_oct);
         Ok(())
     }
 
-    /// Get the current pitch bend value (-1 to 1)
+    /// Get the current pitch bend value as V/Oct
     #[wasm_bindgen(getter)]
     pub fn pitch_bend(&self) -> f64 {
-        self.midi_pitch_bend_value
+        self.midi_pitch_bend_val.get()
     }
 
     // =========================================================================

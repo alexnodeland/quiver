@@ -1,6 +1,12 @@
 // Quiver Browser Synth - Polyphonic Version with Enhanced Visualizations
 // Retro-futuristic modular synthesizer demo
-import init, { QuiverEngine } from '../../../packages/@quiver/wasm/quiver.js';
+//
+// Audio Architecture:
+// This demo currently uses ScriptProcessorNode for compatibility.
+// For production use with lower latency, use AudioManager from @quiver/wasm
+// which provides a SharedArrayBuffer-based AudioWorklet implementation.
+// See: packages/@quiver/wasm/src/audio-manager.ts
+import init, { QuiverEngine } from '@quiver/wasm/quiver';
 
 const NUM_VOICES = 4;
 const FFT_SIZE = 256;
@@ -30,6 +36,11 @@ let scopeIndex = 0;
 let peakL = 0;
 let peakR = 0;
 let peakDecay = 0.95;
+
+// Error recovery state
+let consecutiveErrors = 0;
+const MAX_CONSECUTIVE_ERRORS = 10;
+let audioErrorShown = false;
 
 // FFT data for spectrum analyzer
 let frequencyData = new Uint8Array(FFT_SIZE / 2);
@@ -126,6 +137,7 @@ function createSynthPatch(engine: QuiverEngine) {
     addModule('svf', `filter_${i}`);
     addModule('adsr', `env_${i}`);
     addModule('vca', `amp_${i}`);
+    addModule('vca', `filter_env_vca_${i}`); // VCA to scale envelope for filter
     addModule('offset', `pitch_${i}`);
     addModule('offset', `gate_${i}`);
   }
@@ -139,6 +151,7 @@ function createSynthPatch(engine: QuiverEngine) {
   addModule('offset', 'detune_knob');
   addModule('offset', 'cutoff_knob');
   addModule('offset', 'resonance_knob');
+  addModule('offset', 'filter_env_amt'); // Filter envelope amount knob
   addModule('mixer', 'voice_mixer');
 
   // Chorus effect for stereo width
@@ -165,6 +178,11 @@ function createSynthPatch(engine: QuiverEngine) {
     connect('resonance_knob.out', `filter_${i}.res`);
     connect(`env_${i}.env`, `amp_${i}.cv`);
     connect(`amp_${i}.out`, `voice_mixer.ch${i}`);
+
+    // Filter envelope modulation: envelope -> VCA -> filter fm
+    connect(`env_${i}.env`, `filter_env_vca_${i}.in`);
+    connect('filter_env_amt.out', `filter_env_vca_${i}.cv`);
+    connect(`filter_env_vca_${i}.out`, `filter_${i}.fm`);
   }
 
   // Route through chorus for stereo width
@@ -187,6 +205,7 @@ function createSynthPatch(engine: QuiverEngine) {
   engine.set_param('detune_knob', 0, 0.0);
   engine.set_param('cutoff_knob', 0, hzToCV(2000));
   engine.set_param('resonance_knob', 0, 0.3);
+  engine.set_param('filter_env_amt', 0, hzToCV(3000)); // Default filter env amount
 
   // Chorus defaults
   engine.set_param('chorus_rate', 0, 0.3);   // ~1Hz LFO rate
@@ -253,12 +272,102 @@ function createScriptProcessor(ctx: AudioContext): ScriptProcessorNode {
       peakL = Math.max(maxL, peakL * peakDecay);
       peakR = Math.max(maxR, peakR * peakDecay);
 
+      // Reset error counter on successful processing
+      consecutiveErrors = 0;
+
     } catch (error) {
       console.error('Audio processing error:', error);
+      consecutiveErrors++;
+
+      // Output silence to prevent audio artifacts
+      const leftOut = e.outputBuffer.getChannelData(0);
+      const rightOut = e.outputBuffer.getChannelData(1);
+      leftOut.fill(0);
+      rightOut.fill(0);
+
+      // Show error UI after too many consecutive errors
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS && !audioErrorShown) {
+        audioErrorShown = true;
+        isRunning = false;
+        showAudioError('Audio engine error. Click to restart.');
+      }
     }
   };
 
   return processor;
+}
+
+// Show audio error toast with restart option
+function showAudioError(message: string) {
+  // Remove existing toast if any
+  const existing = document.getElementById('audio-error-toast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.id = 'audio-error-toast';
+  toast.style.cssText = `
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: linear-gradient(135deg, #ff4444, #cc0000);
+    color: white;
+    padding: 16px 24px;
+    border-radius: 8px;
+    cursor: pointer;
+    z-index: 10000;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    box-shadow: 0 4px 20px rgba(255, 0, 0, 0.4);
+    animation: slideUp 0.3s ease-out;
+  `;
+  toast.textContent = message;
+  toast.onclick = restartAudio;
+
+  // Add animation keyframes if not already present
+  if (!document.getElementById('toast-animation-style')) {
+    const style = document.createElement('style');
+    style.id = 'toast-animation-style';
+    style.textContent = `
+      @keyframes slideUp {
+        from { transform: translateX(-50%) translateY(100px); opacity: 0; }
+        to { transform: translateX(-50%) translateY(0); opacity: 1; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  document.body.appendChild(toast);
+}
+
+// Restart audio after error
+async function restartAudio() {
+  // Remove error toast
+  const toast = document.getElementById('audio-error-toast');
+  if (toast) toast.remove();
+
+  // Reset error state
+  consecutiveErrors = 0;
+  audioErrorShown = false;
+
+  // Reset and recompile the engine
+  if (engine) {
+    try {
+      engine.reset();
+      engine.compile();
+      isRunning = true;
+
+      // Update UI
+      const statusEl = document.getElementById('status');
+      if (statusEl) {
+        statusEl.className = 'running';
+        statusEl.textContent = `Active // ${NUM_VOICES} Voice Polyphony`;
+      }
+    } catch (error) {
+      console.error('Failed to restart audio:', error);
+      showAudioError('Failed to restart. Please reload the page.');
+    }
+  }
 }
 
 // Start audio
@@ -736,8 +845,9 @@ function setupControls() {
   bindSlider('resonance', (v) => {
     if (engine) engine.set_param('resonance_knob', 0, v);
   });
-  bindSlider('filterEnv', () => {
-    // TODO: Filter envelope amount needs VCA module
+  bindSlider('filterEnv', (hz) => {
+    // Filter envelope amount controls how much the envelope opens the filter
+    if (engine) engine.set_param('filter_env_amt', 0, hzToCV(hz));
   });
 
   // Chorus controls

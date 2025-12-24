@@ -20,8 +20,10 @@
     "build": "tsup src/index.ts --format cjs,esm --dts",
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
     "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "check-types": "npx tsx scripts/check-type-sync.ts",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "pnpm run build"
   },
   "keywords": [
     "quiver",
@@ -44,17 +46,18 @@
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "@quiver/types": "workspace:*"
-  },
   "peerDependencies": {
+    "@quiver/wasm": ">=0.1.0",
     "@xyflow/react": ">=12.0.0",
     "react": ">=18.0.0"
   },
   "devDependencies": {
+    "@quiver/wasm": "workspace:*",
+    "@types/node": "^20.0.0",
     "@types/react": "^18.0.0",
     "@xyflow/react": "^12.0.0",
     "react": "^18.0.0",
+    "tsx": "^4.7.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0"
   }

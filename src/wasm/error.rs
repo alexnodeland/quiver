@@ -40,3 +40,10 @@ impl From<&str> for QuiverError {
         }
     }
 }
+
+impl QuiverError {
+    /// Convert to JsValue for use as error return
+    pub fn into_js(self) -> JsValue {
+        JsValue::from_str(&self.message)
+    }
+}

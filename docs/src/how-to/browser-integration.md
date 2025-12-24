@@ -4,13 +4,12 @@ This guide explains how to integrate Quiver into your browser application using 
 
 ## Overview
 
-Quiver provides three npm packages for browser integration:
+Quiver provides two npm packages for browser integration:
 
 | Package | Purpose |
 |---------|---------|
-| `@quiver/wasm` | Core WASM engine and AudioWorklet utilities |
+| `@quiver/wasm` | Core WASM engine, TypeScript types, and AudioWorklet utilities |
 | `@quiver/react` | React hooks for UI integration |
-| `@quiver/types` | TypeScript type definitions |
 
 ## Installation
 

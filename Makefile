@@ -160,7 +160,7 @@ wasm-check:
 # Check TypeScript compilation
 ts-check:
 	@echo "Checking TypeScript..."
-	@cd packages/@quiver/types && npx tsc --noEmit 2>/dev/null || (npm install --silent && npx tsc --noEmit)
+	pnpm run typecheck
 	@echo "TypeScript OK"
 
 # Run browser tests with Playwright

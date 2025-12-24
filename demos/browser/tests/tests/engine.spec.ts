@@ -293,11 +293,12 @@ test.describe('MIDI', () => {
     const result = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
       engine.midi_pitch_bend(0.5); // Takes -1 to 1, not raw MIDI value
-      const bend = engine.pitch_bend; // Getter is 'pitch_bend', not 'midi_pitch_bend'
+      const bend = engine.pitch_bend; // Returns V/Oct (±2 semitones)
       engine.free();
       return { bend };
     });
-    expect(result.bend).toBe(0.5);
+    // Input 0.5 is converted to V/Oct: 0.5 * (2/12) ≈ 0.0833
+    expect(result.bend).toBeCloseTo(0.5 * (2 / 12), 3);
   });
 
   test('handles mod wheel', async ({ page }) => {
@@ -309,8 +310,8 @@ test.describe('MIDI', () => {
       engine.free();
       return { mod };
     });
-    // CC value 64 normalized to 0-1 = 64/127 ≈ 0.504
-    expect(result.mod).toBeCloseTo(64 / 127, 2);
+    // CC value 64 normalized to 0-10V = (64/127) * 10 ≈ 5.04
+    expect(result.mod).toBeCloseTo((64 / 127) * 10, 2);
   });
 });
 

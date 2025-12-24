@@ -1,0 +1,10 @@
+# PNPM Workspace Configuration
+# This enables pnpm's workspace features for the monorepo
+
+packages:
+  # Core TypeScript packages
+  - 'packages/@quiver/*'
+
+  # Demo applications
+  - 'demos/browser'
+  - 'demos/browser/tests'
