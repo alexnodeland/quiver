@@ -44,15 +44,10 @@ jobs:
           cache: 'pnpm'
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build types package
-        run: pnpm --filter @quiver/types build
       - name: TypeScript check
         run: |
-          pnpm --filter @quiver/types run typecheck
           pnpm --filter @quiver/react run typecheck
           pnpm --filter @quiver/demo-browser-synth run typecheck
-      - name: Check type compatibility
-        run: pnpm --filter @quiver/types check-types
 
   # Main test job
   test:

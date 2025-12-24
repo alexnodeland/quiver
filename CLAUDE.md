@@ -382,8 +382,7 @@ The `wasm` feature enables JavaScript bindings via `wasm-bindgen` and TypeScript
 ### TypeScript Packages
 
 The `packages/@quiver/` directory contains npm packages:
-- `@quiver/wasm` - Core WASM bindings and audio worklet
-- `@quiver/types` - TypeScript type definitions
+- `@quiver/wasm` - Core WASM bindings, TypeScript types, and audio worklet
 - `@quiver/react` - React hooks for Quiver integration
 
 ## Documentation

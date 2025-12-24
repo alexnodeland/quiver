@@ -5,9 +5,9 @@ React hooks and utilities for integrating Quiver audio synthesis into React appl
 ## Installation
 
 ```bash
-npm install @quiver/react @quiver/wasm @quiver/types
+npm install @quiver/react @quiver/wasm
 # or
-pnpm add @quiver/react @quiver/wasm @quiver/types
+pnpm add @quiver/react @quiver/wasm
 ```
 
 ## Quick Start
@@ -225,7 +225,7 @@ function SimpleSynth() {
 
 ## Re-exports
 
-This package re-exports common types and functions from `@quiver/types`:
+This package re-exports common types and functions from `@quiver/wasm`:
 
 ```typescript
 import {
@@ -235,7 +235,6 @@ import {
   type CableDef,
   type SignalKind,
   // Constants
-  SIGNAL_KINDS,
   DEFAULT_SIGNAL_COLORS,
   // Functions
   parsePortReference,

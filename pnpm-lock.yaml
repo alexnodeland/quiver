@@ -50,10 +50,6 @@ importers:
         version: 5.4.21(@types/node@20.19.27)
 
   packages/@quiver/react:
-    dependencies:
-      '@quiver/types':
-        specifier: workspace:*
-        version: link:../types
     devDependencies:
       '@quiver/wasm':
         specifier: workspace:*
@@ -70,18 +66,6 @@ importers:
       tsup:
         specifier: ^8.0.0
         version: 8.5.1(postcss@8.5.6)(tsx@4.21.0)(typescript@5.9.3)
-      typescript:
-        specifier: ^5.0.0
-        version: 5.9.3
-
-  packages/@quiver/types:
-    devDependencies:
-      tsup:
-        specifier: ^8.0.0
-        version: 8.5.1(postcss@8.5.6)(tsx@4.21.0)(typescript@5.9.3)
-      tsx:
-        specifier: ^4.0.0
-        version: 4.21.0
       typescript:
         specifier: ^5.0.0
         version: 5.9.3
@@ -2257,6 +2241,7 @@ snapshots:
   get-tsconfig@4.13.0:
     dependencies:
       resolve-pkg-maps: 1.0.0
+    optional: true
 
   glob-parent@5.1.2:
     dependencies:
@@ -2457,7 +2442,8 @@ snapshots:
 
   resolve-from@5.0.0: {}
 
-  resolve-pkg-maps@1.0.0: {}
+  resolve-pkg-maps@1.0.0:
+    optional: true
 
   reusify@1.1.0: {}
 
@@ -2595,6 +2581,7 @@ snapshots:
       get-tsconfig: 4.13.0
     optionalDependencies:
       fsevents: 2.3.3
+    optional: true
 
   turbo-darwin-64@2.7.2:
     optional: true

@@ -6,16 +6,83 @@
  */
 
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import type {
-  ObservableValue,
-  SubscriptionTarget,
-  CatalogResponse,
-  ModuleCatalogEntry,
-} from '@quiver/types';
-import {
-  getObservableValueKey,
-  getSubscriptionTargetKey,
-} from '@quiver/types';
+
+// =============================================================================
+// Type Definitions (inlined to avoid monorepo resolution issues)
+// =============================================================================
+
+/** Observable value from state bridge */
+export type ObservableValue =
+  | { type: 'param'; node_id: string; param_id: string; value: number }
+  | { type: 'level'; node_id: string; port_id: number; rms_db: number; peak_db: number }
+  | { type: 'gate'; node_id: string; port_id: number; active: boolean }
+  | { type: 'scope'; node_id: string; port_id: number; samples: number[] }
+  | { type: 'spectrum'; node_id: string; port_id: number; bins: number[]; freq_range: [number, number] };
+
+/** Subscription target */
+export type SubscriptionTarget =
+  | { type: 'param'; node_id: string; param_id: string }
+  | { type: 'level'; node_id: string; port_id: number }
+  | { type: 'gate'; node_id: string; port_id: number }
+  | { type: 'scope'; node_id: string; port_id: number; buffer_size: number }
+  | { type: 'spectrum'; node_id: string; port_id: number; fft_size: number };
+
+/** Port summary for catalog */
+export interface PortSummary {
+  inputs: number;
+  outputs: number;
+  has_audio_in: boolean;
+  has_audio_out: boolean;
+}
+
+/** Module catalog entry */
+export interface ModuleCatalogEntry {
+  type_id: string;
+  name: string;
+  category: string;
+  description: string;
+  keywords: string[];
+  ports: PortSummary;
+  tags: string[];
+}
+
+/** Catalog response */
+export interface CatalogResponse {
+  modules: ModuleCatalogEntry[];
+  categories: string[];
+}
+
+/** Get a unique key for an observable value */
+export function getObservableValueKey(value: ObservableValue): string {
+  switch (value.type) {
+    case 'param':
+      return `param:${value.node_id}:${value.param_id}`;
+    case 'level':
+      return `level:${value.node_id}:${value.port_id}`;
+    case 'gate':
+      return `gate:${value.node_id}:${value.port_id}`;
+    case 'scope':
+      return `scope:${value.node_id}:${value.port_id}`;
+    case 'spectrum':
+      return `spectrum:${value.node_id}:${value.port_id}`;
+  }
+}
+
+/** Get a unique key for a subscription target */
+export function getSubscriptionTargetKey(target: SubscriptionTarget): string {
+  switch (target.type) {
+    case 'param':
+      return `param:${target.node_id}:${target.param_id}`;
+    case 'level':
+      return `level:${target.node_id}:${target.port_id}`;
+    case 'gate':
+      return `gate:${target.node_id}:${target.port_id}`;
+    case 'scope':
+      return `scope:${target.node_id}:${target.port_id}`;
+    case 'spectrum':
+      return `spectrum:${target.node_id}:${target.port_id}`;
+  }
+}
 
 /**
  * Type for the QuiverEngine WASM instance
