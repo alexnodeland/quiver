@@ -24,7 +24,7 @@ src/
 ├── combinator.rs       # Arrow-style module combinators (Chain, Parallel, Fanout)
 ├── graph.rs            # Patch graph for visual patching
 ├── port.rs             # Port system with SignalKind, PortDef, PortSpec
-├── modules.rs          # All DSP modules (VCO, VCF, VCA, ADSR, LFO, etc.)
+├── modules.rs          # All DSP modules (VCO, VCF, VCA, ADSR, LFO, effects, etc.)
 ├── analog.rs           # Analog modeling (drift, saturation, thermal)
 ├── polyphony.rs        # Voice allocation, PolyPatch, unison
 ├── simd.rs             # SIMD block processing, AudioBlock, RingBuffer
@@ -32,6 +32,7 @@ src/
 ├── io.rs               # External I/O (AtomicF64, ExternalInput) [alloc]
 ├── observer.rs         # Real-time state bridge for GUIs [alloc]
 ├── introspection.rs    # GUI parameter discovery [alloc]
+├── introspection_impls.rs  # ModuleIntrospection implementations [alloc]
 ├── serialize.rs        # JSON serialization, ModuleRegistry [alloc]
 ├── presets.rs          # Preset library [alloc]
 ├── extended_io.rs      # OSC, WebAudio [std]
@@ -42,15 +43,38 @@ src/
     ├── engine.rs
     └── error.rs
 
+examples/               # Runnable Rust example patches
+├── quick_taste.rs          # Minimal getting-started example
+├── first_patch.rs          # First patch tutorial
+├── simple_patch.rs         # Simple patch demonstration
+├── tutorial_subtractive.rs # Subtractive synthesis tutorial
+├── tutorial_envelope.rs    # Envelope usage tutorial
+├── tutorial_filter_mod.rs  # Filter modulation tutorial
+├── tutorial_fm.rs          # FM synthesis tutorial
+├── tutorial_polyphony.rs   # Polyphony tutorial
+├── tutorial_sequenced_bass.rs  # Sequenced bass tutorial
+├── howto_custom_module.rs  # Creating custom modules
+├── howto_midi.rs           # MIDI integration
+├── howto_serialization.rs  # Save/load patches
+└── howto_visualization.rs  # Visual tools usage
+
 demos/                  # Full working demo applications
 └── browser/            # Browser synth demo (WASM + TypeScript)
-    └── tests/          # Playwright E2E tests
+    ├── src/            # TypeScript source
+    ├── tests/          # Playwright E2E tests
+    └── dist/           # Built assets
 
-examples/               # Runnable Rust example patches
 benches/                # Criterion benchmarks for real-time validation
+├── audio_performance.rs
+
 schemas/                # JSON schemas for patch format
+
 docs/                   # mdbook documentation source
+
 packages/@quiver/       # TypeScript/React packages for WASM
+├── wasm/               # WASM bindings package
+├── types/              # TypeScript type definitions
+└── react/              # React hooks and components
 ```
 
 ## Feature Flags
@@ -75,21 +99,58 @@ make setup
 # Run all checks (format, lint, test) - USE BEFORE COMMITTING
 make check
 
-# Individual commands
+# Building
 make build          # Build with all features
+make release        # Build in release mode
+
+# Testing
 make test           # Run all tests
-make fmt            # Format code
-make lint           # Run clippy
+make test-verbose   # Run tests with output
+make test-doc       # Run documentation tests only
 make coverage       # Run tests with coverage (80% line threshold required)
+make coverage-html  # Generate HTML coverage report
 make bench          # Run benchmarks
+make bench-test     # Run benchmark tests only (no actual benchmarking)
+
+# Browser Testing (Playwright E2E)
+make test-browser       # Run browser tests (Chromium only)
+make test-browser-all   # Run browser tests (all browsers)
+
+# Code Quality
+make fmt            # Format code
+make fmt-check      # Check formatting without modifying
+make lint           # Run clippy
+make lint-fix       # Fix clippy issues automatically
 
 # Documentation
 make doc            # Build and open rustdoc
+make doc-build      # Build rustdoc only
 make doc-book       # Build mdbook documentation
+make doc-serve      # Serve mdbook documentation locally
 
 # WASM
 make wasm           # Build WASM package (release)
+make wasm-dev       # Build WASM package (development, faster)
 make wasm-check     # Check WASM compilation
+make ts-check       # Check TypeScript compilation
+
+# Examples
+make examples       # Build all examples
+make quick-taste    # Run quick_taste example
+make run-example NAME=<name>  # Run specific example
+
+# Demos
+make browser-synth  # Run browser synth demo
+make demo           # Alias for browser-synth
+
+# Watching (requires cargo-watch)
+make watch          # Watch and run tests on changes
+make watch-check    # Watch and check on changes
+
+# Utilities
+make changelog      # Generate changelog (requires git-cliff)
+make clean          # Clean build artifacts
+make help           # Show all available commands
 ```
 
 ## Code Quality Requirements
@@ -103,6 +164,7 @@ make wasm-check     # Check WASM compilation
 ### Linting
 - **Clippy**: `cargo clippy --all-features -- -D warnings` (warnings are errors)
 - **Formatting**: `cargo fmt --all` (uses `rustfmt.toml` config)
+  - Edition: 2021
   - Max line width: 100 characters
   - Tab spaces: 4
   - Unix newlines
@@ -134,11 +196,14 @@ docs(readme): update installation instructions
 ## Key Types and Patterns
 
 ### Module Trait
-All DSP modules implement the `Module` trait:
+All DSP modules implement the `GraphModule` trait:
 ```rust
-pub trait Module {
+pub trait GraphModule {
+    fn port_spec(&self) -> &PortSpec;
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues);
-    fn port_spec(&self) -> PortSpec;
+    fn reset(&mut self) { }
+    fn set_sample_rate(&mut self, _sample_rate: f64) { }
+    fn type_id(&self) -> &'static str;
 }
 ```
 
@@ -203,6 +268,7 @@ On every PR:
 - Tests (`cargo test --all-features`)
 - Examples build and run
 - Documentation build (with `-D warnings`)
+- Browser tests (Playwright E2E with Chromium)
 
 On main branch only (expensive checks):
 - MSRV check (Rust 1.78)
@@ -211,15 +277,82 @@ On main branch only (expensive checks):
 
 ## Common Module Types
 
-**Oscillators**: `Vco`, `AnalogVco`, `Lfo`, `NoiseGenerator`
-**Filters**: `Svf` (state-variable), `DiodeLadderFilter`
-**Envelopes**: `Adsr`
-**Amplifiers**: `Vca`, `Mixer`
-**Utilities**: `Attenuverter`, `Offset`, `Multiple`, `SlewLimiter`, `Quantizer`
-**Logic/CV**: `Comparator`, `LogicAnd/Or/Xor/Not`, `Min`, `Max`
-**Sequencing**: `Clock`, `StepSequencer`, `SampleAndHold`
-**Effects**: `RingModulator`, `Crossfader`, `Rectifier`
-**Analog artifacts**: `Crosstalk`, `GroundLoop` (for analog modeling)
+### Oscillators
+- `Vco` - Multi-waveform VCO with V/Oct, FM, PWM, hard sync
+- `AnalogVco` - VCO with analog modeling (drift, saturation)
+- `Lfo` - Low-frequency oscillator for modulation
+- `NoiseGenerator` - White/pink noise source
+- `Supersaw` - Supersaw oscillator with detuned voices
+- `Wavetable` - Wavetable oscillator with morphing
+- `FormantOsc` - Formant oscillator for vocal sounds
+- `KarplusStrong` - Physical modeling string synthesis
+
+### Filters
+- `Svf` - State-variable filter (LP, HP, BP, Notch)
+- `DiodeLadderFilter` - Analog-modeled ladder filter
+
+### Envelopes & Dynamics
+- `Adsr` - Attack-Decay-Sustain-Release envelope
+- `EnvelopeFollower` - Amplitude follower
+- `Compressor` - Dynamic range compressor
+- `Limiter` - Brick-wall limiter
+- `NoiseGate` - Noise gate
+
+### Amplifiers & Mixers
+- `Vca` - Voltage-controlled amplifier
+- `Mixer` - Multi-channel mixer
+- `Attenuverter` - Attenuate and/or invert
+- `Offset` - Add DC offset
+
+### Effects
+- `Chorus` - Chorus effect with modulated delay
+- `Flanger` - Flanger effect
+- `Phaser` - Phaser effect
+- `Tremolo` - Amplitude modulation tremolo
+- `Vibrato` - Pitch modulation vibrato
+- `Distortion` - Various distortion algorithms
+- `Bitcrusher` - Bit depth and sample rate reduction
+- `Reverb` - Algorithmic reverb
+- `PitchShifter` - Pitch shifting
+- `Vocoder` - Channel vocoder
+- `Granular` - Granular synthesis/processing
+- `RingModulator` - Ring modulation
+- `Crossfader` - Crossfade between inputs
+
+### Delays
+- `DelayLine` - Delay line with feedback
+- `UnitDelay` - Single-sample delay
+
+### Utilities
+- `SlewLimiter` - Slew rate limiter (portamento)
+- `Quantizer` - Pitch quantizer
+- `ScaleQuantizer` - Musical scale quantizer
+- `SampleAndHold` - Sample and hold
+- `Multiple` - Signal splitter
+- `Rectifier` - Full/half-wave rectifier
+- `PrecisionAdder` - Precision CV adder
+- `ParametricEq` - Parametric equalizer
+
+### Logic & CV
+- `Comparator` - Voltage comparator
+- `LogicAnd`, `LogicOr`, `LogicXor`, `LogicNot` - Logic gates
+- `Min`, `Max` - Min/max selectors
+- `VcSwitch` - Voltage-controlled switch
+- `BernoulliGate` - Probabilistic gate
+
+### Sequencing
+- `Clock` - Clock generator
+- `StepSequencer` - Step sequencer
+- `Euclidean` - Euclidean rhythm generator
+- `Arpeggiator` - Arpeggiator with patterns
+- `ChordMemory` - Chord memory/spreader
+
+### Analog Artifacts
+- `Crosstalk` - Channel crosstalk simulation
+- `GroundLoop` - Ground loop hum simulation
+
+### Output
+- `StereoOutput` - Stereo output module
 
 ## Patch Serialization
 
@@ -240,10 +373,18 @@ Schema available at `schemas/patch.schema.json`.
 For WebAssembly targets:
 ```bash
 make wasm-check     # Verify WASM compilation
-make wasm           # Build WASM package
+make wasm           # Build WASM package (release)
+make wasm-dev       # Build WASM package (development)
 ```
 
 The `wasm` feature enables JavaScript bindings via `wasm-bindgen` and TypeScript types via `tsify`.
+
+### TypeScript Packages
+
+The `packages/@quiver/` directory contains npm packages:
+- `@quiver/wasm` - Core WASM bindings and audio worklet
+- `@quiver/types` - TypeScript type definitions
+- `@quiver/react` - React hooks for Quiver integration
 
 ## Documentation
 
