@@ -764,6 +764,421 @@ function handleResize() {
   }
 }
 
+// Web MIDI API support
+let midiAccess: MIDIAccess | null = null;
+
+async function setupMIDI() {
+  if (!navigator.requestMIDIAccess) {
+    console.log('Web MIDI API not supported');
+    return;
+  }
+
+  try {
+    midiAccess = await navigator.requestMIDIAccess();
+    console.log('MIDI access granted');
+
+    // Connect to all available inputs
+    midiAccess.inputs.forEach((input) => {
+      console.log(`MIDI input: ${input.name}`);
+      input.onmidimessage = handleMIDIMessage;
+    });
+
+    // Watch for new devices
+    midiAccess.onstatechange = (e) => {
+      const port = e.port as MIDIInput;
+      if (port.type === 'input') {
+        if (port.state === 'connected') {
+          console.log(`MIDI input connected: ${port.name}`);
+          port.onmidimessage = handleMIDIMessage;
+        }
+      }
+    };
+
+    updateMIDIStatus();
+  } catch (error) {
+    console.error('MIDI access denied:', error);
+  }
+}
+
+function handleMIDIMessage(event: MIDIMessageEvent) {
+  const [status, data1, data2] = event.data as Uint8Array;
+  const _channel = status & 0x0f; // Unused but kept for future channel filtering
+  const command = status & 0xf0;
+
+  switch (command) {
+    case 0x90: // Note on
+      if (data2 > 0) {
+        noteOn(data1);
+        // Also update engine's MIDI state for API coverage
+        if (engine) {
+          try {
+            engine.midi_note_on(data1, data2);
+          } catch (e) {
+            // Ignore if not supported
+          }
+        }
+      } else {
+        noteOff(data1);
+        if (engine) {
+          try {
+            engine.midi_note_off(data1, 0);
+          } catch (e) {
+            // Ignore if not supported
+          }
+        }
+      }
+      break;
+
+    case 0x80: // Note off
+      noteOff(data1);
+      if (engine) {
+        try {
+          engine.midi_note_off(data1, data2);
+        } catch (e) {
+          // Ignore if not supported
+        }
+      }
+      break;
+
+    case 0xe0: // Pitch bend
+      const bendValue = ((data2 << 7) | data1) / 8192 - 1; // -1 to 1
+      if (engine) {
+        try {
+          engine.midi_pitch_bend(bendValue);
+          // Apply pitch bend to all voices (±2 semitones)
+          const bendSemitones = bendValue * 2 / 12; // ±2 semitones in V/Oct
+          for (let i = 0; i < NUM_VOICES; i++) {
+            if (voices[i].active && voices[i].note !== null) {
+              const baseVOct = (voices[i].note! - 60) / 12.0;
+              engine.set_param(`pitch_${i}`, 0, baseVOct + bendSemitones);
+            }
+          }
+        } catch (e) {
+          // Ignore if not supported
+        }
+      }
+      break;
+
+    case 0xb0: // Control change
+      if (engine) {
+        try {
+          engine.midi_cc(data1, data2);
+
+          // Mod wheel (CC1) controls filter cutoff
+          if (data1 === 1) {
+            const modValue = data2 / 127;
+            const cutoffHz = 200 + modValue * 15000; // 200Hz to 15kHz
+            const hzToCV = (hz: number) => Math.log10(hz / 20) / 3;
+            engine.set_param('cutoff_knob', 0, hzToCV(cutoffHz));
+
+            // Update the slider UI
+            const cutoffSlider = document.getElementById('cutoff') as HTMLInputElement;
+            const cutoffValue = document.getElementById('cutoffValue');
+            if (cutoffSlider) {
+              cutoffSlider.value = String(cutoffHz);
+              if (cutoffValue) {
+                cutoffValue.textContent = cutoffHz >= 1000 ? `${(cutoffHz / 1000).toFixed(1)}k` : `${Math.round(cutoffHz)}`;
+              }
+            }
+          }
+        } catch (e) {
+          // Ignore if not supported
+        }
+      }
+      break;
+  }
+}
+
+function updateMIDIStatus() {
+  const midiIndicator = document.getElementById('midiStatus');
+  if (!midiIndicator) return;
+
+  if (!midiAccess) {
+    midiIndicator.textContent = 'No MIDI';
+    midiIndicator.className = 'midi-status disconnected';
+    return;
+  }
+
+  let inputCount = 0;
+  midiAccess.inputs.forEach(() => inputCount++);
+
+  if (inputCount > 0) {
+    midiIndicator.textContent = `MIDI: ${inputCount} device${inputCount > 1 ? 's' : ''}`;
+    midiIndicator.className = 'midi-status connected';
+  } else {
+    midiIndicator.textContent = 'MIDI: Ready';
+    midiIndicator.className = 'midi-status ready';
+  }
+}
+
+// Patch save/load functionality
+function setupPatchControls() {
+  const saveBtn = document.getElementById('savePatch');
+  const loadInput = document.getElementById('loadPatchInput') as HTMLInputElement;
+  const patchNameInput = document.getElementById('patchName') as HTMLInputElement;
+  const patchError = document.getElementById('patchError');
+
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
+      if (!engine) {
+        if (patchError) patchError.textContent = 'Engine not initialized';
+        return;
+      }
+
+      try {
+        const patchName = patchNameInput?.value || 'My Synth';
+        const patchDef = engine.save_patch(patchName);
+
+        // Download as JSON file
+        const blob = new Blob([JSON.stringify(patchDef, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${patchName.replace(/[^a-z0-9]/gi, '_')}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        if (patchError) patchError.textContent = '';
+      } catch (error) {
+        console.error('Save patch error:', error);
+        if (patchError) patchError.textContent = `Save failed: ${(error as Error).message}`;
+      }
+    });
+  }
+
+  if (loadInput) {
+    loadInput.addEventListener('change', async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file || !engine) {
+        if (patchError) patchError.textContent = 'No file or engine not ready';
+        return;
+      }
+
+      try {
+        const text = await file.text();
+        const patchDef = JSON.parse(text);
+
+        // Validate the patch before loading
+        const validation = engine.validate_patch(patchDef);
+        if (!validation.valid) {
+          if (patchError) patchError.textContent = `Invalid patch: ${validation.errors?.join(', ') || 'Unknown error'}`;
+          return;
+        }
+
+        // Clear and load
+        engine.clear_patch();
+        engine.load_patch(patchDef);
+        engine.compile();
+        engine.reset();
+
+        // Update patch name input
+        if (patchNameInput && patchDef.name) {
+          patchNameInput.value = patchDef.name;
+        }
+
+        // Update stats
+        const statModules = document.getElementById('statModules');
+        const statCables = document.getElementById('statCables');
+        if (statModules) statModules.textContent = String(engine.module_count());
+        if (statCables) statCables.textContent = String(engine.cable_count());
+
+        if (patchError) patchError.textContent = '';
+      } catch (error) {
+        console.error('Load patch error:', error);
+        if (patchError) patchError.textContent = `Load failed: ${(error as Error).message}`;
+      }
+
+      // Reset file input
+      loadInput.value = '';
+    });
+  }
+}
+
+// Module browser state
+interface ModuleInfo {
+  type_id: string;
+  name: string;
+  category?: string;
+}
+
+let allModules: ModuleInfo[] = [];
+let currentCategory = 'all';
+let selectedModule: ModuleInfo | null = null;
+let catalogEngine: QuiverEngine | null = null;
+
+// Setup module browser panel
+function setupModuleBrowser() {
+  const searchInput = document.getElementById('moduleSearch') as HTMLInputElement;
+  const categoryTabs = document.getElementById('categoryTabs');
+  const moduleList = document.getElementById('moduleList');
+  const moduleInfo = document.getElementById('moduleInfo');
+  const moduleInfoTitle = document.getElementById('moduleInfoTitle');
+  const moduleInputs = document.getElementById('moduleInputs');
+  const moduleOutputs = document.getElementById('moduleOutputs');
+
+  // Create a temporary engine for catalog browsing (catalog is static, no audio needed)
+  const loadModules = () => {
+    try {
+      // Create a temporary engine just for catalog access
+      if (!catalogEngine) {
+        catalogEngine = new QuiverEngine(44100.0);
+      }
+
+      // Get catalog - it's an object with { modules: [...], categories: [...] }
+      const catalog = catalogEngine.get_catalog();
+      const categories = catalog.categories || catalogEngine.get_categories();
+      const modules = catalog.modules || [];
+
+      console.log('Categories loaded:', categories);
+      console.log('Modules loaded:', modules.length);
+
+      // Build category tabs
+      if (categoryTabs) {
+        categoryTabs.innerHTML = '<button class="category-tab active" data-category="all">All</button>';
+        categories.forEach((cat: string) => {
+          const btn = document.createElement('button');
+          btn.className = 'category-tab';
+          btn.setAttribute('data-category', cat);
+          btn.textContent = cat;
+          categoryTabs.appendChild(btn);
+        });
+
+        // Category tab click handler
+        categoryTabs.addEventListener('click', (e) => {
+          const target = e.target as HTMLElement;
+          if (target.classList.contains('category-tab')) {
+            categoryTabs.querySelectorAll('.category-tab').forEach(t => t.classList.remove('active'));
+            target.classList.add('active');
+            currentCategory = target.getAttribute('data-category') || 'all';
+            renderModuleList(filterModules());
+          }
+        });
+      }
+
+      // Map modules to our format
+      allModules = modules.map((m: { type_id: string; name: string; category?: string }) => ({
+        type_id: m.type_id,
+        name: m.name,
+        category: m.category
+      }));
+
+      // Initial render - show all modules
+      renderModuleList(allModules);
+
+    } catch (error) {
+      console.error('Error loading modules:', error);
+      if (moduleList) {
+        moduleList.innerHTML = '<div class="module-item"><div class="module-name">Error loading modules</div></div>';
+      }
+    }
+  };
+
+  // Filter modules based on category first, then search
+  const filterModules = (): ModuleInfo[] => {
+    const searchQuery = searchInput?.value.toLowerCase().trim() || '';
+    let filtered = [...allModules];
+
+    // Step 1: Filter by category first
+    if (currentCategory !== 'all') {
+      filtered = filtered.filter(m => m.category === currentCategory);
+    }
+
+    // Step 2: Then filter by search term within the category
+    if (searchQuery) {
+      filtered = filtered.filter(m =>
+        m.name.toLowerCase().includes(searchQuery) ||
+        m.type_id.toLowerCase().includes(searchQuery)
+      );
+    }
+
+    return filtered;
+  };
+
+  // Render module list
+  const renderModuleList = (modules: ModuleInfo[]) => {
+    if (!moduleList) return;
+
+    if (modules.length === 0) {
+      moduleList.innerHTML = '<div class="module-item"><div class="module-name">No modules found</div></div>';
+      return;
+    }
+
+    moduleList.innerHTML = modules.map(m => `
+      <div class="module-item" data-type-id="${m.type_id}">
+        <div class="module-name">${m.name}</div>
+        <div class="module-type">${m.type_id}</div>
+      </div>
+    `).join('');
+
+    // Add click handlers
+    moduleList.querySelectorAll('.module-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const typeId = item.getAttribute('data-type-id');
+        if (typeId) {
+          selectModule(typeId);
+          moduleList.querySelectorAll('.module-item').forEach(i => i.classList.remove('selected'));
+          item.classList.add('selected');
+        }
+      });
+    });
+  };
+
+  // Select a module and show its port info
+  const selectModule = (typeId: string) => {
+    // Use catalogEngine for port spec lookup (it's always available)
+    const engineToUse = catalogEngine || engine;
+    if (!engineToUse) return;
+
+    try {
+      const portSpec = engineToUse.get_port_spec(typeId);
+      selectedModule = allModules.find(m => m.type_id === typeId) || null;
+
+      if (moduleInfo) moduleInfo.classList.add('visible');
+      if (moduleInfoTitle) moduleInfoTitle.textContent = selectedModule?.name || typeId;
+
+      // Render inputs
+      if (moduleInputs) {
+        if (portSpec.inputs && portSpec.inputs.length > 0) {
+          moduleInputs.innerHTML = portSpec.inputs.map((p: { name: string; signal_kind?: string }) => `
+            <div class="port-item">${p.name}<span class="port-type">${p.signal_kind || ''}</span></div>
+          `).join('');
+        } else {
+          moduleInputs.innerHTML = '<div class="port-item" style="color: var(--text-dim);">None</div>';
+        }
+      }
+
+      // Render outputs
+      if (moduleOutputs) {
+        if (portSpec.outputs && portSpec.outputs.length > 0) {
+          moduleOutputs.innerHTML = portSpec.outputs.map((p: { name: string; signal_kind?: string }) => `
+            <div class="port-item">${p.name}<span class="port-type">${p.signal_kind || ''}</span></div>
+          `).join('');
+        } else {
+          moduleOutputs.innerHTML = '<div class="port-item" style="color: var(--text-dim);">None</div>';
+        }
+      }
+    } catch (error) {
+      console.error('Error getting port spec:', error);
+    }
+  };
+
+  // Search input handler with debounce
+  let searchTimeout: number;
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      clearTimeout(searchTimeout);
+      searchTimeout = window.setTimeout(() => {
+        renderModuleList(filterModules());
+      }, 150);
+    });
+  }
+
+  // Initial load
+  loadModules();
+}
+
 // Initialize
 async function main() {
   console.log('Initializing Quiver Browser Synth...');
@@ -771,6 +1186,9 @@ async function main() {
   setupKeyboard();
   setupVisualizationModes();
   setupControls();
+  setupPatchControls();
+  setupModuleBrowser();
+  setupMIDI();
   startBtn.addEventListener('click', startAudio);
   window.addEventListener('resize', handleResize);
 

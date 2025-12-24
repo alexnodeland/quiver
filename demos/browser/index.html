@@ -250,6 +250,50 @@
       box-shadow: 0 0 10px #ff3366;
     }
 
+    /* MIDI status indicator */
+    .midi-status {
+      font-size: 0.65rem;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      padding: 6px 12px;
+      border-radius: 4px;
+      background: var(--bg-panel);
+      border: 1px solid rgba(255,255,255,0.1);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .midi-status::before {
+      content: '';
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+
+    .midi-status.disconnected {
+      color: var(--text-dim);
+    }
+
+    .midi-status.disconnected::before {
+      background: #666;
+    }
+
+    .midi-status.ready::before {
+      background: var(--neon-cyan);
+      box-shadow: 0 0 8px var(--neon-cyan);
+      animation: blink 1s ease-in-out infinite;
+    }
+
+    .midi-status.connected {
+      color: #00ff88;
+    }
+
+    .midi-status.connected::before {
+      background: #00ff88;
+      box-shadow: 0 0 8px #00ff88;
+    }
+
     @keyframes blink {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.4; }
@@ -890,6 +934,237 @@
     .compact-panel.envelope h2::before { background: var(--neon-purple); box-shadow: 0 0 8px var(--neon-purple); }
     .compact-panel.chorus h2::before { background: var(--neon-pink); box-shadow: 0 0 8px var(--neon-pink); }
     .compact-panel.output h2::before { background: var(--neon-orange); box-shadow: 0 0 8px var(--neon-orange); }
+    .compact-panel.patch h2::before { background: #00ff88; box-shadow: 0 0 8px #00ff88; }
+
+    /* Patch controls */
+    .patch-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .patch-name-row input {
+      width: 100%;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      padding: 10px 12px;
+      background: var(--bg-dark);
+      color: var(--text-primary);
+      border: 1px solid rgba(0, 255, 136, 0.2);
+      border-radius: 6px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .patch-name-row input:focus {
+      border-color: #00ff88;
+      box-shadow: 0 0 15px rgba(0, 255, 136, 0.2);
+    }
+
+    .patch-buttons {
+      display: flex;
+      gap: 8px;
+    }
+
+    .patch-btn {
+      flex: 1;
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.7rem;
+      font-weight: 500;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      text-align: center;
+      padding: 10px 15px;
+      border: 1px solid rgba(0, 255, 136, 0.3);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      background: transparent;
+      color: var(--text-primary);
+    }
+
+    .patch-btn:hover {
+      border-color: #00ff88;
+      box-shadow: 0 0 15px rgba(0, 255, 136, 0.3);
+      color: #00ff88;
+    }
+
+    .patch-btn.save {
+      background: rgba(0, 255, 136, 0.1);
+    }
+
+    .patch-error {
+      font-size: 0.65rem;
+      color: #ff3366;
+      min-height: 1.2em;
+    }
+
+    /* Module Browser Panel */
+    .compact-panel.browser h2::before { background: #4d4dff; box-shadow: 0 0 8px #4d4dff; }
+
+    .module-search {
+      margin-bottom: 12px;
+    }
+
+    .module-search input {
+      width: 100%;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      padding: 8px 12px;
+      background: var(--bg-dark);
+      color: var(--text-primary);
+      border: 1px solid rgba(77, 77, 255, 0.2);
+      border-radius: 6px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .module-search input:focus {
+      border-color: #4d4dff;
+      box-shadow: 0 0 15px rgba(77, 77, 255, 0.2);
+    }
+
+    .module-search input::placeholder {
+      color: var(--text-dim);
+    }
+
+    .category-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+
+    .category-tab {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.55rem;
+      letter-spacing: 0.5px;
+      padding: 4px 8px;
+      background: transparent;
+      color: var(--text-dim);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 3px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-transform: uppercase;
+    }
+
+    .category-tab:hover, .category-tab.active {
+      color: #4d4dff;
+      border-color: #4d4dff;
+      box-shadow: 0 0 8px rgba(77, 77, 255, 0.3);
+    }
+
+    .module-list {
+      max-height: 200px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(77, 77, 255, 0.3) transparent;
+    }
+
+    .module-list::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .module-list::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .module-list::-webkit-scrollbar-thumb {
+      background: rgba(77, 77, 255, 0.3);
+      border-radius: 2px;
+    }
+
+    .module-item {
+      padding: 8px 10px;
+      margin-bottom: 4px;
+      background: var(--bg-dark);
+      border-radius: 4px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .module-item:hover {
+      border-color: rgba(77, 77, 255, 0.3);
+      background: rgba(77, 77, 255, 0.05);
+    }
+
+    .module-item.selected {
+      border-color: #4d4dff;
+      box-shadow: 0 0 8px rgba(77, 77, 255, 0.2);
+    }
+
+    .module-name {
+      font-size: 0.7rem;
+      font-weight: 500;
+      color: var(--text-primary);
+      margin-bottom: 2px;
+    }
+
+    .module-type {
+      font-size: 0.55rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .module-info {
+      margin-top: 12px;
+      padding: 10px;
+      background: var(--bg-dark);
+      border-radius: 4px;
+      border: 1px solid rgba(77, 77, 255, 0.1);
+      display: none;
+    }
+
+    .module-info.visible {
+      display: block;
+    }
+
+    .module-info-title {
+      font-size: 0.65rem;
+      font-weight: 500;
+      color: #4d4dff;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .module-ports {
+      display: flex;
+      gap: 16px;
+    }
+
+    .port-column {
+      flex: 1;
+    }
+
+    .port-column h4 {
+      font-size: 0.55rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+
+    .port-list {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .port-item {
+      font-size: 0.6rem;
+      color: var(--text-primary);
+      padding: 2px 0;
+    }
+
+    .port-item .port-type {
+      font-size: 0.5rem;
+      color: var(--text-dim);
+      margin-left: 4px;
+    }
 
     .compact-controls {
       display: flex;
@@ -1026,6 +1301,7 @@
       </div>
       <div class="status-group">
         <div id="status" class="loading">Initializing WASM Module...</div>
+        <div id="midiStatus" class="midi-status disconnected">No MIDI</div>
         <button id="start" disabled>Initialize Audio</button>
       </div>
     </header>
@@ -1233,6 +1509,51 @@
               <label>Volume</label>
               <input type="range" id="volume" min="0" max="1" step="0.01" value="0.5">
               <span class="value" id="volumeValue">50%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Patch Management -->
+        <div class="compact-panel patch">
+          <h2>Patch</h2>
+          <div class="patch-controls">
+            <div class="patch-name-row">
+              <input type="text" id="patchName" placeholder="Patch name..." value="My Synth">
+            </div>
+            <div class="patch-buttons">
+              <button id="savePatch" class="patch-btn save">Save</button>
+              <label class="patch-btn load" for="loadPatchInput">Load</label>
+              <input type="file" id="loadPatchInput" accept=".json" style="display: none;">
+            </div>
+            <div id="patchError" class="patch-error"></div>
+          </div>
+        </div>
+
+        <!-- Module Browser -->
+        <div class="compact-panel browser">
+          <h2>Module Browser</h2>
+          <div class="module-search">
+            <input type="text" id="moduleSearch" placeholder="Search modules...">
+          </div>
+          <div class="category-tabs" id="categoryTabs">
+            <button class="category-tab active" data-category="all">All</button>
+          </div>
+          <div class="module-list" id="moduleList">
+            <div class="module-item" data-loading>
+              <div class="module-name">Loading modules...</div>
+            </div>
+          </div>
+          <div class="module-info" id="moduleInfo">
+            <div class="module-info-title" id="moduleInfoTitle"></div>
+            <div class="module-ports">
+              <div class="port-column">
+                <h4>Inputs</h4>
+                <div class="port-list" id="moduleInputs"></div>
+              </div>
+              <div class="port-column">
+                <h4>Outputs</h4>
+                <div class="port-list" id="moduleOutputs"></div>
+              </div>
             </div>
           </div>
         </div>
