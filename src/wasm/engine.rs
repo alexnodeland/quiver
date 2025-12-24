@@ -17,6 +17,12 @@ pub struct QuiverEngine {
     registry: ModuleRegistry,
     observer: StateObserver,
     sample_rate: f64,
+    // MIDI state for worklet integration
+    midi_note: Option<f64>,
+    midi_velocity: Option<f64>,
+    midi_gate: bool,
+    midi_cc_values: [f64; 128],
+    midi_pitch_bend_value: f64,
 }
 
 #[wasm_bindgen]
@@ -32,6 +38,11 @@ impl QuiverEngine {
             registry: ModuleRegistry::new(),
             observer: StateObserver::new(),
             sample_rate,
+            midi_note: None,
+            midi_velocity: None,
+            midi_gate: false,
+            midi_cc_values: [0.0; 128],
+            midi_pitch_bend_value: 0.0,
         }
     }
 
@@ -176,6 +187,19 @@ impl QuiverEngine {
     /// Get the number of cables in the patch
     pub fn cable_count(&self) -> usize {
         self.patch.cable_count()
+    }
+
+    /// Set the output module (required for audio output)
+    ///
+    /// The specified module's outputs will be read as the patch's stereo output.
+    /// Port 0 is left channel, port 1 is right channel.
+    pub fn set_output(&mut self, name: &str) -> Result<(), JsValue> {
+        let node_id = self
+            .get_node_id_by_name(name)
+            .ok_or_else(|| JsValue::from_str(&format!("Unknown module: {}", name)))?;
+
+        self.patch.set_output(node_id);
+        Ok(())
     }
 
     // =========================================================================
@@ -351,6 +375,42 @@ impl QuiverEngine {
             .ok_or_else(|| JsValue::from_str(&format!("Param {} not found", param_index)))
     }
 
+    /// Set a parameter value by name
+    ///
+    /// This is a convenience method that looks up the parameter index by name.
+    pub fn set_param_by_name(
+        &mut self,
+        node_name: &str,
+        param_name: &str,
+        value: f64,
+    ) -> Result<(), JsValue> {
+        // Find the module and get its param definitions
+        let param_id = self
+            .patch
+            .nodes()
+            .find(|(_, name, _)| *name == node_name)
+            .and_then(|(_, _, module)| {
+                module
+                    .params()
+                    .iter()
+                    .find(|p| p.name == param_name)
+                    .map(|p| p.id)
+            })
+            .ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "Unknown parameter '{}' on module '{}'",
+                    param_name, node_name
+                ))
+            })?;
+
+        // Set the parameter
+        let node_id = self
+            .get_node_id_by_name(node_name)
+            .ok_or_else(|| JsValue::from_str(&format!("Unknown module: {}", node_name)))?;
+        self.patch.set_param(node_id, param_id, value);
+        Ok(())
+    }
+
     // =========================================================================
     // Real-Time Bridge API
     // =========================================================================
@@ -400,13 +460,21 @@ impl QuiverEngine {
     }
 
     /// Process a block of samples and return interleaved stereo Float32Array
+    ///
+    /// Output is safety-clamped to ±10V to prevent speaker/hearing damage
+    /// from runaway signals or edge cases.
     pub fn process_block(&mut self, num_samples: usize) -> js_sys::Float32Array {
+        const SAFETY_LIMIT: f64 = 10.0; // Max output voltage
+
         let output = js_sys::Float32Array::new_with_length((num_samples * 2) as u32);
 
         for i in 0..num_samples {
             let (left, right) = self.patch.tick();
-            output.set_index((i * 2) as u32, left as f32);
-            output.set_index((i * 2 + 1) as u32, right as f32);
+            // Safety clamp to prevent dangerous audio levels
+            let left_safe = left.clamp(-SAFETY_LIMIT, SAFETY_LIMIT);
+            let right_safe = right.clamp(-SAFETY_LIMIT, SAFETY_LIMIT);
+            output.set_index((i * 2) as u32, left_safe as f32);
+            output.set_index((i * 2 + 1) as u32, right_safe as f32);
         }
 
         // Collect observer updates after processing
@@ -425,6 +493,77 @@ impl QuiverEngine {
         self.patch
             .compile()
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
+    }
+
+    // =========================================================================
+    // MIDI Support for Worklet Integration
+    // =========================================================================
+
+    /// Handle a MIDI Note On message
+    ///
+    /// This is a convenience method for AudioWorklet MIDI handling.
+    /// The note and velocity are normalized to the typical synth CV ranges.
+    pub fn midi_note_on(&mut self, note: u8, velocity: u8) -> Result<(), JsValue> {
+        // Convert MIDI note to V/Oct (0V = C4, 1V = C5)
+        let v_oct = (note as f64 - 60.0) / 12.0;
+        // Convert velocity to 0-1 range
+        let vel = velocity as f64 / 127.0;
+
+        // These would typically be connected to external inputs
+        // For now, just store them for retrieval
+        self.midi_note = Some(v_oct);
+        self.midi_velocity = Some(vel);
+        self.midi_gate = true;
+
+        Ok(())
+    }
+
+    /// Handle a MIDI Note Off message
+    pub fn midi_note_off(&mut self, _note: u8, _velocity: u8) -> Result<(), JsValue> {
+        self.midi_gate = false;
+        Ok(())
+    }
+
+    /// Get the current MIDI note as V/Oct (for connecting to VCO)
+    #[wasm_bindgen(getter)]
+    pub fn midi_note(&self) -> f64 {
+        self.midi_note.unwrap_or(0.0)
+    }
+
+    /// Get the current MIDI velocity (0-1)
+    #[wasm_bindgen(getter)]
+    pub fn midi_velocity(&self) -> f64 {
+        self.midi_velocity.unwrap_or(0.0)
+    }
+
+    /// Get the current MIDI gate state
+    #[wasm_bindgen(getter)]
+    pub fn midi_gate(&self) -> bool {
+        self.midi_gate
+    }
+
+    /// Handle a MIDI Control Change message
+    pub fn midi_cc(&mut self, cc: u8, value: u8) -> Result<(), JsValue> {
+        // Store CC values for retrieval
+        self.midi_cc_values[cc as usize] = value as f64 / 127.0;
+        Ok(())
+    }
+
+    /// Get a MIDI CC value (0-1 normalized)
+    pub fn get_midi_cc(&self, cc: u8) -> f64 {
+        self.midi_cc_values.get(cc as usize).copied().unwrap_or(0.0)
+    }
+
+    /// Handle a MIDI Pitch Bend message (-1 to 1)
+    pub fn midi_pitch_bend(&mut self, value: f64) -> Result<(), JsValue> {
+        self.midi_pitch_bend_value = value;
+        Ok(())
+    }
+
+    /// Get the current pitch bend value (-1 to 1)
+    #[wasm_bindgen(getter)]
+    pub fn pitch_bend(&self) -> f64 {
+        self.midi_pitch_bend_value
     }
 
     // =========================================================================

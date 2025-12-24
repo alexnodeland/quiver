@@ -1,0 +1,111 @@
+name: Publish npm packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (skip actual publish)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build WASM package
+        run: make wasm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build TypeScript packages
+        run: |
+          cd packages/@quiver/types && npm run build
+          cd ../react && npm run build
+
+      - name: Verify package versions
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "Tag version: $TAG_VERSION"
+
+          # Check each package version matches
+          for pkg in packages/@quiver/wasm packages/@quiver/types packages/@quiver/react; do
+            PKG_VERSION=$(node -p "require('./$pkg/package.json').version")
+            echo "$pkg version: $PKG_VERSION"
+            if [ "$PKG_VERSION" != "$TAG_VERSION" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+              echo "ERROR: Version mismatch in $pkg"
+              exit 1
+            fi
+          done
+
+      - name: Publish @quiver/wasm
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          cd packages/@quiver/wasm
+          npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @quiver/types
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          cd packages/@quiver/types
+          npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @quiver/react
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          cd packages/@quiver/react
+          npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## npm Package Publishing" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
+            echo "**Dry run** - packages were not published" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Successfully published:" >> $GITHUB_STEP_SUMMARY
+            echo "- @quiver/wasm" >> $GITHUB_STEP_SUMMARY
+            echo "- @quiver/types" >> $GITHUB_STEP_SUMMARY
+            echo "- @quiver/react" >> $GITHUB_STEP_SUMMARY
+          fi

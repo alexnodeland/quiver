@@ -420,6 +420,16 @@ impl ModuleRegistry {
         );
 
         self.register_factory_with_keywords(
+            "mixer8",
+            "Mixer 8",
+            "Utilities",
+            "8-channel audio mixer for polyphony",
+            &["mix", "combine", "sum", "blend", "audio", "poly", "voices"],
+            &[],
+            |_| Box::new(Mixer::new(8)),
+        );
+
+        self.register_factory_with_keywords(
             "offset",
             "Offset",
             "Utilities",
@@ -437,6 +447,176 @@ impl ModuleRegistry {
             &["delay", "feedback", "sample", "z-1"],
             &["advanced"],
             |_| Box::new(UnitDelay::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "delay_line",
+            "Delay Line",
+            "Effects",
+            "Multi-tap delay with feedback and wet/dry mix",
+            &["delay", "echo", "feedback", "time", "effect"],
+            &[],
+            |sr| Box::new(DelayLine::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "chorus",
+            "Chorus",
+            "Effects",
+            "Classic chorus effect with modulated delay lines",
+            &[
+                "chorus",
+                "modulation",
+                "detune",
+                "ensemble",
+                "effect",
+                "stereo",
+            ],
+            &[],
+            |sr| Box::new(Chorus::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "flanger",
+            "Flanger",
+            "Effects",
+            "Classic flanging effect with modulated delay",
+            &["flanger", "modulation", "sweep", "jet", "effect"],
+            &[],
+            |sr| Box::new(Flanger::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "phaser",
+            "Phaser",
+            "Effects",
+            "Classic phaser effect with all-pass filters",
+            &["phaser", "modulation", "sweep", "effect", "allpass"],
+            &[],
+            |sr| Box::new(Phaser::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "limiter",
+            "Limiter",
+            "Dynamics",
+            "Prevents signals from exceeding threshold",
+            &["limiter", "dynamics", "ceiling", "clip", "loudness"],
+            &[],
+            |sr| Box::new(Limiter::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "noise_gate",
+            "Noise Gate",
+            "Dynamics",
+            "Attenuates signals below threshold",
+            &["gate", "dynamics", "noise", "threshold", "mute"],
+            &[],
+            |sr| Box::new(NoiseGate::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "compressor",
+            "Compressor",
+            "Dynamics",
+            "Dynamic range compression with sidechain",
+            &["compressor", "dynamics", "squeeze", "punch", "sidechain"],
+            &[],
+            |sr| Box::new(Compressor::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "envelope_follower",
+            "Envelope Follower",
+            "Utilities",
+            "Extracts amplitude envelope from audio",
+            &["envelope", "follower", "detector", "cv", "ducking"],
+            &[],
+            |sr| Box::new(EnvelopeFollower::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "bitcrusher",
+            "Bitcrusher",
+            "Effects",
+            "Lo-fi bit depth and sample rate reduction",
+            &["bitcrusher", "lofi", "distortion", "digital", "retro"],
+            &[],
+            |_| Box::new(Bitcrusher::new()),
+        );
+
+        // P3 Effects
+        self.register_factory_with_keywords(
+            "tremolo",
+            "Tremolo",
+            "Effects",
+            "Amplitude modulation effect with rate and depth control",
+            &["tremolo", "amplitude", "modulation", "wobble", "lfo"],
+            &[],
+            |sr| Box::new(Tremolo::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "vibrato",
+            "Vibrato",
+            "Effects",
+            "Pitch modulation effect using modulated delay",
+            &["vibrato", "pitch", "modulation", "wobble", "lfo"],
+            &[],
+            |sr| Box::new(Vibrato::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "distortion",
+            "Distortion",
+            "Effects",
+            "Waveshaping distortion with multiple modes",
+            &["distortion", "overdrive", "fuzz", "saturation", "clip"],
+            &[],
+            |sr| Box::new(Distortion::new(sr)),
+        );
+
+        // P3 Oscillators
+        self.register_factory_with_keywords(
+            "supersaw",
+            "Supersaw",
+            "Oscillators",
+            "JP-8000 style 7-voice detuned supersaw oscillator",
+            &["supersaw", "trance", "unison", "detune", "thick"],
+            &[],
+            |sr| Box::new(Supersaw::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "karplus_strong",
+            "Karplus-Strong",
+            "Oscillators",
+            "Physical modeling plucked string synthesis",
+            &["karplus", "string", "pluck", "physical", "modeling"],
+            &[],
+            |sr| Box::new(KarplusStrong::new(sr)),
+        );
+
+        // P3 Utilities
+        self.register_factory_with_keywords(
+            "scale_quantizer",
+            "Scale Quantizer",
+            "Utilities",
+            "Quantize CV to musical scale notes",
+            &["quantizer", "scale", "music", "notes", "pitch"],
+            &[],
+            |sr| Box::new(ScaleQuantizer::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "euclidean",
+            "Euclidean Rhythm",
+            "Sequencers",
+            "Euclidean rhythm generator for evenly distributed pulses",
+            &["euclidean", "rhythm", "pattern", "trigger", "clock"],
+            &[],
+            |sr| Box::new(Euclidean::new(sr)),
         );
 
         self.register_factory_with_keywords(
@@ -732,6 +912,112 @@ impl ModuleRegistry {
             &["ground", "hum", "buzz", "50hz", "60hz", "mains", "analog"],
             &["analog"],
             |sr| Box::new(GroundLoop::new(sr)),
+        );
+
+        // =====================================================================
+        // Phase 4: Advanced DSP Modules
+        // =====================================================================
+
+        // Oscillators
+        self.register_factory_with_keywords(
+            "wavetable",
+            "Wavetable",
+            "Oscillators",
+            "Wavetable oscillator with 8 tables and morphing",
+            &["wavetable", "oscillator", "morph", "digital", "synthesis"],
+            &[],
+            |sr| Box::new(Wavetable::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "formant_osc",
+            "Formant Oscillator",
+            "Oscillators",
+            "Formant oscillator for vocal synthesis (a/e/i/o/u)",
+            &["formant", "vocal", "vowel", "voice", "speech", "oscillator"],
+            &[],
+            |sr| Box::new(FormantOsc::new(sr)),
+        );
+
+        // Effects
+        self.register_factory_with_keywords(
+            "reverb",
+            "Reverb",
+            "Effects",
+            "Algorithmic reverb (Freeverb-style) with stereo output",
+            &["reverb", "room", "hall", "space", "ambience", "freeverb"],
+            &["essential"],
+            |sr| Box::new(Reverb::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "parametric_eq",
+            "Parametric EQ",
+            "Effects",
+            "3-band parametric equalizer (low shelf, mid peak, high shelf)",
+            &["eq", "equalizer", "tone", "parametric", "shelf", "filter"],
+            &[],
+            |sr| Box::new(ParametricEq::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "vocoder",
+            "Vocoder",
+            "Effects",
+            "16-band vocoder with carrier/modulator inputs",
+            &["vocoder", "voice", "robot", "spectral", "filter", "bands"],
+            &[],
+            |sr| Box::new(Vocoder::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "pitch_shifter",
+            "Pitch Shifter",
+            "Effects",
+            "Granular pitch shifter (±24 semitones)",
+            &["pitch", "shift", "transpose", "semitone", "granular"],
+            &[],
+            |sr| Box::new(PitchShifter::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "granular",
+            "Granular",
+            "Effects",
+            "Granular synthesis/processing with 16 concurrent grains",
+            &[
+                "granular", "grain", "texture", "freeze", "clouds", "ambient",
+            ],
+            &["advanced"],
+            |sr| Box::new(Granular::new(sr)),
+        );
+
+        // Utilities
+        self.register_factory_with_keywords(
+            "chord_memory",
+            "Chord Memory",
+            "Utilities",
+            "Generate chord voicings from root note (9 chord types)",
+            &["chord", "harmony", "voicing", "major", "minor", "seventh"],
+            &[],
+            |_| Box::new(ChordMemory::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "arpeggiator",
+            "Arpeggiator",
+            "Sequencers",
+            "Pattern-based arpeggiator (up/down/up-down/random)",
+            &[
+                "arpeggiator",
+                "arp",
+                "pattern",
+                "sequence",
+                "melody",
+                "clock",
+            ],
+            &[],
+            |sr| Box::new(Arpeggiator::new(sr)),
         );
     }
 

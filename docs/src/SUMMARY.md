@@ -31,7 +31,6 @@
 - [Serialize and Save Patches](./how-to/serialization.md)
 - [Create Custom Modules](./how-to/custom-modules.md)
 - [Visualize Your Patch](./how-to/visualization.md)
-- [Integrate with Plugins](./how-to/plugin-integration.md)
 - [Browser & App Integration](./how-to/browser-integration.md)
 - [Module Catalog API](./how-to/module-catalog.md)
 - [Observable Streaming](./how-to/observable-streaming.md)

@@ -4,7 +4,9 @@
 //! enabling automatic generation of appropriate controls (knobs, sliders, etc.).
 
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
+#[cfg(feature = "wasm")]
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 

@@ -4,9 +4,29 @@
 //! - Classic synth patches (bass, lead, pad, etc.)
 //! - Sound design examples
 //! - Tutorial patches for learning
+//!
+//! # Example
+//!
+//! ```ignore
+//! use quiver::prelude::*;
+//!
+//! let library = PresetLibrary::new();
+//!
+//! // List all presets
+//! for preset in library.list() {
+//!     println!("{}: {}", preset.name, preset.description);
+//! }
+//!
+//! // Search by tags
+//! let acid = library.search_tags(&["acid"]);
+//!
+//! // Get and build a preset
+//! let patch = library.get("Moog Bass")?.build(44100.0)?;
+//! ```
 
-use crate::serialize::{CableDef, ModuleDef, PatchDef};
-use alloc::string::String;
+use crate::graph::Patch;
+use crate::serialize::{CableDef, ModuleDef, ModuleRegistry, PatchDef};
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -73,12 +93,131 @@ impl PresetInfo {
     }
 }
 
+/// Error type for preset operations
+#[derive(Debug, Clone)]
+pub enum PresetError {
+    /// Preset not found
+    NotFound(String),
+    /// Failed to build patch from preset
+    BuildError(String),
+}
+
+impl core::fmt::Display for PresetError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            PresetError::NotFound(name) => write!(f, "Preset not found: {}", name),
+            PresetError::BuildError(msg) => write!(f, "Failed to build preset: {}", msg),
+        }
+    }
+}
+
+/// A buildable preset that can be converted into a Patch
+#[derive(Debug, Clone)]
+pub struct Preset {
+    /// Preset metadata
+    pub info: PresetInfo,
+    /// Patch definition
+    pub def: PatchDef,
+}
+
+impl Preset {
+    /// Build the preset into a ready-to-use Patch
+    ///
+    /// # Arguments
+    /// * `sample_rate` - The sample rate for the patch (e.g., 44100.0)
+    ///
+    /// # Returns
+    /// A compiled Patch ready for audio processing
+    ///
+    /// # Example
+    /// ```ignore
+    /// let library = PresetLibrary::new();
+    /// let patch = library.get("Moog Bass")?.build(44100.0)?;
+    /// ```
+    pub fn build(self, sample_rate: f64) -> Result<Patch, PresetError> {
+        let registry = ModuleRegistry::new();
+        Patch::from_def(&self.def, &registry, sample_rate)
+            .map_err(|e| PresetError::BuildError(e.to_string()))
+    }
+
+    /// Build the preset with a custom module registry
+    ///
+    /// Use this when you have custom modules registered.
+    pub fn build_with_registry(
+        self,
+        sample_rate: f64,
+        registry: &ModuleRegistry,
+    ) -> Result<Patch, PresetError> {
+        Patch::from_def(&self.def, registry, sample_rate)
+            .map_err(|e| PresetError::BuildError(e.to_string()))
+    }
+
+    /// Get the patch definition without building
+    pub fn into_def(self) -> PatchDef {
+        self.def
+    }
+}
+
 /// Preset library containing all available presets
-pub struct PresetLibrary;
+#[derive(Debug, Clone, Default)]
+pub struct PresetLibrary {
+    _private: (),
+}
 
 impl PresetLibrary {
-    /// Get all available preset infos
-    pub fn list() -> Vec<PresetInfo> {
+    /// Create a new preset library instance
+    ///
+    /// # Example
+    /// ```ignore
+    /// let library = PresetLibrary::new();
+    /// for preset in library.list() {
+    ///     println!("{}", preset.name);
+    /// }
+    /// ```
+    pub fn new() -> Self {
+        Self { _private: () }
+    }
+
+    /// Get a preset by name, ready to build
+    ///
+    /// # Example
+    /// ```ignore
+    /// let library = PresetLibrary::new();
+    /// if let Some(preset) = library.get("Moog Bass") {
+    ///     let patch = preset.build(44100.0)?;
+    /// }
+    /// ```
+    pub fn get(&self, name: &str) -> Option<Preset> {
+        let info = Self::all_presets().into_iter().find(|p| p.name == name)?;
+        let def = Self::load(name)?;
+        Some(Preset { info, def })
+    }
+
+    /// Search presets by multiple tags (matches any)
+    ///
+    /// Returns presets that match ANY of the provided tags.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let library = PresetLibrary::new();
+    /// let acid_or_bass = library.search_tags(&["acid", "bass"]);
+    /// ```
+    pub fn search_tags(&self, tags: &[&str]) -> Vec<PresetInfo> {
+        Self::all_presets()
+            .into_iter()
+            .filter(|p| {
+                tags.iter().any(|search_tag| {
+                    let search_lower = search_tag.to_lowercase();
+                    p.tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&search_lower))
+                })
+            })
+            .collect()
+    }
+
+    // Internal helper to get all preset infos
+    fn all_presets() -> Vec<PresetInfo> {
         vec![
             // Classic patches
             PresetInfo::new("Moog Bass", PresetCategory::Bass)
@@ -146,24 +285,29 @@ impl PresetLibrary {
         ]
     }
 
+    /// Get all available preset infos (static method for backwards compatibility)
+    pub fn list() -> Vec<PresetInfo> {
+        Self::all_presets()
+    }
+
     /// Get presets by category
     pub fn by_category(category: PresetCategory) -> Vec<PresetInfo> {
-        Self::list()
+        Self::all_presets()
             .into_iter()
             .filter(|p| p.category == category)
             .collect()
     }
 
-    /// Search presets by tag
+    /// Search presets by tag (single tag)
     pub fn by_tag(tag: &str) -> Vec<PresetInfo> {
         let tag_lower = tag.to_lowercase();
-        Self::list()
+        Self::all_presets()
             .into_iter()
             .filter(|p| p.tags.iter().any(|t| t.to_lowercase().contains(&tag_lower)))
             .collect()
     }
 
-    /// Load a preset by name
+    /// Load a preset by name (static method for backwards compatibility)
     pub fn load(name: &str) -> Option<PatchDef> {
         match name {
             // Classic patches
@@ -301,21 +445,24 @@ impl ClassicPresets {
     /// - PWM oscillator with slow LFO
     /// - Gentle filtering
     /// - Slow attack envelope
+    /// - Chorus for width and movement
     pub fn juno_pad() -> PatchDef {
         let mut patch = PatchDef::new("Juno Pad")
             .with_author("Quiver")
-            .with_description("Warm Roland Juno-style pad with PWM")
+            .with_description("Warm Roland Juno-style pad with PWM and chorus")
             .with_tag("pad")
             .with_tag("analog")
-            .with_tag("warm");
+            .with_tag("warm")
+            .with_tag("chorus");
 
         patch.modules = vec![
             ModuleDef::new("lfo", "lfo").with_position(100.0, 50.0),
             ModuleDef::new("vco", "vco").with_position(100.0, 150.0),
             ModuleDef::new("vcf", "svf").with_position(250.0, 150.0),
             ModuleDef::new("vca", "vca").with_position(400.0, 150.0),
+            ModuleDef::new("chorus", "chorus").with_position(550.0, 150.0),
             ModuleDef::new("env", "adsr").with_position(250.0, 300.0),
-            ModuleDef::new("output", "stereo_output").with_position(550.0, 150.0),
+            ModuleDef::new("output", "stereo_output").with_position(700.0, 150.0),
         ];
 
         patch.cables = vec![
@@ -326,8 +473,11 @@ impl ClassicPresets {
             // Square wave (PWM) -> filter
             CableDef::new("vco.sqr", "vcf.in"),
             CableDef::new("vcf.lp", "vca.in"),
-            CableDef::new("vca.out", "output.left"),
-            CableDef::new("vca.out", "output.right"),
+            // VCA -> Chorus for that classic Juno sound
+            CableDef::new("vca.out", "chorus.in"),
+            // Chorus stereo outputs to stereo output
+            CableDef::new("chorus.left", "output.left"),
+            CableDef::new("chorus.right", "output.right"),
             CableDef::new("env.out", "vca.cv"),
         ];
 
@@ -338,6 +488,10 @@ impl ClassicPresets {
         patch.parameters.insert("env.decay".into(), 0.3);
         patch.parameters.insert("env.sustain".into(), 0.7);
         patch.parameters.insert("env.release".into(), 1.0);
+        // Classic Juno chorus settings
+        patch.parameters.insert("chorus.rate".into(), 0.4);
+        patch.parameters.insert("chorus.depth".into(), 0.6);
+        patch.parameters.insert("chorus.mix".into(), 0.5);
 
         patch
     }
@@ -876,5 +1030,81 @@ mod tests {
         assert_eq!(info.description, "A test preset");
         assert_eq!(info.tags.len(), 2);
         assert_eq!(info.difficulty, Some(3));
+    }
+
+    #[test]
+    fn test_preset_library_new() {
+        let library = PresetLibrary::new();
+        // Verify default construction works
+        let _clone = library.clone();
+    }
+
+    #[test]
+    fn test_preset_library_get() {
+        let library = PresetLibrary::new();
+
+        // Get existing preset
+        let preset = library.get("Moog Bass");
+        assert!(preset.is_some());
+        let preset = preset.unwrap();
+        assert_eq!(preset.info.name, "Moog Bass");
+        assert_eq!(preset.def.name, "Moog Bass");
+
+        // Get non-existent preset
+        let preset = library.get("Nonexistent");
+        assert!(preset.is_none());
+    }
+
+    #[test]
+    fn test_preset_library_search_tags() {
+        let library = PresetLibrary::new();
+
+        // Search single tag
+        let results = library.search_tags(&["acid"]);
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|p| p.name == "303 Acid"));
+
+        // Search multiple tags
+        let results = library.search_tags(&["acid", "analog"]);
+        assert!(results.len() >= 2); // Should find both acid and analog presets
+
+        // Search non-existent tag
+        let results = library.search_tags(&["nonexistent_tag_xyz"]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_preset_build() {
+        let library = PresetLibrary::new();
+        let preset = library.get("Basic Subtractive").unwrap();
+
+        // Build the preset
+        let result = preset.build(44100.0);
+        assert!(result.is_ok());
+
+        let mut patch = result.unwrap();
+        // Verify patch is functional by ticking it
+        let (left, right) = patch.tick();
+        // Should produce some output (even if zero initially)
+        assert!(left.is_finite());
+        assert!(right.is_finite());
+    }
+
+    #[test]
+    fn test_preset_into_def() {
+        let library = PresetLibrary::new();
+        let preset = library.get("Moog Bass").unwrap();
+
+        let def = preset.into_def();
+        assert_eq!(def.name, "Moog Bass");
+    }
+
+    #[test]
+    fn test_preset_error_display() {
+        let err = PresetError::NotFound("Test".into());
+        assert!(err.to_string().contains("Test"));
+
+        let err = PresetError::BuildError("failed".into());
+        assert!(err.to_string().contains("failed"));
     }
 }
