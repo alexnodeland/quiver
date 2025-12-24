@@ -331,7 +331,7 @@
       border-radius: 12px;
       padding: 20px;
       position: relative;
-      overflow: hidden;
+      overflow: visible;
     }
 
     .viz-container::before {
@@ -382,6 +382,70 @@
       color: var(--neon-cyan);
       border-color: var(--neon-cyan);
       box-shadow: 0 0 10px rgba(0, 245, 255, 0.3);
+    }
+
+    /* Tooltips */
+    [data-tooltip] {
+      position: relative;
+    }
+
+    [data-tooltip]::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      bottom: calc(100% + 12px);
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 10px 14px;
+      background: rgba(10, 10, 15, 0.98);
+      border: 1px solid var(--neon-cyan);
+      border-radius: 6px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      line-height: 1.4;
+      color: #ffffff;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.2s ease, visibility 0.2s ease;
+      z-index: 9999;
+      box-shadow:
+        0 0 20px rgba(0, 245, 255, 0.3),
+        0 4px 20px rgba(0, 0, 0, 0.5);
+      text-shadow: 0 0 10px rgba(0, 245, 255, 0.5);
+    }
+
+    [data-tooltip]::before {
+      content: '';
+      position: absolute;
+      bottom: calc(100% + 6px);
+      left: 50%;
+      transform: translateX(-50%);
+      border: 6px solid transparent;
+      border-top-color: var(--neon-cyan);
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.2s ease, visibility 0.2s ease;
+      z-index: 9999;
+    }
+
+    [data-tooltip]:hover::after,
+    [data-tooltip]:hover::before {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .viz-title[data-tooltip]::after {
+      bottom: auto;
+      top: calc(100% + 12px);
+    }
+
+    .viz-title[data-tooltip]::before {
+      bottom: auto;
+      top: calc(100% + 6px);
+      border-top-color: transparent;
+      border-bottom-color: var(--neon-cyan);
     }
 
     .canvas-wrapper {
@@ -824,6 +888,7 @@
     .compact-panel.oscillator h2::before { background: var(--neon-cyan); box-shadow: 0 0 8px var(--neon-cyan); }
     .compact-panel.filter h2::before { background: var(--neon-magenta); box-shadow: 0 0 8px var(--neon-magenta); }
     .compact-panel.envelope h2::before { background: var(--neon-purple); box-shadow: 0 0 8px var(--neon-purple); }
+    .compact-panel.chorus h2::before { background: var(--neon-pink); box-shadow: 0 0 8px var(--neon-pink); }
     .compact-panel.output h2::before { background: var(--neon-orange); box-shadow: 0 0 8px var(--neon-orange); }
 
     .compact-controls {
@@ -972,9 +1037,9 @@
           <div class="viz-header">
             <span class="viz-title">Waveform Analysis</span>
             <div class="viz-modes">
-              <button class="viz-mode-btn active" data-mode="scope">Scope</button>
-              <button class="viz-mode-btn" data-mode="lissajous">XY</button>
-              <button class="viz-mode-btn" data-mode="bars">Bars</button>
+              <button class="viz-mode-btn active" data-mode="scope" data-tooltip="Amplitude over time">Scope</button>
+              <button class="viz-mode-btn" data-mode="lissajous" data-tooltip="Stereo phase: circle=wide, line=mono">XY</button>
+              <button class="viz-mode-btn" data-mode="bars" data-tooltip="Real-time amplitude bars">Bars</button>
             </div>
           </div>
           <div class="canvas-wrapper">
@@ -1019,7 +1084,7 @@
         <!-- Spectrum Analyzer -->
         <div class="viz-container">
           <div class="viz-header">
-            <span class="viz-title">Frequency Spectrum</span>
+            <span class="viz-title" data-tooltip="Frequency content: low (left) to high (right)">Frequency Spectrum</span>
           </div>
           <div class="canvas-wrapper">
             <canvas id="spectrum"></canvas>
@@ -1134,6 +1199,28 @@
               <label>Release</label>
               <input type="range" id="release" min="1" max="5000" step="1" value="300">
               <span class="value" id="releaseValue">300ms</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chorus -->
+        <div class="compact-panel chorus">
+          <h2>Chorus</h2>
+          <div class="compact-controls">
+            <div class="compact-control">
+              <label>Rate</label>
+              <input type="range" id="chorusRate" min="0.1" max="2" step="0.1" value="0.5">
+              <span class="value" id="chorusRateValue">0.5Hz</span>
+            </div>
+            <div class="compact-control">
+              <label>Depth</label>
+              <input type="range" id="chorusDepth" min="0" max="0.8" step="0.01" value="0.4">
+              <span class="value" id="chorusDepthValue">40%</span>
+            </div>
+            <div class="compact-control">
+              <label>Mix</label>
+              <input type="range" id="chorusMix" min="0" max="1" step="0.01" value="0.5">
+              <span class="value" id="chorusMixValue">50%</span>
             </div>
           </div>
         </div>

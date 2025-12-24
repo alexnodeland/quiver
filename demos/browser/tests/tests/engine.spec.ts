@@ -166,6 +166,95 @@ test.describe('QuiverEngine', () => {
   });
 });
 
+test.describe('Effects Modules', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => window.QuiverEngine !== null, { timeout: 10000 });
+  });
+
+  test('chorus module creates stereo output', async ({ page }) => {
+    const result = await page.evaluate(() => {
+      const engine = new window.QuiverEngine(44100.0);
+
+      // Create a simple patch with chorus
+      engine.add_module('vco', 'osc');
+      engine.add_module('chorus', 'chorus');
+      engine.add_module('stereo_output', 'out');
+
+      // Connect: osc -> chorus -> stereo output
+      engine.connect('osc.saw', 'chorus.in');
+      engine.connect('chorus.left', 'out.left');
+      engine.connect('chorus.right', 'out.right');
+
+      engine.set_output('out');
+      engine.compile();
+
+      // Process some audio
+      const output = engine.process_block(256);
+      const samples = Array.from(output);
+
+      // Extract left and right channels
+      const left: number[] = [];
+      const right: number[] = [];
+      for (let i = 0; i < samples.length; i += 2) {
+        left.push(samples[i]);
+        right.push(samples[i + 1]);
+      }
+
+      // Check that left and right are different (stereo, not mono)
+      let diffCount = 0;
+      for (let i = 0; i < left.length; i++) {
+        if (Math.abs(left[i] - right[i]) > 0.0001) {
+          diffCount++;
+        }
+      }
+
+      engine.free();
+
+      return {
+        hasAudio: samples.some(s => Math.abs(s) > 0.001),
+        isStereo: diffCount > 0,
+        diffCount
+      };
+    });
+
+    expect(result.hasAudio).toBe(true);
+    expect(result.isStereo).toBe(true);
+  });
+
+  test('chorus parameters can be controlled', async ({ page }) => {
+    const result = await page.evaluate(() => {
+      const engine = new window.QuiverEngine(44100.0);
+
+      engine.add_module('chorus', 'chorus');
+      engine.add_module('offset', 'rate_knob');
+      engine.add_module('offset', 'depth_knob');
+      engine.add_module('offset', 'mix_knob');
+
+      engine.connect('rate_knob.out', 'chorus.rate');
+      engine.connect('depth_knob.out', 'chorus.depth');
+      engine.connect('mix_knob.out', 'chorus.mix');
+
+      // Set parameters
+      engine.set_param('rate_knob', 0, 0.5);
+      engine.set_param('depth_knob', 0, 0.3);
+      engine.set_param('mix_knob', 0, 0.7);
+
+      const rateValue = engine.get_param('rate_knob', 0);
+      const depthValue = engine.get_param('depth_knob', 0);
+      const mixValue = engine.get_param('mix_knob', 0);
+
+      engine.free();
+
+      return { rateValue, depthValue, mixValue };
+    });
+
+    expect(result.rateValue).toBeCloseTo(0.5, 2);
+    expect(result.depthValue).toBeCloseTo(0.3, 2);
+    expect(result.mixValue).toBeCloseTo(0.7, 2);
+  });
+});
+
 test.describe('MIDI', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');

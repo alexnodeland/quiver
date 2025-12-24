@@ -140,6 +140,13 @@ function createSynthPatch(engine: QuiverEngine) {
   addModule('offset', 'cutoff_knob');
   addModule('offset', 'resonance_knob');
   addModule('mixer', 'voice_mixer');
+
+  // Chorus effect for stereo width
+  addModule('chorus', 'chorus');
+  addModule('offset', 'chorus_rate');
+  addModule('offset', 'chorus_depth');
+  addModule('offset', 'chorus_mix');
+
   addModule('stereo_output', 'out');
 
   // Connect each voice
@@ -160,8 +167,13 @@ function createSynthPatch(engine: QuiverEngine) {
     connect(`amp_${i}.out`, `voice_mixer.ch${i}`);
   }
 
-  connect('voice_mixer.out', 'out.left');
-  connect('voice_mixer.out', 'out.right');
+  // Route through chorus for stereo width
+  connect('voice_mixer.out', 'chorus.in');
+  connect('chorus_rate.out', 'chorus.rate');
+  connect('chorus_depth.out', 'chorus.depth');
+  connect('chorus_mix.out', 'chorus.mix');
+  connect('chorus.left', 'out.left');
+  connect('chorus.right', 'out.right');
 
   // Set initial knob values
   const msToCV = (ms: number) => Math.log10(Math.max(1, ms)) / 4;
@@ -175,6 +187,11 @@ function createSynthPatch(engine: QuiverEngine) {
   engine.set_param('detune_knob', 0, 0.0);
   engine.set_param('cutoff_knob', 0, hzToCV(2000));
   engine.set_param('resonance_knob', 0, 0.3);
+
+  // Chorus defaults
+  engine.set_param('chorus_rate', 0, 0.3);   // ~1Hz LFO rate
+  engine.set_param('chorus_depth', 0, 0.4);  // Moderate depth
+  engine.set_param('chorus_mix', 0, 0.5);    // 50% wet
 
   for (let i = 0; i < NUM_VOICES; i++) {
     engine.set_param(`pitch_${i}`, 0, 0.0);
@@ -216,8 +233,9 @@ function createScriptProcessor(ctx: AudioContext): ScriptProcessorNode {
       let maxR = 0;
 
       for (let i = 0; i < 512; i++) {
-        const left = samples[i * 2] * scale;
-        const right = samples[i * 2 + 1] * scale;
+        // Apply scaling and clamp to prevent clipping
+        const left = Math.max(-1, Math.min(1, samples[i * 2] * scale));
+        const right = Math.max(-1, Math.min(1, samples[i * 2 + 1] * scale));
         leftOut[i] = left;
         rightOut[i] = right;
 
@@ -655,6 +673,11 @@ function formatValue(id: string, value: number): string {
       return `${Math.round(value * 100)}%`;
     case 'volume':
       return `${Math.round(value * 100)}%`;
+    case 'chorusRate':
+      return `${value.toFixed(1)}Hz`;
+    case 'chorusDepth':
+    case 'chorusMix':
+      return `${Math.round(value * 100)}%`;
     default:
       return String(value);
   }
@@ -715,6 +738,19 @@ function setupControls() {
   });
   bindSlider('filterEnv', () => {
     // TODO: Filter envelope amount needs VCA module
+  });
+
+  // Chorus controls
+  bindSlider('chorusRate', (v) => {
+    if (engine) engine.set_param('chorus_rate', 0, v);
+  });
+  bindSlider('chorusDepth', (v) => {
+    // Cap at 80% to prevent excessive modulation artifacts
+    const safeDepth = Math.min(v, 0.8);
+    if (engine) engine.set_param('chorus_depth', 0, safeDepth);
+  });
+  bindSlider('chorusMix', (v) => {
+    if (engine) engine.set_param('chorus_mix', 0, v);
   });
 }
 
