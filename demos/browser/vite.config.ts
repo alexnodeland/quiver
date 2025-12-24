@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { resolve } from 'path';
 
 export default defineConfig({
   server: {
@@ -11,6 +12,16 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+      },
+    },
+  },
+  resolve: {
+    alias: {
+      '@quiver/wasm': resolve(__dirname, '../../packages/@quiver/wasm'),
+    },
   },
   optimizeDeps: {
     exclude: ['@quiver/wasm'],
@@ -22,4 +33,6 @@ export default defineConfig({
       'Cross-Origin-Embedder-Policy': 'require-corp',
     },
   },
+  // Handle WASM files properly
+  assetsInclude: ['**/*.wasm'],
 });

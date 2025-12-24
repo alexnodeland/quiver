@@ -1,6 +1,12 @@
 // Quiver Browser Synth - Polyphonic Version with Enhanced Visualizations
 // Retro-futuristic modular synthesizer demo
-import init, { QuiverEngine } from '../../../packages/@quiver/wasm/quiver.js';
+//
+// Audio Architecture:
+// This demo currently uses ScriptProcessorNode for compatibility.
+// For production use with lower latency, use AudioManager from @quiver/wasm
+// which provides a SharedArrayBuffer-based AudioWorklet implementation.
+// See: packages/@quiver/wasm/src/audio-manager.ts
+import init, { QuiverEngine } from '@quiver/wasm/quiver';
 
 const NUM_VOICES = 4;
 const FFT_SIZE = 256;

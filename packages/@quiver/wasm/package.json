@@ -5,17 +5,35 @@
   "main": "quiver.js",
   "module": "quiver.js",
   "types": "quiver.d.ts",
+  "exports": {
+    ".": {
+      "types": "./quiver.d.ts",
+      "import": "./quiver.js",
+      "require": "./quiver.js"
+    },
+    "./worklet": {
+      "types": "./dist/worklet-processor.d.ts",
+      "default": "./dist/quiver-worklet.js"
+    }
+  },
   "files": [
     "quiver.js",
     "quiver.d.ts",
     "quiver_bg.wasm",
     "quiver_bg.wasm.d.ts",
+    "dist/",
     "src/"
   ],
   "scripts": {
-    "build": "cd ../../.. && make wasm",
+    "build": "cd ../../.. && make wasm && pnpm run build:worklet && pnpm run build:lib",
+    "build:wasm": "cd ../../.. && make wasm",
+    "build:worklet": "esbuild src/worklet-processor.ts --bundle --format=esm --outfile=dist/quiver-worklet.js --minify",
+    "build:lib": "tsup src/index.ts src/audio.ts src/audio-manager.ts --format esm,cjs --dts --outDir dist",
     "build:dev": "cd ../../.. && make wasm-dev",
-    "prepublishOnly": "npm run build"
+    "clean": "rm -rf dist quiver.js quiver.d.ts quiver_bg.wasm quiver_bg.wasm.d.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "pnpm run build"
   },
   "keywords": [
     "wasm",
@@ -38,5 +56,10 @@
   "publishConfig": {
     "access": "public"
   },
-  "sideEffects": false
+  "sideEffects": false,
+  "devDependencies": {
+    "esbuild": "^0.20.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
 }

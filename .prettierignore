@@ -1,0 +1,22 @@
+# Build outputs
+dist/
+target/
+pkg/
+
+# Dependencies
+node_modules/
+
+# WASM generated files
+packages/@quiver/wasm/quiver.js
+packages/@quiver/wasm/quiver.d.ts
+packages/@quiver/wasm/quiver_bg.wasm
+packages/@quiver/wasm/quiver_bg.wasm.d.ts
+
+# Turbo cache
+.turbo/
+
+# Generated docs
+docs/book/
+
+# Lock files
+pnpm-lock.yaml
