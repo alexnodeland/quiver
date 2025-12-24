@@ -3,6 +3,27 @@
  *
  * This package provides type definitions that match the Rust serialization format,
  * enabling type-safe integration between the Quiver audio engine and frontend UIs.
+ *
+ * ## Type Sources
+ *
+ * These types are manually maintained to match the Rust types in:
+ * - src/serialize.rs (PatchDef, ModuleDef, CableDef, CatalogResponse, ValidationResult)
+ * - src/port.rs (SignalKind, PortDef, PortSpec, PortInfo, Compatibility)
+ * - src/introspection.rs (ParamInfo, ValueFormat, ParamCurve, ControlType)
+ * - src/observer.rs (ObservableValue, SubscriptionTarget)
+ *
+ * The Rust types use `#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]` to generate
+ * corresponding TypeScript types when building @quiver/wasm. This package provides
+ * these types standalone for use without requiring the WASM build.
+ *
+ * ## Synchronization
+ *
+ * To verify types are in sync with Rust, run:
+ * ```bash
+ * pnpm run typecheck
+ * ```
+ *
+ * The CI pipeline validates type compatibility by building both packages.
  */
 
 // =============================================================================
