@@ -177,34 +177,32 @@ test.describe('Package Integration', () => {
     const result = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
 
-      // Create a simple patch with offset module (which has observable parameters)
-      engine.add_module('offset', 'knob');
+      // Create a patch with an oscillator (produces actual audio)
+      engine.add_module('vco', 'osc');
       engine.add_module('stereo_output', 'out');
-      engine.connect('knob.out', 'out.left');
+      engine.connect('osc.saw', 'out.left');
+      engine.connect('osc.saw', 'out.right');
       engine.set_output('out');
       engine.compile();
 
-      // Subscribe to parameter changes (new API takes array of subscription targets)
-      // param_id is a numeric index as string, not the parameter name
-      engine.subscribe([{ type: 'param', node_id: 'knob', param_id: '0' }]);
+      // Subscribe to level metering (uses port_id as number, not string)
+      engine.subscribe([{ type: 'level', node_id: 'out', port_id: 0 }]);
 
-      // Set a parameter
-      engine.set_param('knob', 0, 2.5);
+      // Process enough audio to fill the level meter buffer
+      engine.process_block(512);
 
-      // Process some audio to trigger updates
-      engine.process_block(128);
-
-      // Poll updates (renamed from drain_updates)
+      // Poll updates
       const updates = engine.poll_updates();
 
       engine.free();
       return {
         hasUpdates: updates.length > 0,
         updateCount: updates.length,
+        firstUpdate: updates.length > 0 ? updates[0] : null,
       };
     });
 
-    // Should have at least one update from the parameter change
+    // Should have at least one level update
     expect(result.hasUpdates).toBe(true);
   });
 
