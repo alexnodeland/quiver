@@ -169,26 +169,27 @@ test.describe('Package Integration', () => {
 
     expect(inputNames).toContain('voct');
     expect(outputNames).toContain('saw');
-    expect(outputNames).toContain('sine');
-    expect(outputNames).toContain('square');
+    expect(outputNames).toContain('sin');   // Not 'sine'
+    expect(outputNames).toContain('sqr');   // Not 'square'
   });
 
   test('observer subscriptions work correctly', async ({ page }) => {
     const result = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
 
-      // Create a simple patch
-      engine.add_module('vco', 'osc');
+      // Create a simple patch with offset module (which has observable parameters)
+      engine.add_module('offset', 'knob');
       engine.add_module('stereo_output', 'out');
-      engine.connect('osc.saw', 'out.left');
+      engine.connect('knob.out', 'out.left');
       engine.set_output('out');
       engine.compile();
 
       // Subscribe to parameter changes (new API takes array of subscription targets)
-      engine.subscribe([{ type: 'param', node_id: 'osc', param_id: '0' }]);
+      // Use param_id as string matching the parameter name
+      engine.subscribe([{ type: 'param', node_id: 'knob', param_id: 'offset' }]);
 
       // Set a parameter
-      engine.set_param('osc', 0, 0.5);
+      engine.set_param('knob', 0, 2.5);
 
       // Process some audio to trigger updates
       engine.process_block(128);
