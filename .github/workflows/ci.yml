@@ -50,6 +50,8 @@ jobs:
         run: pnpm --filter @quiver/types build
       - name: TypeScript check
         run: pnpm run typecheck
+      - name: Check type compatibility
+        run: pnpm --filter @quiver/types check-types
 
   # Main test job
   test:
