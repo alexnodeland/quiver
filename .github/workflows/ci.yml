@@ -48,6 +48,8 @@ jobs:
         run: |
           pnpm --filter @quiver/react run typecheck
           pnpm --filter @quiver/demo-browser-synth run typecheck
+      - name: Check type sync
+        run: pnpm --filter @quiver/react run check-types
 
   # Main test job
   test:

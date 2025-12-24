@@ -72,9 +72,8 @@ schemas/                # JSON schemas for patch format
 docs/                   # mdbook documentation source
 
 packages/@quiver/       # TypeScript/React packages for WASM
-├── wasm/               # WASM bindings package
-├── types/              # TypeScript type definitions
-└── react/              # React hooks and components
+├── wasm/               # WASM bindings package (includes types.ts)
+└── react/              # React hooks and components (inlined types)
 ```
 
 ## Feature Flags

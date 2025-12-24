@@ -223,9 +223,9 @@ function SimpleSynth() {
 }
 ```
 
-## Re-exports
+## Type Exports
 
-This package re-exports common types and functions from `@quiver/wasm`:
+This package exports types and utilities for working with Quiver:
 
 ```typescript
 import {
@@ -234,13 +234,45 @@ import {
   type ModuleDef,
   type CableDef,
   type SignalKind,
+  type QuiverEngine,
   // Constants
   DEFAULT_SIGNAL_COLORS,
   // Functions
   parsePortReference,
   createPortReference,
   getSignalColor,
+  checkPortCompatibility,
 } from '@quiver/react';
+```
+
+## Type Architecture
+
+Types in this package are inlined rather than imported from `@quiver/wasm` due to TypeScript
+module resolution issues with pnpm workspaces and tsup-generated re-exports.
+
+The source of truth for types is:
+1. **Rust code** with `#[derive(tsify::Tsify)]` annotations
+2. **`@quiver/wasm/src/types.ts`** which mirrors the Rust types
+
+To ensure the inlined types stay in sync, run:
+
+```bash
+pnpm --filter @quiver/react run check-types
+```
+
+This check runs automatically in CI.
+
+## Development
+
+```bash
+# Build the package
+pnpm run build
+
+# Type check
+pnpm run typecheck
+
+# Verify type sync with @quiver/wasm
+pnpm run check-types
 ```
 
 ## License
