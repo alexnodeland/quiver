@@ -54,6 +54,7 @@
     "react": ">=18.0.0"
   },
   "devDependencies": {
+    "@quiver/wasm": "workspace:*",
     "@types/react": "^18.0.0",
     "@xyflow/react": "^12.0.0",
     "react": "^18.0.0",

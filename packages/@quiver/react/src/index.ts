@@ -28,7 +28,7 @@ import {
 /**
  * Data payload for Quiver module nodes
  */
-export interface QuiverNodeData {
+export interface QuiverNodeData extends Record<string, unknown> {
   /** Module type identifier */
   moduleType: ModuleTypeId;
   /** Module-specific state */
@@ -40,7 +40,7 @@ export interface QuiverNodeData {
 /**
  * Data payload for Quiver cable edges
  */
-export interface QuiverEdgeData {
+export interface QuiverEdgeData extends Record<string, unknown> {
   /** Source port name */
   sourcePort: string;
   /** Target port name */
@@ -247,7 +247,7 @@ export function generateModuleName(
   existingNames: Set<string>
 ): string {
   let counter = 1;
-  let name = moduleType;
+  let name: string = moduleType;
 
   while (existingNames.has(name)) {
     name = `${moduleType}_${counter}`;
