@@ -185,8 +185,8 @@ test.describe('Package Integration', () => {
       engine.compile();
 
       // Subscribe to parameter changes (new API takes array of subscription targets)
-      // Use param_id as string matching the parameter name
-      engine.subscribe([{ type: 'param', node_id: 'knob', param_id: 'offset' }]);
+      // param_id is a numeric index as string, not the parameter name
+      engine.subscribe([{ type: 'param', node_id: 'knob', param_id: '0' }]);
 
       // Set a parameter
       engine.set_param('knob', 0, 2.5);
