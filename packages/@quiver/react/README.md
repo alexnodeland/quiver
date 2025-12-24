@@ -1,6 +1,6 @@
 # @quiver/react
 
-React hooks and components for integrating Quiver audio synthesis into React applications.
+React hooks and utilities for integrating Quiver audio synthesis into React applications.
 
 ## Installation
 
@@ -13,11 +13,11 @@ pnpm add @quiver/react @quiver/wasm @quiver/types
 ## Quick Start
 
 ```tsx
-import { useQuiver, useModuleCatalog, useConnection } from '@quiver/react';
+import { useQuiverEngine, useQuiverCatalog } from '@quiver/react';
 
 function Synth() {
-  const { engine, isReady, error } = useQuiver({ sampleRate: 44100 });
-  const catalog = useModuleCatalog(engine);
+  const { engine, isReady, error } = useQuiverEngine(44100);
+  const catalog = useQuiverCatalog(engine);
 
   if (!isReady) return <div>Loading WASM...</div>;
   if (error) return <div>Error: {error.message}</div>;
@@ -33,7 +33,7 @@ function Synth() {
 
 ## Hooks
 
-### useQuiver
+### useQuiverEngine
 
 Main hook for initializing and managing the Quiver engine.
 
@@ -42,141 +42,150 @@ const {
   engine,      // QuiverEngine instance (null until ready)
   isReady,     // Whether WASM is loaded and engine is ready
   error,       // Any initialization error
-  audioContext // AudioContext (if audio is started)
-} = useQuiver({
-  sampleRate: 44100,  // Optional, defaults to 44100
-  autoInit: true      // Optional, auto-initialize on mount
-});
+} = useQuiverEngine(44100); // sampleRate, defaults to 44100
 ```
 
-### useModuleCatalog
+### useQuiverCatalog
 
 Get the catalog of available module types.
 
 ```typescript
-const catalog = useModuleCatalog(engine);
-// catalog.modules: ModuleMetadata[]
+const catalog = useQuiverCatalog(engine);
+// catalog.modules: ModuleCatalogEntry[]
 // catalog.categories: string[]
 ```
 
-### usePortSpec
+### useQuiverSearch
 
-Get port specification for a module type.
+Search for modules by name or description.
 
 ```typescript
-const portSpec = usePortSpec(engine, 'vco');
-// portSpec.inputs: PortDef[]
-// portSpec.outputs: PortDef[]
+const results = useQuiverSearch(engine, 'filter');
+// results: ModuleCatalogEntry[]
 ```
 
-### useConnection
+### useQuiverParam
 
-Hook for managing connections between modules.
+Hook for module parameter control with local state.
 
 ```typescript
-const { connect, disconnect, cables } = useConnection(engine);
+const [value, setValue] = useQuiverParam(engine, 'filter', 0);
 
-// Connect two ports
-connect('osc.saw', 'filter.in');
-
-// Disconnect
-disconnect('osc.saw', 'filter.in');
+// value: current parameter value
+// setValue: function to update the parameter
 ```
 
-### useParameter
+### useQuiverLevel
 
-Hook for module parameter control with optional debouncing.
+Subscribe to real-time level meter updates.
 
 ```typescript
-const [value, setValue] = useParameter(engine, 'filter', 0, {
-  min: 0,
-  max: 1,
-  debounce: 16 // ms
-});
+const { rmsDb, peakDb } = useQuiverLevel(engine, 'output', 0);
+// rmsDb: RMS level in dB
+// peakDb: Peak level in dB
 ```
 
-### useObserver
+### useQuiverGate
 
-Subscribe to real-time value updates from the engine.
+Subscribe to gate state updates.
 
 ```typescript
-const updates = useObserver(engine, [
+const isActive = useQuiverGate(engine, 'env', 0);
+// isActive: boolean gate state
+```
+
+### useQuiverUpdates
+
+Low-level hook for subscribing to real-time value updates.
+
+```typescript
+const updates = useQuiverUpdates(engine, [
   { type: 'level', node_id: 'output', port_id: 0 },
-  { type: 'scope', node_id: 'osc', port_id: 0, buffer_size: 512 }
+  { type: 'gate', node_id: 'env', port_id: 0 },
 ]);
 
-// updates is an array of ObservableValue
+// updates: Map<string, ObservableValue>
 ```
 
-## Components
+### useQuiverPatch
 
-### QuiverProvider
+Hook for loading and managing patches.
 
-Context provider for sharing engine state across components.
+```typescript
+const { isLoaded, error, loadPatch, savePatch, clearPatch } = useQuiverPatch(engine);
 
-```tsx
-import { QuiverProvider, useQuiverContext } from '@quiver/react';
+// Load a patch
+await loadPatch(patchDef);
 
-function App() {
-  return (
-    <QuiverProvider sampleRate={44100}>
-      <Synth />
-    </QuiverProvider>
-  );
-}
+// Save current patch
+const savedPatch = savePatch('My Patch');
 
-function Synth() {
-  const { engine, isReady } = useQuiverContext();
-  // ...
-}
+// Clear the patch
+clearPatch();
 ```
 
-## Types
+## React Flow Integration
 
-This package exports types compatible with React Flow for building visual patching interfaces:
+This package provides utilities for integrating Quiver with React Flow for visual patching interfaces.
+
+### Type Definitions
 
 ```typescript
 import type {
   QuiverNodeData,
   QuiverEdgeData,
-  ModuleTypeId
+  QuiverNode,
+  QuiverEdge,
 } from '@quiver/react';
 ```
 
-### QuiverNodeData
-
-Data structure for React Flow nodes representing modules.
+### Conversion Functions
 
 ```typescript
-interface QuiverNodeData extends Record<string, unknown> {
-  moduleType: ModuleTypeId;
-  state?: Record<string, unknown>;
-  label?: string;
-}
+import {
+  patchToReactFlow,
+  reactFlowToPatch,
+  createQuiverNode,
+  createQuiverEdge,
+} from '@quiver/react';
+
+// Convert a Quiver patch to React Flow format
+const { nodes, edges } = patchToReactFlow(patchDef, {
+  defaultPosition: { x: 0, y: 0 },
+  moduleSpacing: 250,
+});
+
+// Convert React Flow back to a Quiver patch
+const patch = reactFlowToPatch(nodes, edges, {
+  name: 'My Patch',
+  author: 'User',
+});
+
+// Create new nodes and edges
+const newNode = createQuiverNode('vco', { x: 100, y: 100 }, existingNames);
+const newEdge = createQuiverEdge('osc', 'saw', 'filter', 'in');
 ```
 
-### QuiverEdgeData
-
-Data structure for React Flow edges representing cables.
+### Utility Functions
 
 ```typescript
-interface QuiverEdgeData extends Record<string, unknown> {
-  signalKind?: string;
-  attenuation?: number;
-  offset?: number;
-}
+import {
+  generateModuleName,
+  updatePatchPositions,
+  getCablesForModule,
+  removeModuleFromPatch,
+} from '@quiver/react';
 ```
 
 ## Example: Simple Synth
 
 ```tsx
-import { useQuiver, useParameter } from '@quiver/react';
+import { useEffect } from 'react';
+import { useQuiverEngine, useQuiverParam } from '@quiver/react';
 
 function SimpleSynth() {
-  const { engine, isReady } = useQuiver();
-  const [cutoff, setCutoff] = useParameter(engine, 'filter', 0, {
-    min: 0, max: 1, initial: 0.5
-  });
+  const { engine, isReady } = useQuiverEngine();
+  const [cutoff, setCutoff] = useQuiverParam(engine, 'filter', 0);
 
   useEffect(() => {
     if (!engine) return;
@@ -212,6 +221,27 @@ function SimpleSynth() {
     </div>
   );
 }
+```
+
+## Re-exports
+
+This package re-exports common types and functions from `@quiver/types`:
+
+```typescript
+import {
+  // Types
+  type PatchDef,
+  type ModuleDef,
+  type CableDef,
+  type SignalKind,
+  // Constants
+  SIGNAL_KINDS,
+  DEFAULT_SIGNAL_COLORS,
+  // Functions
+  parsePortReference,
+  createPortReference,
+  getSignalColor,
+} from '@quiver/react';
 ```
 
 ## License

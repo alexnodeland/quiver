@@ -39,8 +39,8 @@
   <pre id="info">Loading...</pre>
 
   <script type="module">
-    // Import the WASM module from the built package
-    import init, { QuiverEngine } from '../../../../packages/@quiver/wasm/quiver.js';
+    // Import the WASM module using the alias defined in vite.config.ts
+    import init, { QuiverEngine } from '@quiver/wasm/quiver';
 
     const statusEl = document.getElementById('status');
     const resultsEl = document.getElementById('results');

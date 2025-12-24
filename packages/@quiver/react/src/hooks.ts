@@ -21,28 +21,28 @@ import {
  * Type for the QuiverEngine WASM instance
  * This matches the API exposed by the Rust wasm-bindgen bindings in src/wasm/engine.rs
  *
- * Note: Methods that return `unknown` wrap Rust's `Result<JsValue, JsValue>` -
- * they may throw errors and return JSON-serialized data that needs parsing.
+ * Methods returning Result<JsValue, JsValue> in Rust will throw on error.
+ * The serde_wasm_bindgen serialization returns plain JS objects matching the Rust structs.
  */
 export interface QuiverEngine {
-  // Catalog & Introspection
+  // Catalog & Introspection (all may throw on error)
   get_catalog(): CatalogResponse;
   search_modules(query: string): ModuleCatalogEntry[];
   get_modules_by_category(category: string): ModuleCatalogEntry[];
   get_categories(): string[];
   get_port_spec(typeId: string): unknown;
 
-  // Signal semantics
+  // Signal semantics (may throw on error)
   get_signal_colors(): unknown;
   check_compatibility(from: string, to: string): unknown;
 
-  // Patch operations
+  // Patch operations (may throw on error)
   load_patch(patch: unknown): void;
   save_patch(name: string): unknown;
   validate_patch(patch: unknown): unknown;
   clear_patch(): void;
 
-  // Module operations
+  // Module operations (may throw on error)
   add_module(typeId: string, name: string): void;
   remove_module(name: string): void;
   set_module_position(name: string, x: number, y: number): void;
@@ -52,7 +52,7 @@ export interface QuiverEngine {
   get_module_names(): string[];
   set_output(name: string): void;
 
-  // Cable operations
+  // Cable operations (may throw on error)
   connect(from: string, to: string): void;
   connect_attenuated(from: string, to: string, attenuation: number): void;
   connect_modulated(
@@ -64,13 +64,13 @@ export interface QuiverEngine {
   disconnect(from: string, to: string): void;
   disconnect_by_index(index: number): void;
 
-  // Parameters
+  // Parameters (may throw on error)
   get_params(nodeName: string): unknown;
   set_param(nodeName: string, paramIndex: number, value: number): void;
   get_param(nodeName: string, paramIndex: number): number;
   set_param_by_name(nodeName: string, paramName: string, value: number): void;
 
-  // Observer / Real-time bridge
+  // Observer / Real-time bridge (may throw on error)
   subscribe(targets: SubscriptionTarget[]): void;
   unsubscribe(targetIds: string[]): void;
   clear_subscriptions(): void;
@@ -83,7 +83,9 @@ export interface QuiverEngine {
   reset(): void;
   compile(): void;
 
-  // MIDI
+  // MIDI (may throw on error for invalid values)
+  create_midi_input(): void;
+  create_midi_cc_input(cc: number): void;
   midi_note_on(note: number, velocity: number): void;
   midi_note_off(note: number, velocity: number): void;
   midi_cc(cc: number, value: number): void;
