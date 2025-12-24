@@ -428,14 +428,14 @@ test.describe('MIDI API', () => {
     const result = await page.evaluate(() => {
       const engine = new window.QuiverEngine(44100.0);
       engine.midi_note_on(60, 100);
-      // midi_velocity is a getter property, not a method
+      // midi_velocity is a getter property, returns 0-10V (modular standard)
       const velocity = engine.midi_velocity;
       engine.free();
       return velocity;
     });
 
-    // Velocity 100 normalized to 0-1 = 100/127 ≈ 0.787
-    expect(result).toBeCloseTo(100 / 127, 2);
+    // Velocity 100 normalized to 0-10V = (100/127) * 10 ≈ 7.87
+    expect(result).toBeCloseTo((100 / 127) * 10, 2);
   });
 
   test('midi_velocity updates with new notes', async ({ page }) => {
@@ -443,7 +443,7 @@ test.describe('MIDI API', () => {
       const engine = new window.QuiverEngine(44100.0);
 
       engine.midi_note_on(60, 50);
-      // midi_velocity is a getter property
+      // midi_velocity is a getter property, returns 0-10V
       const vel1 = engine.midi_velocity;
 
       engine.midi_note_on(62, 127);
@@ -453,8 +453,9 @@ test.describe('MIDI API', () => {
       return { vel1, vel2 };
     });
 
-    expect(result.vel1).toBeCloseTo(50 / 127, 2);
-    expect(result.vel2).toBeCloseTo(127 / 127, 2);
+    // Velocities normalized to 0-10V (modular standard)
+    expect(result.vel1).toBeCloseTo((50 / 127) * 10, 2);
+    expect(result.vel2).toBeCloseTo((127 / 127) * 10, 2);
   });
 });
 

@@ -40,7 +40,7 @@ test.describe('Package Integration', () => {
         // Observer methods
         hasSubscribe: typeof engine.subscribe === 'function',
         hasUnsubscribe: typeof engine.unsubscribe === 'function',
-        hasDrainUpdates: typeof engine.drain_updates === 'function',
+        hasPollUpdates: typeof engine.poll_updates === 'function',
 
         // State methods
         hasModuleCount: typeof engine.module_count === 'function',
@@ -72,7 +72,7 @@ test.describe('Package Integration', () => {
     expect(exports.hasCreateMidiInput).toBe(true);
     expect(exports.hasSubscribe).toBe(true);
     expect(exports.hasUnsubscribe).toBe(true);
-    expect(exports.hasDrainUpdates).toBe(true);
+    expect(exports.hasPollUpdates).toBe(true);
     expect(exports.hasModuleCount).toBe(true);
     expect(exports.hasCableCount).toBe(true);
     expect(exports.hasSampleRate).toBe(true);
@@ -184,8 +184,8 @@ test.describe('Package Integration', () => {
       engine.set_output('out');
       engine.compile();
 
-      // Subscribe to parameter changes
-      engine.subscribe('param', 'osc', '0');
+      // Subscribe to parameter changes (new API takes array of subscription targets)
+      engine.subscribe([{ type: 'param', node_id: 'osc', param_id: '0' }]);
 
       // Set a parameter
       engine.set_param('osc', 0, 0.5);
@@ -193,8 +193,8 @@ test.describe('Package Integration', () => {
       // Process some audio to trigger updates
       engine.process_block(128);
 
-      // Drain updates
-      const updates = engine.drain_updates();
+      // Poll updates (renamed from drain_updates)
+      const updates = engine.poll_updates();
 
       engine.free();
       return {
