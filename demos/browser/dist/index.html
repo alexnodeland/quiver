@@ -3,259 +3,1177 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Quiver Browser Synth</title>
+  <title>QUIVER // Modular Synth</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
   <style>
+    :root {
+      --bg-deep: #0a0a0f;
+      --bg-dark: #0d0d14;
+      --bg-panel: #12121a;
+      --bg-panel-light: #1a1a24;
+
+      --neon-cyan: #00f5ff;
+      --neon-magenta: #ff00ff;
+      --neon-purple: #bf00ff;
+      --neon-pink: #ff2d95;
+      --neon-blue: #4d4dff;
+      --neon-orange: #ff6b35;
+
+      --glow-cyan: 0 0 10px #00f5ff, 0 0 20px #00f5ff44, 0 0 40px #00f5ff22;
+      --glow-magenta: 0 0 10px #ff00ff, 0 0 20px #ff00ff44, 0 0 40px #ff00ff22;
+      --glow-purple: 0 0 10px #bf00ff, 0 0 20px #bf00ff44, 0 0 40px #bf00ff22;
+
+      --text-primary: #e0e0e8;
+      --text-dim: #6a6a7a;
+      --text-accent: var(--neon-cyan);
+
+      --border-glow: 1px solid rgba(0, 245, 255, 0.3);
+      --border-dim: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
     * {
       box-sizing: border-box;
-    }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #1a1a2e;
-      color: #eee;
       margin: 0;
-      padding: 20px;
+      padding: 0;
+    }
+
+    html, body {
+      height: 100%;
+      overflow-x: hidden;
+    }
+
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: var(--bg-deep);
+      color: var(--text-primary);
       min-height: 100vh;
+      position: relative;
     }
-    h1 {
-      color: #7b68ee;
-      margin: 0 0 20px 0;
+
+    /* Animated grid background */
+    .grid-bg {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background:
+        linear-gradient(180deg,
+          transparent 0%,
+          rgba(0, 245, 255, 0.02) 50%,
+          transparent 100%
+        ),
+        linear-gradient(90deg,
+          rgba(0, 245, 255, 0.03) 1px,
+          transparent 1px
+        ),
+        linear-gradient(0deg,
+          rgba(0, 245, 255, 0.03) 1px,
+          transparent 1px
+        );
+      background-size: 100% 100%, 60px 60px, 60px 60px;
+      animation: gridMove 20s linear infinite;
+      pointer-events: none;
+      z-index: 0;
     }
+
+    @keyframes gridMove {
+      0% { background-position: 0 0, 0 0, 0 0; }
+      100% { background-position: 0 100%, 0 60px, 60px 0; }
+    }
+
+    /* Scan line overlay */
+    .scanlines {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: repeating-linear-gradient(
+        0deg,
+        rgba(0, 0, 0, 0.1) 0px,
+        rgba(0, 0, 0, 0.1) 1px,
+        transparent 1px,
+        transparent 3px
+      );
+      pointer-events: none;
+      z-index: 1000;
+      opacity: 0.3;
+    }
+
+    /* Vignette */
+    .vignette {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: radial-gradient(
+        ellipse at center,
+        transparent 0%,
+        transparent 50%,
+        rgba(0, 0, 0, 0.5) 100%
+      );
+      pointer-events: none;
+      z-index: 999;
+    }
+
+    /* Main container */
     .container {
-      max-width: 900px;
+      position: relative;
+      z-index: 1;
+      max-width: 1400px;
       margin: 0 auto;
+      padding: 30px;
     }
-    .panel {
-      background: #16213e;
-      border-radius: 12px;
-      padding: 20px;
-      margin-bottom: 20px;
+
+    /* Header */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 30px;
+      padding-bottom: 20px;
+      border-bottom: var(--border-dim);
     }
-    .panel h2 {
-      margin: 0 0 15px 0;
-      font-size: 16px;
-      color: #888;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-    }
-    .controls {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+
+    .logo {
+      display: flex;
+      align-items: center;
       gap: 15px;
     }
+
+    .logo-icon {
+      width: 50px;
+      height: 50px;
+      position: relative;
+    }
+
+    .logo-icon::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 40px;
+      height: 40px;
+      border: 3px solid var(--neon-cyan);
+      border-radius: 50%;
+      box-shadow: var(--glow-cyan);
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    .logo-icon::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) rotate(45deg);
+      width: 20px;
+      height: 20px;
+      background: var(--neon-magenta);
+      box-shadow: var(--glow-magenta);
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+      50% { opacity: 0.7; transform: translate(-50%, -50%) scale(1.1); }
+    }
+
+    h1 {
+      font-family: 'Orbitron', sans-serif;
+      font-weight: 900;
+      font-size: 2.2rem;
+      letter-spacing: 8px;
+      background: linear-gradient(90deg, var(--neon-cyan), var(--neon-magenta));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      text-shadow: 0 0 40px rgba(0, 245, 255, 0.3);
+    }
+
+    .subtitle {
+      font-size: 0.7rem;
+      letter-spacing: 4px;
+      color: var(--text-dim);
+      margin-top: 5px;
+    }
+
+    /* Status indicator */
+    .status-group {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    #status {
+      font-size: 0.75rem;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      padding: 10px 20px;
+      border-radius: 4px;
+      background: var(--bg-panel);
+      border: var(--border-dim);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #status::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      animation: blink 1s ease-in-out infinite;
+    }
+
+    #status.loading::before {
+      background: var(--neon-orange);
+      box-shadow: 0 0 10px var(--neon-orange);
+    }
+
+    #status.ready::before {
+      background: var(--neon-cyan);
+      box-shadow: 0 0 10px var(--neon-cyan);
+    }
+
+    #status.running::before {
+      background: #00ff88;
+      box-shadow: 0 0 10px #00ff88;
+      animation: none;
+    }
+
+    #status.error::before {
+      background: #ff3366;
+      box-shadow: 0 0 10px #ff3366;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    /* Start button */
+    #start {
+      font-family: 'Orbitron', sans-serif;
+      font-weight: 700;
+      font-size: 0.85rem;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      padding: 15px 35px;
+      background: linear-gradient(135deg, var(--neon-magenta), var(--neon-purple));
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.3s ease;
+      box-shadow: 0 0 20px rgba(191, 0, 255, 0.4);
+    }
+
+    #start::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+      transition: left 0.5s ease;
+    }
+
+    #start:hover::before {
+      left: 100%;
+    }
+
+    #start:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 30px rgba(191, 0, 255, 0.6);
+    }
+
+    #start:disabled {
+      background: var(--bg-panel);
+      color: var(--text-dim);
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    #start:disabled::before {
+      display: none;
+    }
+
+    /* Main layout */
+    .main-layout {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      gap: 25px;
+    }
+
+    .left-column {
+      display: flex;
+      flex-direction: column;
+      gap: 25px;
+    }
+
+    .right-column {
+      display: flex;
+      flex-direction: column;
+      gap: 25px;
+    }
+
+    /* Visualization area */
+    .viz-container {
+      background: var(--bg-panel);
+      border: var(--border-glow);
+      border-radius: 12px;
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .viz-container::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--neon-cyan), transparent);
+    }
+
+    .viz-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+    }
+
+    .viz-title {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.8rem;
+      letter-spacing: 3px;
+      color: var(--neon-cyan);
+      text-transform: uppercase;
+    }
+
+    .viz-modes {
+      display: flex;
+      gap: 5px;
+    }
+
+    .viz-mode-btn {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.65rem;
+      letter-spacing: 1px;
+      padding: 6px 12px;
+      background: transparent;
+      color: var(--text-dim);
+      border: 1px solid var(--text-dim);
+      border-radius: 3px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-transform: uppercase;
+    }
+
+    .viz-mode-btn:hover, .viz-mode-btn.active {
+      color: var(--neon-cyan);
+      border-color: var(--neon-cyan);
+      box-shadow: 0 0 10px rgba(0, 245, 255, 0.3);
+    }
+
+    .canvas-wrapper {
+      position: relative;
+      background: linear-gradient(180deg, #080810 0%, #0a0a12 100%);
+      border-radius: 8px;
+      padding: 2px;
+      overflow: hidden;
+    }
+
+    .canvas-wrapper::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background:
+        linear-gradient(90deg, rgba(0,245,255,0.05) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(0,245,255,0.05) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      border-radius: 8px;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      border-radius: 6px;
+      background: transparent;
+    }
+
+    #scope {
+      height: 280px;
+    }
+
+    #spectrum {
+      height: 150px;
+    }
+
+    /* VU Meters */
+    .vu-container {
+      display: flex;
+      gap: 20px;
+      padding: 15px;
+      background: var(--bg-dark);
+      border-radius: 6px;
+      margin-top: 15px;
+    }
+
+    .vu-meter {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .vu-label {
+      font-size: 0.6rem;
+      letter-spacing: 2px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      text-align: center;
+    }
+
+    .vu-bar-container {
+      height: 8px;
+      background: #0a0a10;
+      border-radius: 4px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .vu-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--neon-cyan), var(--neon-magenta));
+      border-radius: 4px;
+      transition: width 0.05s ease;
+      box-shadow: 0 0 10px var(--neon-cyan);
+    }
+
+    .vu-leds {
+      display: flex;
+      gap: 2px;
+      justify-content: center;
+    }
+
+    .vu-led {
+      width: 4px;
+      height: 12px;
+      background: #1a1a24;
+      border-radius: 1px;
+      transition: background 0.1s, box-shadow 0.1s;
+    }
+
+    .vu-led.green { --led-color: #00ff88; }
+    .vu-led.yellow { --led-color: #ffcc00; }
+    .vu-led.red { --led-color: #ff3366; }
+
+    .vu-led.active {
+      background: var(--led-color);
+      box-shadow: 0 0 8px var(--led-color);
+    }
+
+    /* Panel styling */
+    .panel {
+      background: var(--bg-panel);
+      border: var(--border-dim);
+      border-radius: 12px;
+      padding: 20px;
+      position: relative;
+    }
+
+    .panel::before {
+      content: '';
+      position: absolute;
+      top: -1px;
+      left: 20px;
+      right: 20px;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+    }
+
+    .panel h2 {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.75rem;
+      font-weight: 500;
+      letter-spacing: 3px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .panel h2::before {
+      content: '';
+      width: 3px;
+      height: 12px;
+      background: var(--neon-cyan);
+      border-radius: 2px;
+      box-shadow: 0 0 8px var(--neon-cyan);
+    }
+
+    /* Controls grid */
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 20px;
+    }
+
     .control {
       display: flex;
       flex-direction: column;
-      gap: 5px;
+      gap: 10px;
     }
+
     .control label {
-      font-size: 12px;
-      color: #888;
+      font-size: 0.65rem;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+      text-transform: uppercase;
     }
-    .control input[type="range"] {
+
+    /* Custom range slider */
+    input[type="range"] {
+      -webkit-appearance: none;
       width: 100%;
-      accent-color: #7b68ee;
+      height: 6px;
+      background: var(--bg-dark);
+      border-radius: 3px;
+      outline: none;
+      cursor: pointer;
     }
-    .control .value {
-      font-size: 14px;
-      font-family: monospace;
-      color: #7b68ee;
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      background: linear-gradient(135deg, var(--neon-cyan), var(--neon-purple));
+      border-radius: 50%;
+      cursor: pointer;
+      box-shadow: 0 0 15px rgba(0, 245, 255, 0.5);
+      transition: transform 0.2s, box-shadow 0.2s;
     }
+
+    input[type="range"]::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+      box-shadow: 0 0 25px rgba(0, 245, 255, 0.8);
+    }
+
+    input[type="range"]::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      background: linear-gradient(135deg, var(--neon-cyan), var(--neon-purple));
+      border-radius: 50%;
+      cursor: pointer;
+      border: none;
+      box-shadow: 0 0 15px rgba(0, 245, 255, 0.5);
+    }
+
+    .value {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.9rem;
+      font-weight: 500;
+      color: var(--neon-cyan);
+      text-shadow: 0 0 10px rgba(0, 245, 255, 0.5);
+    }
+
+    /* Select dropdown */
+    select {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      padding: 10px 15px;
+      background: var(--bg-dark);
+      color: var(--text-primary);
+      border: 1px solid rgba(0, 245, 255, 0.2);
+      border-radius: 6px;
+      cursor: pointer;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    select:hover, select:focus {
+      border-color: var(--neon-cyan);
+      box-shadow: 0 0 15px rgba(0, 245, 255, 0.2);
+    }
+
+    select option {
+      background: var(--bg-dark);
+      color: var(--text-primary);
+    }
+
+    /* Keyboard */
+    .keyboard-panel {
+      background: var(--bg-panel);
+      border: var(--border-dim);
+      border-radius: 12px;
+      padding: 25px;
+    }
+
+    .keyboard-info {
+      font-size: 0.65rem;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .keyboard-info kbd {
+      display: inline-block;
+      padding: 3px 8px;
+      background: var(--bg-dark);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 3px;
+      font-family: inherit;
+    }
+
     .keyboard {
       display: flex;
-      gap: 2px;
-      margin-top: 10px;
-    }
-    .key {
-      width: 50px;
-      height: 150px;
-      background: linear-gradient(to bottom, #f0f0f0, #d0d0d0);
-      border: 1px solid #888;
-      border-radius: 0 0 6px 6px;
-      cursor: pointer;
-      display: flex;
-      align-items: flex-end;
       justify-content: center;
-      padding-bottom: 10px;
-      font-size: 12px;
-      color: #333;
-      transition: background 0.1s;
+      position: relative;
+      height: 180px;
+      user-select: none;
     }
-    .key:active, .key.active {
-      background: linear-gradient(to bottom, #e0e0ff, #c0c0ff);
-    }
-    .key.black {
-      width: 35px;
-      height: 100px;
-      background: linear-gradient(to bottom, #333, #111);
-      color: #888;
-      margin-left: -18px;
-      margin-right: -18px;
-      z-index: 1;
-    }
-    .key.black:active, .key.black.active {
-      background: linear-gradient(to bottom, #444, #222);
-    }
-    button {
-      background: #7b68ee;
-      color: white;
-      border: none;
-      padding: 12px 24px;
-      border-radius: 6px;
-      font-size: 16px;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-    button:hover {
-      background: #9d8dfc;
-    }
-    button:disabled {
-      background: #444;
-      cursor: not-allowed;
-    }
-    .status {
-      padding: 10px 15px;
-      border-radius: 6px;
-      margin-bottom: 15px;
-    }
-    .status.loading {
-      background: #3a3a5a;
-    }
-    .status.ready {
-      background: #1e4d2b;
-    }
-    .status.error {
-      background: #4d1e1e;
-    }
-    .scope-container {
+
+    .keyboard-inner {
+      position: relative;
       display: flex;
-      gap: 20px;
     }
-    canvas {
-      background: #0a0a1a;
-      border-radius: 8px;
+
+    .key {
+      position: relative;
+      width: 52px;
+      height: 170px;
+      margin: 0 1px;
+      background: linear-gradient(180deg,
+        #f8f8fc 0%,
+        #e8e8f0 50%,
+        #d0d0dc 100%
+      );
+      border: 1px solid rgba(0,0,0,0.2);
+      border-radius: 0 0 8px 8px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-end;
+      padding-bottom: 15px;
+      transition: all 0.1s ease;
+      box-shadow:
+        0 10px 20px rgba(0,0,0,0.3),
+        inset 0 -2px 5px rgba(0,0,0,0.1),
+        inset 0 2px 5px rgba(255,255,255,0.8);
+    }
+
+    .key span {
+      font-size: 0.6rem;
+      color: #666;
+      letter-spacing: 1px;
+      font-weight: 500;
+    }
+
+    .key .note-hint {
+      font-size: 0.5rem;
+      color: #999;
+      margin-top: 3px;
+    }
+
+    .key:active, .key.active {
+      height: 165px;
+      background: linear-gradient(180deg,
+        #e0e8ff 0%,
+        #c0d0ff 50%,
+        #a0b8ff 100%
+      );
+      box-shadow:
+        0 5px 10px rgba(0,0,0,0.2),
+        inset 0 2px 10px rgba(0, 245, 255, 0.3),
+        0 0 30px rgba(0, 245, 255, 0.3);
+    }
+
+    .key.black {
+      position: absolute;
+      top: 0;
+      width: 32px;
+      height: 110px;
+      z-index: 10;
+      margin: 0;
+      background: linear-gradient(180deg,
+        #3a3a44 0%,
+        #2a2a34 50%,
+        #1a1a24 100%
+      );
+      border-color: #000;
+      box-shadow:
+        0 8px 15px rgba(0,0,0,0.5),
+        inset 0 -2px 5px rgba(0,0,0,0.5),
+        inset 0 2px 5px rgba(255,255,255,0.1);
+    }
+
+    .key.black span {
+      color: #888;
+      font-size: 0.5rem;
+    }
+
+    .key.black .note-hint {
+      display: none;
+    }
+
+    .key.black:active, .key.black.active {
+      height: 105px;
+      background: linear-gradient(180deg,
+        #5a5a7f 0%,
+        #4a4a6f 50%,
+        #3a3a5f 100%
+      );
+      box-shadow:
+        0 4px 8px rgba(0,0,0,0.4),
+        inset 0 2px 10px rgba(191, 0, 255, 0.3),
+        0 0 20px rgba(191, 0, 255, 0.3);
+    }
+
+    /* Black key positioning - each white key is 54px (52px + 2px margin) */
+    .key.black[data-note="61"] { left: 37px; }   /* After C */
+    .key.black[data-note="63"] { left: 91px; }   /* After D */
+    .key.black[data-note="66"] { left: 199px; }  /* After F */
+    .key.black[data-note="68"] { left: 253px; }  /* After G */
+    .key.black[data-note="70"] { left: 307px; }  /* After A */
+
+    /* Voice indicators */
+    .voice-section {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .voice-label {
+      font-size: 0.55rem;
+      letter-spacing: 2px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+    }
+
+    .voice-indicators {
+      display: flex;
+      gap: 6px;
+    }
+
+    .voice-indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #1a1a24;
+      border: 1px solid rgba(0, 245, 255, 0.3);
+      transition: all 0.1s;
+    }
+
+    .voice-indicator.active {
+      background: var(--neon-cyan);
+      box-shadow: 0 0 12px var(--neon-cyan);
+    }
+
+    /* Right column - compact controls */
+    .compact-panel {
+      background: var(--bg-panel);
+      border: var(--border-dim);
+      border-radius: 12px;
+      padding: 18px;
+    }
+
+    .compact-panel h2 {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 0.7rem;
+      font-weight: 500;
+      letter-spacing: 2px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      margin-bottom: 15px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .compact-panel h2::before {
+      content: '';
+      width: 3px;
+      height: 10px;
+      border-radius: 2px;
+    }
+
+    .compact-panel.oscillator h2::before { background: var(--neon-cyan); box-shadow: 0 0 8px var(--neon-cyan); }
+    .compact-panel.filter h2::before { background: var(--neon-magenta); box-shadow: 0 0 8px var(--neon-magenta); }
+    .compact-panel.envelope h2::before { background: var(--neon-purple); box-shadow: 0 0 8px var(--neon-purple); }
+    .compact-panel.output h2::before { background: var(--neon-orange); box-shadow: 0 0 8px var(--neon-orange); }
+
+    .compact-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .compact-control {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .compact-control label {
+      font-size: 0.6rem;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      width: 80px;
+      flex-shrink: 0;
+    }
+
+    .compact-control input[type="range"] {
+      flex: 1;
+    }
+
+    .compact-control .value {
+      font-size: 0.75rem;
+      width: 50px;
+      text-align: right;
+    }
+
+    /* Footer */
+    footer {
+      margin-top: 30px;
+      padding-top: 20px;
+      border-top: var(--border-dim);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .footer-info {
+      font-size: 0.6rem;
+      letter-spacing: 2px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+    }
+
+    .footer-stats {
+      display: flex;
+      gap: 25px;
+    }
+
+    .stat {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .stat-value {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 1rem;
+      color: var(--neon-cyan);
+      text-shadow: 0 0 10px rgba(0, 245, 255, 0.5);
+    }
+
+    .stat-label {
+      font-size: 0.55rem;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+    }
+
+    /* Responsive */
+    @media (max-width: 1200px) {
+      .main-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .right-column {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 15px;
+      }
+    }
+
+    @media (max-width: 768px) {
+      .container {
+        padding: 15px;
+      }
+
+      header {
+        flex-direction: column;
+        gap: 20px;
+        text-align: center;
+      }
+
+      .status-group {
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .right-column {
+        grid-template-columns: 1fr;
+      }
+
+      .keyboard {
+        transform: scale(0.85);
+        transform-origin: center;
+      }
+
+      h1 {
+        font-size: 1.5rem;
+        letter-spacing: 4px;
+      }
     }
   </style>
-  <script type="module" crossorigin src="/assets/index-YEVN8Orx.js"></script>
+  <script type="module" crossorigin src="/assets/index-BSF96epH.js"></script>
 </head>
 <body>
+  <div class="grid-bg"></div>
+  <div class="scanlines"></div>
+  <div class="vignette"></div>
+
   <div class="container">
-    <h1>Quiver Browser Synth</h1>
-
-    <div id="status" class="status loading">Loading WASM module...</div>
-
-    <button id="start" disabled>Start Audio</button>
-
-    <div class="panel">
-      <h2>Oscillator</h2>
-      <div class="controls">
-        <div class="control">
-          <label>Waveform</label>
-          <select id="waveform">
-            <option value="saw">Sawtooth</option>
-            <option value="pulse">Pulse</option>
-            <option value="tri">Triangle</option>
-            <option value="sine">Sine</option>
-          </select>
+    <header>
+      <div class="logo">
+        <div class="logo-icon"></div>
+        <div>
+          <h1>QUIVER</h1>
+          <div class="subtitle">Modular Audio Synthesis Engine</div>
         </div>
-        <div class="control">
-          <label>Pulse Width</label>
-          <input type="range" id="pulseWidth" min="0.01" max="0.99" step="0.01" value="0.5">
-          <span class="value" id="pulseWidthValue">0.50</span>
+      </div>
+      <div class="status-group">
+        <div id="status" class="loading">Initializing WASM Module...</div>
+        <button id="start" disabled>Initialize Audio</button>
+      </div>
+    </header>
+
+    <div class="main-layout">
+      <div class="left-column">
+        <!-- Main Visualization -->
+        <div class="viz-container">
+          <div class="viz-header">
+            <span class="viz-title">Waveform Analysis</span>
+            <div class="viz-modes">
+              <button class="viz-mode-btn active" data-mode="scope">Scope</button>
+              <button class="viz-mode-btn" data-mode="lissajous">XY</button>
+              <button class="viz-mode-btn" data-mode="bars">Bars</button>
+            </div>
+          </div>
+          <div class="canvas-wrapper">
+            <canvas id="scope"></canvas>
+          </div>
+          <div class="vu-container">
+            <div class="vu-meter">
+              <span class="vu-label">Left Channel</span>
+              <div class="vu-bar-container">
+                <div class="vu-bar" id="vuLeft"></div>
+              </div>
+              <div class="vu-leds" id="ledsLeft">
+                <div class="vu-led green"></div>
+                <div class="vu-led green"></div>
+                <div class="vu-led green"></div>
+                <div class="vu-led green"></div>
+                <div class="vu-led yellow"></div>
+                <div class="vu-led yellow"></div>
+                <div class="vu-led red"></div>
+                <div class="vu-led red"></div>
+              </div>
+            </div>
+            <div class="vu-meter">
+              <span class="vu-label">Right Channel</span>
+              <div class="vu-bar-container">
+                <div class="vu-bar" id="vuRight"></div>
+              </div>
+              <div class="vu-leds" id="ledsRight">
+                <div class="vu-led green"></div>
+                <div class="vu-led green"></div>
+                <div class="vu-led green"></div>
+                <div class="vu-led green"></div>
+                <div class="vu-led yellow"></div>
+                <div class="vu-led yellow"></div>
+                <div class="vu-led red"></div>
+                <div class="vu-led red"></div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="control">
-          <label>Detune (cents)</label>
-          <input type="range" id="detune" min="-100" max="100" step="1" value="0">
-          <span class="value" id="detuneValue">0</span>
+
+        <!-- Spectrum Analyzer -->
+        <div class="viz-container">
+          <div class="viz-header">
+            <span class="viz-title">Frequency Spectrum</span>
+          </div>
+          <div class="canvas-wrapper">
+            <canvas id="spectrum"></canvas>
+          </div>
+        </div>
+
+        <!-- Keyboard -->
+        <div class="keyboard-panel">
+          <div class="keyboard-info">
+            <span>Play with keyboard</span>
+            <kbd>A</kbd><kbd>W</kbd><kbd>S</kbd><kbd>E</kbd><kbd>D</kbd><kbd>F</kbd><kbd>T</kbd><kbd>G</kbd><kbd>Y</kbd><kbd>H</kbd><kbd>U</kbd><kbd>J</kbd><kbd>K</kbd>
+          </div>
+          <div class="keyboard" id="keyboard">
+            <div class="keyboard-inner">
+              <div class="key" data-note="60"><span>C4</span><div class="note-hint">A</div></div>
+              <div class="key" data-note="62"><span>D</span><div class="note-hint">S</div></div>
+              <div class="key" data-note="64"><span>E</span><div class="note-hint">D</div></div>
+              <div class="key" data-note="65"><span>F</span><div class="note-hint">F</div></div>
+              <div class="key" data-note="67"><span>G</span><div class="note-hint">G</div></div>
+              <div class="key" data-note="69"><span>A</span><div class="note-hint">H</div></div>
+              <div class="key" data-note="71"><span>B</span><div class="note-hint">J</div></div>
+              <div class="key" data-note="72"><span>C5</span><div class="note-hint">K</div></div>
+              <!-- Black keys positioned absolutely -->
+              <div class="key black" data-note="61"><span>C#</span></div>
+              <div class="key black" data-note="63"><span>D#</span></div>
+              <div class="key black" data-note="66"><span>F#</span></div>
+              <div class="key black" data-note="68"><span>G#</span></div>
+              <div class="key black" data-note="70"><span>A#</span></div>
+            </div>
+          </div>
+          <div class="voice-section">
+            <span class="voice-label">Active Voices</span>
+            <div class="voice-indicators" id="voiceIndicators">
+              <div class="voice-indicator"></div>
+              <div class="voice-indicator"></div>
+              <div class="voice-indicator"></div>
+              <div class="voice-indicator"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="right-column">
+        <!-- Oscillator -->
+        <div class="compact-panel oscillator">
+          <h2>Oscillator</h2>
+          <div class="compact-controls">
+            <div class="compact-control">
+              <label>Waveform</label>
+              <select id="waveform">
+                <option value="saw">Sawtooth</option>
+                <option value="pulse">Pulse</option>
+                <option value="tri">Triangle</option>
+                <option value="sine">Sine</option>
+              </select>
+            </div>
+            <div class="compact-control">
+              <label>Pulse Width</label>
+              <input type="range" id="pulseWidth" min="0.01" max="0.99" step="0.01" value="0.5">
+              <span class="value" id="pulseWidthValue">50%</span>
+            </div>
+            <div class="compact-control">
+              <label>Detune</label>
+              <input type="range" id="detune" min="-100" max="100" step="1" value="0">
+              <span class="value" id="detuneValue">0ct</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Filter -->
+        <div class="compact-panel filter">
+          <h2>Filter</h2>
+          <div class="compact-controls">
+            <div class="compact-control">
+              <label>Cutoff</label>
+              <input type="range" id="cutoff" min="20" max="20000" step="1" value="2000">
+              <span class="value" id="cutoffValue">2.0k</span>
+            </div>
+            <div class="compact-control">
+              <label>Resonance</label>
+              <input type="range" id="resonance" min="0" max="0.99" step="0.01" value="0.3">
+              <span class="value" id="resonanceValue">30%</span>
+            </div>
+            <div class="compact-control">
+              <label>Env Amt</label>
+              <input type="range" id="filterEnv" min="0" max="10000" step="100" value="3000">
+              <span class="value" id="filterEnvValue">3.0k</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Envelope -->
+        <div class="compact-panel envelope">
+          <h2>Envelope</h2>
+          <div class="compact-controls">
+            <div class="compact-control">
+              <label>Attack</label>
+              <input type="range" id="attack" min="1" max="2000" step="1" value="10">
+              <span class="value" id="attackValue">10ms</span>
+            </div>
+            <div class="compact-control">
+              <label>Decay</label>
+              <input type="range" id="decay" min="1" max="2000" step="1" value="200">
+              <span class="value" id="decayValue">200ms</span>
+            </div>
+            <div class="compact-control">
+              <label>Sustain</label>
+              <input type="range" id="sustain" min="0" max="1" step="0.01" value="0.5">
+              <span class="value" id="sustainValue">50%</span>
+            </div>
+            <div class="compact-control">
+              <label>Release</label>
+              <input type="range" id="release" min="1" max="5000" step="1" value="300">
+              <span class="value" id="releaseValue">300ms</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Output -->
+        <div class="compact-panel output">
+          <h2>Output</h2>
+          <div class="compact-controls">
+            <div class="compact-control">
+              <label>Volume</label>
+              <input type="range" id="volume" min="0" max="1" step="0.01" value="0.5">
+              <span class="value" id="volumeValue">50%</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
 
-    <div class="panel">
-      <h2>Filter</h2>
-      <div class="controls">
-        <div class="control">
-          <label>Cutoff (Hz)</label>
-          <input type="range" id="cutoff" min="20" max="20000" step="1" value="2000">
-          <span class="value" id="cutoffValue">2000</span>
+    <footer>
+      <div class="footer-info">Quiver Audio Engine // WebAssembly Runtime</div>
+      <div class="footer-stats">
+        <div class="stat">
+          <span class="stat-value" id="statVoices">4</span>
+          <span class="stat-label">Voices</span>
         </div>
-        <div class="control">
-          <label>Resonance</label>
-          <input type="range" id="resonance" min="0" max="0.99" step="0.01" value="0.3">
-          <span class="value" id="resonanceValue">0.30</span>
+        <div class="stat">
+          <span class="stat-value" id="statModules">--</span>
+          <span class="stat-label">Modules</span>
         </div>
-        <div class="control">
-          <label>Envelope Amount</label>
-          <input type="range" id="filterEnv" min="0" max="10000" step="100" value="3000">
-          <span class="value" id="filterEnvValue">3000</span>
+        <div class="stat">
+          <span class="stat-value" id="statCables">--</span>
+          <span class="stat-label">Cables</span>
         </div>
-      </div>
-    </div>
-
-    <div class="panel">
-      <h2>Envelope</h2>
-      <div class="controls">
-        <div class="control">
-          <label>Attack (ms)</label>
-          <input type="range" id="attack" min="1" max="2000" step="1" value="10">
-          <span class="value" id="attackValue">10</span>
-        </div>
-        <div class="control">
-          <label>Decay (ms)</label>
-          <input type="range" id="decay" min="1" max="2000" step="1" value="200">
-          <span class="value" id="decayValue">200</span>
-        </div>
-        <div class="control">
-          <label>Sustain</label>
-          <input type="range" id="sustain" min="0" max="1" step="0.01" value="0.5">
-          <span class="value" id="sustainValue">0.50</span>
-        </div>
-        <div class="control">
-          <label>Release (ms)</label>
-          <input type="range" id="release" min="1" max="5000" step="1" value="300">
-          <span class="value" id="releaseValue">300</span>
+        <div class="stat">
+          <span class="stat-value" id="statRate">44.1k</span>
+          <span class="stat-label">Sample Rate</span>
         </div>
       </div>
-    </div>
-
-    <div class="panel">
-      <h2>Output</h2>
-      <div class="controls">
-        <div class="control">
-          <label>Volume</label>
-          <input type="range" id="volume" min="0" max="1" step="0.01" value="0.5">
-          <span class="value" id="volumeValue">0.50</span>
-        </div>
-      </div>
-    </div>
-
-    <div class="panel">
-      <h2>Keyboard</h2>
-      <p style="color: #666; font-size: 12px; margin: 0 0 10px 0;">
-        Use computer keyboard (A-S-D-F-G-H-J-K) or click keys
-      </p>
-      <div class="keyboard" id="keyboard">
-        <div class="key" data-note="60">C</div>
-        <div class="key black" data-note="61">C#</div>
-        <div class="key" data-note="62">D</div>
-        <div class="key black" data-note="63">D#</div>
-        <div class="key" data-note="64">E</div>
-        <div class="key" data-note="65">F</div>
-        <div class="key black" data-note="66">F#</div>
-        <div class="key" data-note="67">G</div>
-        <div class="key black" data-note="68">G#</div>
-        <div class="key" data-note="69">A</div>
-        <div class="key black" data-note="70">A#</div>
-        <div class="key" data-note="71">B</div>
-        <div class="key" data-note="72">C</div>
-      </div>
-    </div>
-
-    <div class="panel">
-      <h2>Scope</h2>
-      <div class="scope-container">
-        <canvas id="scope" width="400" height="200"></canvas>
-      </div>
-    </div>
+    </footer>
   </div>
 
 </body>
