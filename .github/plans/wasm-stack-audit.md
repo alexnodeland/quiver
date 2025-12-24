@@ -844,14 +844,20 @@ function Synth() {
 - CI: Added TypeScript typecheck job and migrated browser-tests to pnpm
 - Types: Added comprehensive documentation linking TypeScript types to Rust sources, created type compatibility check script
 
-### Phase 3: Features (Weeks 4-5)
+### Phase 3: Features (Weeks 4-5) ✅ COMPLETED
 
-| Priority | Task | Effort | Impact |
-|----------|------|--------|--------|
-| P2 | Complete MIDI-to-CV routing | 1-2 days | Functionality |
-| P2 | Use QuiverError consistently | 4 hrs | Error handling |
-| P2 | Add block-based observer collection | 4-8 hrs | Visualization |
-| P3 | Implement filter envelope in demo | 2 hrs | Demo quality |
+| Priority | Task | Effort | Impact | Status |
+|----------|------|--------|--------|--------|
+| P2 | Complete MIDI-to-CV routing | 1-2 days | Functionality | ✅ Done |
+| P2 | Use QuiverError consistently | 4 hrs | Error handling | ✅ Done |
+| P2 | Add block-based observer collection | 4-8 hrs | Visualization | ✅ Done |
+| P3 | Implement filter envelope in demo | 2 hrs | Demo quality | ✅ Done |
+
+**Phase 3 Implementation Notes:**
+- MIDI-to-CV: Added `create_midi_input()` and `create_midi_cc_input()` methods that create ExternalInput modules connected to Arc<AtomicF64> values. MIDI messages now automatically update these atomics, routing V/Oct, gate, velocity, pitch bend, and mod wheel to the patch.
+- QuiverError: Added `into_js()` helper method for converting QuiverError to JsValue. The wasm_bindgen derive already provides automatic JsValue conversion.
+- Block-based observer: Added `collect_block()` method to StateObserver that accumulates samples during block processing for accurate RMS/peak metering. process_block now collects all samples and passes them to the observer.
+- Filter envelope: Added filter envelope VCA per voice and filter_env_amt offset module. Envelope now modulates filter cutoff via the SVF's fm input.
 
 ### Phase 4: Polish (Week 6)
 

@@ -418,11 +418,183 @@ impl StateObserver {
         &self.config
     }
 
+    /// Collect observable values from a block of stereo samples
+    ///
+    /// This method should be called after processing a block of audio.
+    /// It feeds the output samples to Level/Scope/Spectrum subscriptions
+    /// for accurate block-based metering.
+    ///
+    /// The samples should be interleaved stereo (left, right, left, right, ...).
+    pub fn collect_block(&mut self, samples: &[(f32, f32)], patch: &crate::graph::Patch) {
+        // First collect param updates (these don't need samples)
+        let subscriptions = self.subscriptions.clone();
+        for target in &subscriptions {
+            if let SubscriptionTarget::Param { node_id, param_id } = target {
+                self.collect_param(patch, node_id, param_id);
+            }
+        }
+
+        // Feed samples to port buffers for subscribed ports
+        for (left, right) in samples {
+            for target in &subscriptions {
+                match target {
+                    SubscriptionTarget::Level { node_id, port_id } => {
+                        // Use left channel for port 0, right for port 1
+                        let sample = if *port_id == 0 { *left } else { *right };
+                        self.accumulate_sample(node_id, *port_id, sample);
+                    }
+                    SubscriptionTarget::Gate { node_id, port_id } => {
+                        let sample = if *port_id == 0 { *left } else { *right };
+                        self.process_gate_sample(node_id, *port_id, sample);
+                    }
+                    SubscriptionTarget::Scope {
+                        node_id, port_id, ..
+                    } => {
+                        let sample = if *port_id == 0 { *left } else { *right };
+                        self.accumulate_sample(node_id, *port_id, sample);
+                    }
+                    SubscriptionTarget::Spectrum {
+                        node_id, port_id, ..
+                    } => {
+                        let sample = if *port_id == 0 { *left } else { *right };
+                        self.accumulate_sample(node_id, *port_id, sample);
+                    }
+                    SubscriptionTarget::Param { .. } => {} // Already handled
+                }
+            }
+        }
+
+        // Check for completed buffers and emit updates
+        self.emit_completed_buffers();
+    }
+
+    /// Accumulate a sample into a port buffer
+    fn accumulate_sample(&mut self, node_id: &str, port_id: u32, sample: f32) {
+        let key = PortKey {
+            node_id: node_id.into(),
+            port_id,
+        };
+        if let Some(buffer) = self.port_buffers.get_mut(&key) {
+            buffer.push(sample);
+        }
+    }
+
+    /// Process a gate sample with hysteresis
+    fn process_gate_sample(&mut self, node_id: &str, port_id: u32, sample: f32) {
+        let key = PortKey {
+            node_id: node_id.into(),
+            port_id,
+        };
+
+        const THRESHOLD_ON: f32 = 2.5;
+        const THRESHOLD_OFF: f32 = 0.5;
+
+        let update = if let Some(buffer) = self.port_buffers.get_mut(&key) {
+            let was_active = buffer.gate_active;
+
+            if buffer.gate_active {
+                if sample < THRESHOLD_OFF {
+                    buffer.gate_active = false;
+                }
+            } else if sample > THRESHOLD_ON {
+                buffer.gate_active = true;
+            }
+
+            // Emit update on state change
+            if buffer.gate_active != was_active {
+                Some(ObservableValue::Gate {
+                    node_id: node_id.into(),
+                    port_id,
+                    active: buffer.gate_active,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(update) = update {
+            self.push_update(update);
+        }
+    }
+
+    /// Check all port buffers and emit updates for completed ones
+    fn emit_completed_buffers(&mut self) {
+        let sample_rate = self.config.sample_rate as f32;
+
+        // Collect updates in a separate vec to avoid borrow issues
+        let mut updates = Vec::new();
+
+        for (key, buffer) in self.port_buffers.iter_mut() {
+            if !buffer.is_full() {
+                continue;
+            }
+
+            // Determine what type of subscription this buffer is for
+            let sub = self.subscriptions.iter().find(|s| match s {
+                SubscriptionTarget::Level { node_id, port_id }
+                | SubscriptionTarget::Scope {
+                    node_id, port_id, ..
+                }
+                | SubscriptionTarget::Spectrum {
+                    node_id, port_id, ..
+                } => key.node_id == *node_id && key.port_id == *port_id,
+                _ => false,
+            });
+
+            if let Some(sub) = sub {
+                let update = match sub {
+                    SubscriptionTarget::Level { node_id, port_id } => {
+                        let rms_db = calculate_rms_db(&buffer.samples);
+                        let peak_db = calculate_peak_db(&buffer.samples);
+                        Some(ObservableValue::Level {
+                            node_id: node_id.clone(),
+                            port_id: *port_id,
+                            rms_db,
+                            peak_db,
+                        })
+                    }
+                    SubscriptionTarget::Scope {
+                        node_id, port_id, ..
+                    } => Some(ObservableValue::Scope {
+                        node_id: node_id.clone(),
+                        port_id: *port_id,
+                        samples: buffer.samples.clone(),
+                    }),
+                    SubscriptionTarget::Spectrum {
+                        node_id, port_id, ..
+                    } => {
+                        let bins = compute_magnitude_spectrum(&buffer.samples);
+                        Some(ObservableValue::Spectrum {
+                            node_id: node_id.clone(),
+                            port_id: *port_id,
+                            bins,
+                            freq_range: (0.0, sample_rate / 2.0),
+                        })
+                    }
+                    _ => None,
+                };
+
+                if let Some(u) = update {
+                    updates.push(u);
+                }
+                buffer.clear();
+            }
+        }
+
+        for update in updates {
+            self.push_update(update);
+        }
+    }
+
     /// Collect observable values from the patch after processing
     ///
     /// This method should be called after each audio processing cycle
     /// to update subscribed values. It accumulates samples for Level/Scope/Spectrum
     /// and emits updates when buffers are full.
+    ///
+    /// Note: For accurate block-based metering, use `collect_block` instead.
     pub fn collect_from_patch(&mut self, patch: &crate::graph::Patch) {
         // Clone subscriptions to avoid borrow issues
         let subscriptions = self.subscriptions.clone();
