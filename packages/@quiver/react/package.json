@@ -48,6 +48,7 @@
     "@quiver/types": "workspace:*"
   },
   "peerDependencies": {
+    "@quiver/wasm": ">=0.1.0",
     "@xyflow/react": ">=12.0.0",
     "react": ">=18.0.0"
   },

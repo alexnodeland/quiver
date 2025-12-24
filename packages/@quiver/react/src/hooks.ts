@@ -19,14 +19,18 @@ import {
 
 /**
  * Type for the QuiverEngine WASM instance
- * This matches the API exposed by the Rust wasm-bindgen bindings
+ * This matches the API exposed by the Rust wasm-bindgen bindings in src/wasm/engine.rs
+ *
+ * Note: Methods that return `unknown` wrap Rust's `Result<JsValue, JsValue>` -
+ * they may throw errors and return JSON-serialized data that needs parsing.
  */
 export interface QuiverEngine {
-  // Catalog
+  // Catalog & Introspection
   get_catalog(): CatalogResponse;
   search_modules(query: string): ModuleCatalogEntry[];
   get_modules_by_category(category: string): ModuleCatalogEntry[];
   get_categories(): string[];
+  get_port_spec(typeId: string): unknown;
 
   // Signal semantics
   get_signal_colors(): unknown;
@@ -46,6 +50,7 @@ export interface QuiverEngine {
   module_count(): number;
   cable_count(): number;
   get_module_names(): string[];
+  set_output(name: string): void;
 
   // Cable operations
   connect(from: string, to: string): void;
@@ -63,8 +68,9 @@ export interface QuiverEngine {
   get_params(nodeName: string): unknown;
   set_param(nodeName: string, paramIndex: number, value: number): void;
   get_param(nodeName: string, paramIndex: number): number;
+  set_param_by_name(nodeName: string, paramName: string, value: number): void;
 
-  // Observer
+  // Observer / Real-time bridge
   subscribe(targets: SubscriptionTarget[]): void;
   unsubscribe(targetIds: string[]): void;
   clear_subscriptions(): void;
@@ -72,16 +78,27 @@ export interface QuiverEngine {
   pending_update_count(): number;
 
   // Audio processing
-  tick(): [number, number];
+  tick(): Float64Array;
   process_block(numSamples: number): Float32Array;
   reset(): void;
   compile(): void;
 
-  // Port info
-  get_port_spec(typeId: string): unknown;
+  // MIDI
+  midi_note_on(note: number, velocity: number): void;
+  midi_note_off(note: number, velocity: number): void;
+  midi_cc(cc: number, value: number): void;
+  get_midi_cc(cc: number): number;
+  midi_pitch_bend(value: number): void;
 
-  // Properties
-  sample_rate: number;
+  // Properties (getters)
+  readonly sample_rate: number;
+  readonly midi_note: number;
+  readonly midi_velocity: number;
+  readonly midi_gate: boolean;
+  readonly pitch_bend: number;
+
+  // Cleanup
+  free(): void;
 }
 
 /**

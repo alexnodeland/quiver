@@ -457,12 +457,17 @@ export function normalizeParamValue(value: number, min: number, max: number, cur
 
 /**
  * All available module type IDs
+ * Corresponds to modules registered in Rust: ModuleRegistry in src/serialize.rs
  */
 export type ModuleTypeId =
   // Oscillators
   | 'vco'
   | 'analog_vco'
   | 'lfo'
+  | 'supersaw'
+  | 'karplus_strong'
+  | 'wavetable'
+  | 'formant_osc'
   // Filters
   | 'svf'
   | 'diode_ladder'
@@ -471,6 +476,7 @@ export type ModuleTypeId =
   // Amplifiers & Utilities
   | 'vca'
   | 'mixer'
+  | 'mixer8'
   | 'offset'
   | 'unit_delay'
   | 'multiple'
@@ -479,17 +485,42 @@ export type ModuleTypeId =
   | 'sample_and_hold'
   | 'precision_adder'
   | 'vc_switch'
+  | 'min'
+  | 'max'
+  | 'envelope_follower'
+  | 'scale_quantizer'
+  | 'quantizer'
+  | 'crossfader'
+  | 'chord_memory'
   // Sources
   | 'noise'
   // Sequencing
   | 'step_sequencer'
   | 'clock'
+  | 'euclidean'
+  | 'arpeggiator'
   // Effects
   | 'saturator'
   | 'wavefolder'
   | 'ring_mod'
-  | 'crossfader'
   | 'rectifier'
+  | 'delay_line'
+  | 'chorus'
+  | 'flanger'
+  | 'phaser'
+  | 'tremolo'
+  | 'vibrato'
+  | 'distortion'
+  | 'bitcrusher'
+  | 'reverb'
+  | 'parametric_eq'
+  | 'vocoder'
+  | 'pitch_shifter'
+  | 'granular'
+  // Dynamics
+  | 'limiter'
+  | 'noise_gate'
+  | 'compressor'
   // Analog Modeling
   | 'crosstalk'
   | 'ground_loop'
@@ -501,15 +532,12 @@ export type ModuleTypeId =
   | 'comparator'
   // Random
   | 'bernoulli_gate'
-  // Utilities
-  | 'min'
-  | 'max'
   // I/O
-  | 'stereo_output'
-  | 'quantizer';
+  | 'stereo_output';
 
 /**
  * Module category for grouping in UI
+ * Corresponds to categories in Rust: ModuleRegistry in src/serialize.rs
  */
 export type ModuleCategory =
   | 'Oscillators'
@@ -518,8 +546,10 @@ export type ModuleCategory =
   | 'Modulation'
   | 'Utilities'
   | 'Sources'
-  | 'Sequencing'
+  | 'Sequencers'
+  | 'Sequencing' // Alias for compatibility
   | 'Effects'
+  | 'Dynamics'
   | 'Logic'
   | 'Random'
   | 'Analog Modeling'
