@@ -12,6 +12,13 @@ packages/@quiver/wasm/quiver_bg.wasm.d.ts
 # Node
 node_modules/
 *.log
+.pnpm-store/
+
+# Turbo
+.turbo/
+
+# Package build outputs
+dist/
 
 # Playwright test artifacts
 test-results/

@@ -3,17 +3,26 @@
   "private": true,
   "version": "0.1.0",
   "description": "Quiver modular audio synthesis library",
-  "workspaces": [
-    "packages/@quiver/*"
-  ],
+  "packageManager": "pnpm@9.15.0",
   "scripts": {
+    "build": "turbo run build",
     "build:wasm": "make wasm",
     "build:wasm:dev": "make wasm-dev",
-    "build:types": "cd packages/@quiver/types && npm run build",
-    "build:react": "cd packages/@quiver/react && npm run build",
-    "build": "npm run build:wasm && npm run build:types && npm run build:react"
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "clean": "turbo run clean && rm -rf node_modules",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "changeset": "changeset",
+    "changeset:version": "changeset version",
+    "changeset:publish": "changeset publish"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.29.8",
+    "prettier": "^3.2.0",
+    "turbo": "^2.3.0",
     "typescript": "^5.0.0"
   },
   "keywords": [
@@ -23,5 +32,9 @@
     "wasm",
     "rust"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=9.0.0"
+  }
 }
