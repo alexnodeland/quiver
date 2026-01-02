@@ -137,7 +137,6 @@ function createSynthPatch(engine: QuiverEngine) {
     addModule('svf', `filter_${i}`);
     addModule('adsr', `env_${i}`);
     addModule('vca', `amp_${i}`);
-    addModule('vca', `filter_env_vca_${i}`); // VCA to scale envelope for filter
     addModule('offset', `pitch_${i}`);
     addModule('offset', `gate_${i}`);
   }
@@ -151,7 +150,6 @@ function createSynthPatch(engine: QuiverEngine) {
   addModule('offset', 'detune_knob');
   addModule('offset', 'cutoff_knob');
   addModule('offset', 'resonance_knob');
-  addModule('offset', 'filter_env_amt'); // Filter envelope amount knob
   addModule('mixer', 'voice_mixer');
 
   // Chorus effect for stereo width
@@ -178,11 +176,6 @@ function createSynthPatch(engine: QuiverEngine) {
     connect('resonance_knob.out', `filter_${i}.res`);
     connect(`env_${i}.env`, `amp_${i}.cv`);
     connect(`amp_${i}.out`, `voice_mixer.ch${i}`);
-
-    // Filter envelope modulation: envelope -> VCA -> filter fm
-    connect(`env_${i}.env`, `filter_env_vca_${i}.in`);
-    connect('filter_env_amt.out', `filter_env_vca_${i}.cv`);
-    connect(`filter_env_vca_${i}.out`, `filter_${i}.fm`);
   }
 
   // Route through chorus for stereo width
@@ -205,7 +198,6 @@ function createSynthPatch(engine: QuiverEngine) {
   engine.set_param('detune_knob', 0, 0.0);
   engine.set_param('cutoff_knob', 0, hzToCV(2000));
   engine.set_param('resonance_knob', 0, 0.3);
-  engine.set_param('filter_env_amt', 0, hzToCV(3000)); // Default filter env amount
 
   // Chorus defaults
   engine.set_param('chorus_rate', 0, 0.3);   // ~1Hz LFO rate
@@ -845,9 +837,8 @@ function setupControls() {
   bindSlider('resonance', (v) => {
     if (engine) engine.set_param('resonance_knob', 0, v);
   });
-  bindSlider('filterEnv', (hz) => {
-    // Filter envelope amount controls how much the envelope opens the filter
-    if (engine) engine.set_param('filter_env_amt', 0, hzToCV(hz));
+  bindSlider('filterEnv', () => {
+    // TODO: Filter envelope amount needs VCA module
   });
 
   // Chorus controls
