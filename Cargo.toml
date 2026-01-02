@@ -60,7 +60,3 @@ path = "examples/simple_patch.rs"
 [profile.release]
 opt-level = "z"
 lto = true
-
-# WASM pack configuration
-[package.metadata.wasm-pack.profile.release]
-wasm-opt = false
