@@ -130,25 +130,25 @@ test.describe('Error Handling', () => {
       engine.add_module('stereo_output', 'out');
       engine.connect('osc.saw', 'out.left');
       engine.set_output('out');
-      // Don't compile - process anyway
+      // Don't compile - process anyway. The engine is self-healing: process_block
+      // lazily (re)compiles a dirty graph, so this must not crash. It may return
+      // audio (auto-compiled) or silence (empty/uncompilable graph) - both fine.
       try {
         const output = engine.process_block(128);
         engine.free();
-        // Either throws or returns silence/zeros
         return {
           threw: false,
-          hasOutput: output.length > 0,
-          isSilent: Array.from(output).every(s => s === 0)
+          length: output.length,
         };
       } catch (e) {
         engine.free();
-        return { threw: true, error: String(e) };
+        return { threw: true, length: 0, error: String(e) };
       }
     });
 
-    // Either throws an error OR returns silent output - both are acceptable
+    // Must not crash. If it returned, the block is the right size (self-healed).
     if (!result.threw) {
-      expect(result.isSilent).toBe(true);
+      expect(result.length).toBe(256); // 128 samples * 2 channels
     }
   });
 

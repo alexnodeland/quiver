@@ -3,6 +3,9 @@
  *
  * These hooks provide reactive bindings for the Quiver WASM engine,
  * enabling real-time updates of parameters, levels, and other values.
+ *
+ * The `'use client'` directive is injected at the top of the built bundle by tsup
+ * (see tsup.config.ts banner) so these hooks work in React Server Component setups.
  */
 
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
@@ -17,71 +20,26 @@ import {
   getSubscriptionTargetKey,
 } from '@quiver/types';
 
+// Import the real engine type from the built @quiver/wasm entry rather than
+// duck-typing a duplicate here (Q177). This is the exact wasm-bindgen surface, so
+// it can never drift from the actual API.
+import type { QuiverEngine } from '@quiver/wasm';
+
+export type { QuiverEngine };
+
 /**
- * Type for the QuiverEngine WASM instance
- * This matches the API exposed by the Rust wasm-bindgen bindings
+ * Free a QuiverEngine, guarded against double-free / use-after-free.
+ *
+ * wasm-bindgen throws if `free()` is called twice on the same instance; swallow
+ * that so cleanup is always safe to run.
  */
-export interface QuiverEngine {
-  // Catalog
-  get_catalog(): CatalogResponse;
-  search_modules(query: string): ModuleCatalogEntry[];
-  get_modules_by_category(category: string): ModuleCatalogEntry[];
-  get_categories(): string[];
-
-  // Signal semantics
-  get_signal_colors(): unknown;
-  check_compatibility(from: string, to: string): unknown;
-
-  // Patch operations
-  load_patch(patch: unknown): void;
-  save_patch(name: string): unknown;
-  validate_patch(patch: unknown): unknown;
-  clear_patch(): void;
-
-  // Module operations
-  add_module(typeId: string, name: string): void;
-  remove_module(name: string): void;
-  set_module_position(name: string, x: number, y: number): void;
-  get_module_position(name: string): [number, number] | null;
-  module_count(): number;
-  cable_count(): number;
-  get_module_names(): string[];
-
-  // Cable operations
-  connect(from: string, to: string): void;
-  connect_attenuated(from: string, to: string, attenuation: number): void;
-  connect_modulated(
-    from: string,
-    to: string,
-    attenuation: number,
-    offset: number
-  ): void;
-  disconnect(from: string, to: string): void;
-  disconnect_by_index(index: number): void;
-
-  // Parameters
-  get_params(nodeName: string): unknown;
-  set_param(nodeName: string, paramIndex: number, value: number): void;
-  get_param(nodeName: string, paramIndex: number): number;
-
-  // Observer
-  subscribe(targets: SubscriptionTarget[]): void;
-  unsubscribe(targetIds: string[]): void;
-  clear_subscriptions(): void;
-  poll_updates(): ObservableValue[];
-  pending_update_count(): number;
-
-  // Audio processing
-  tick(): [number, number];
-  process_block(numSamples: number): Float32Array;
-  reset(): void;
-  compile(): void;
-
-  // Port info
-  get_port_spec(typeId: string): unknown;
-
-  // Properties
-  sample_rate: number;
+function freeEngine(engine: QuiverEngine | null): void {
+  if (!engine) return;
+  try {
+    engine.free();
+  } catch {
+    // Already freed — ignore.
+  }
 }
 
 /**
@@ -349,6 +307,7 @@ export function useQuiverEngine(sampleRate: number = 44100) {
 
   useEffect(() => {
     let mounted = true;
+    let created: QuiverEngine | null = null;
 
     async function init() {
       try {
@@ -357,8 +316,12 @@ export function useQuiverEngine(sampleRate: number = 44100) {
         const eng = await createEngine(sampleRate);
 
         if (mounted) {
+          created = eng;
           setEngine(eng);
           setIsReady(true);
+        } else {
+          // Unmounted before init resolved — free the orphan immediately.
+          freeEngine(eng);
         }
       } catch (e) {
         if (mounted) {
@@ -371,6 +334,12 @@ export function useQuiverEngine(sampleRate: number = 44100) {
 
     return () => {
       mounted = false;
+      setEngine(null);
+      setIsReady(false);
+      // Release the WASM engine so it does not leak (Q094). Guarded against
+      // double-free.
+      freeEngine(created);
+      created = null;
     };
   }, [sampleRate]);
 

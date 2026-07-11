@@ -26,7 +26,10 @@ import {
 // =============================================================================
 
 /**
- * Data payload for Quiver module nodes
+ * Data payload for Quiver module nodes.
+ *
+ * The `[key: string]: unknown` index signature satisfies React Flow's
+ * `Node<Data extends Record<string, unknown>>` constraint (@xyflow/react v12).
  */
 export interface QuiverNodeData {
   /** Module type identifier */
@@ -35,10 +38,14 @@ export interface QuiverNodeData {
   state?: Record<string, unknown>;
   /** Display label (defaults to node id) */
   label?: string;
+  [key: string]: unknown;
 }
 
 /**
- * Data payload for Quiver cable edges
+ * Data payload for Quiver cable edges.
+ *
+ * The `[key: string]: unknown` index signature satisfies React Flow's
+ * `Edge<Data extends Record<string, unknown>>` constraint (@xyflow/react v12).
  */
 export interface QuiverEdgeData {
   /** Source port name */
@@ -51,6 +58,7 @@ export interface QuiverEdgeData {
   attenuation?: number;
   /** DC offset value (-10.0 to 10.0V) */
   offset?: number;
+  [key: string]: unknown;
 }
 
 /**
@@ -247,7 +255,9 @@ export function generateModuleName(
   existingNames: Set<string>
 ): string {
   let counter = 1;
-  let name = moduleType;
+  // Typed as string: the disambiguated form is `${moduleType}_${counter}`, which is
+  // not a literal ModuleTypeId.
+  let name: string = moduleType;
 
   while (existingNames.has(name)) {
     name = `${moduleType}_${counter}`;
