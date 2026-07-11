@@ -2,14 +2,40 @@
 name = "quiver"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.78"
 authors = ["Alex Nodeland"]
 description = "A modular audio synthesis library using Arrow-style combinators and graph-based patching"
+readme = "README.md"
+documentation = "https://docs.rs/quiver"
 license = "MIT"
 repository = "https://github.com/alexnodeland/quiver"
 keywords = ["audio", "synthesis", "modular", "dsp", "music"]
 categories = ["multimedia::audio", "game-development"]
+# This repo is a monorepo: besides the crate itself it holds a TypeScript/npm
+# workspace (`packages/`, `demos/`) and an internal audit report. None of that
+# belongs in the crates.io tarball for a Rust consumer (verified with
+# `cargo package --list --allow-dirty`, which — before this exclude list —
+# pulled in all of `demos/`, `packages/`, the root `package.json`/
+# `package-lock.json`, `AUDIT.md` (~270KB), and every `CLAUDE.md`).
+exclude = ["AUDIT.md", "CLAUDE.md", "**/CLAUDE.md", "demos/", "packages/", "package.json", "package-lock.json"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
+# `cdylib` is required by wasm-pack (Q140): wasm-bindgen's build pipeline links
+# a `cdylib` artifact to produce the `.wasm` binary consumed by JS. Keeping it
+# declared unconditionally means every native (non-wasm) build also produces an
+# unused cdylib artifact, and — more importantly — `no_std` checks that don't
+# override `--crate-type` can hit spurious lang-item/allocator errors, because
+# rustc requires an allocator/panic-handler for cdylib outputs even when the
+# check target is `rlib`-shaped in spirit. Removing `cdylib` breaks
+# `make wasm`/`make wasm-dev` (wasm-pack refuses to build without it). The
+# resolution: keep `cdylib` here, and for no_std verification (see the
+# `no_std` CI job / `make check-nostd`) invoke
+# `cargo rustc --crate-type rlib ...` to override the declared crate-type for
+# that one invocation instead of removing it from the manifest.
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

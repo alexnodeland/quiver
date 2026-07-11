@@ -2,7 +2,7 @@
 # Common development commands
 
 .PHONY: all build test check fmt lint lint-fix clippy doc bench bench-simd bench-rt coverage clean setup help
-.PHONY: install-hooks changelog examples wasm wasm-dev wasm-check ts-check
+.PHONY: install-hooks changelog examples wasm wasm-dev wasm-check ts-check check-nostd
 .PHONY: test-browser browser-synth
 
 # Default target
@@ -28,9 +28,39 @@ test-verbose:
 test-doc:
 	cargo test --doc --all-features
 
-# Run all checks (format, lint, test)
+# Run all checks (format, lint, test).
+#
+# Deliberately does NOT depend on `check-nostd`: that target needs the
+# thumbv7em-none-eabihf target installed (`rustup target add
+# thumbv7em-none-eabihf`) and, if Homebrew Rust is shadowing rustup on your
+# PATH, the rustup toolchain's own cargo/rustc binaries -- not guaranteed to
+# be set up on every machine, and not worth slowing down the everyday
+# fmt/lint/test loop for. Run `make check-nostd` separately (CI runs it as
+# its own `no_std` job) to validate the no_std/alloc feature tiers.
 check: fmt-check lint test
 	@echo "All checks passed!"
+
+# no_std / alloc-tier check (Q137): mirrors CI's `no_std` job so you can
+# reproduce it locally. Requires the thumbv7em-none-eabihf target:
+#   rustup target add thumbv7em-none-eabihf
+# On a machine where Homebrew Rust shadows rustup on PATH (Homebrew's
+# cargo/rustc have no cross targets), invoke the rustup toolchain directly,
+# e.g.: PATH="$$(dirname $$(rustup which cargo)):$$PATH" make check-nostd
+#
+# `--crate-type rlib` overrides the crate's declared `cdylib` (see the [lib]
+# comment in Cargo.toml / Q140): checking the unmodified cdylib+rlib
+# crate-type on a no_std build fails with spurious "no global memory
+# allocator" / "panic_handler function required" errors unrelated to this
+# crate's actual no_std code, since rustc demands an allocator/panic-handler
+# for any cdylib artifact.
+#
+# Fallback: if thumbv7em-none-eabihf isn't installed and you just want a
+# rough host-target sanity check instead (weaker signal -- the host target
+# has 64-bit atomics and an allocator a real embedded target may lack), drop
+# `--target thumbv7em-none-eabihf` from both lines below.
+check-nostd:
+	cargo rustc --lib --crate-type rlib --no-default-features --target thumbv7em-none-eabihf -- --emit=metadata
+	cargo rustc --lib --crate-type rlib --no-default-features --features alloc --target thumbv7em-none-eabihf -- --emit=metadata
 
 # Format code
 fmt:
@@ -173,8 +203,16 @@ wasm:
 	@echo "WASM package built: packages/@quiver/wasm/"
 
 # Build WASM package (development, faster)
+#
+# `--dev` must come before the cargo passthrough flags (`--no-default-features
+# --features wasm`), not after: wasm-pack's CLI (>=0.13) treats the first
+# unrecognized flag as the start of its trailing `[EXTRA_OPTIONS]...` capture
+# (everything from there on is forwarded verbatim to `cargo build`), so
+# `--no-default-features` swallows `--dev` into that passthrough instead of
+# wasm-pack's own `--dev` option -- silently producing a release build (or a
+# `cargo build` argument error) instead of the intended dev build.
 wasm-dev:
-	wasm-pack build --target web --no-default-features --features wasm --dev
+	wasm-pack build --dev --target web --no-default-features --features wasm
 	cp pkg/quiver.js pkg/quiver.d.ts pkg/quiver_bg.wasm pkg/quiver_bg.wasm.d.ts packages/@quiver/wasm/
 	@echo "WASM package built (dev): packages/@quiver/wasm/"
 
@@ -231,6 +269,7 @@ help:
 	@echo ""
 	@echo "Code Quality:"
 	@echo "  make check        - Run all checks (fmt, lint, test)"
+	@echo "  make check-nostd  - Verify no_std/alloc feature tiers (thumbv7em-none-eabihf)"
 	@echo "  make fmt          - Format code"
 	@echo "  make fmt-check    - Check formatting"
 	@echo "  make lint         - Run clippy"

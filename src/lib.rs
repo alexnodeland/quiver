@@ -19,6 +19,12 @@
 //! providing core DSP modules for embedded systems and WebAssembly targets.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+// Enables the (nightly-only) `doc(cfg(...))` feature-badge attribute, but only
+// when building under the `docsrs` cfg that docs.rs sets (and that this
+// crate's own `#[cfg_attr(docsrs, doc(cfg(feature = "...")))]` annotations key
+// off of, see [package.metadata.docs.rs] in Cargo.toml). On an ordinary stable
+// build this line expands to nothing, so it does not require nightly locally.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 extern crate alloc;
 
@@ -39,34 +45,45 @@ pub mod simd;
 
 // Alloc-tier modules (work with no_std + alloc)
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub mod introspection;
 #[cfg(feature = "alloc")]
 mod introspection_impls; // ModuleIntrospection implementations for all modules
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub mod io;
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub mod observer;
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub mod presets;
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub mod scala;
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub mod serialize;
 
 // Std-only offline rendering (WAV export).
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub mod render;
 
 // Std-only modules (require full std for network, plugins, etc.)
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub mod extended_io;
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub mod mdk;
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub mod visual;
 
 // WASM bindings (requires wasm feature)
 #[cfg(feature = "wasm")]
+#[cfg_attr(docsrs, doc(cfg(feature = "wasm")))]
 pub mod wasm;
 
 /// Prelude module for convenient imports
@@ -145,16 +162,19 @@ pub mod prelude {
 
     // External I/O (works with alloc via core::sync::atomic + alloc::sync::Arc)
     #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub use crate::io::{AtomicF64, ExternalInput, ExternalOutput, MidiState};
 
     // Introspection API (GUI parameter discovery)
     #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub use crate::introspection::{
         ControlType, ModuleIntrospection, ParamCurve, ParamInfo, ValueFormat,
     };
 
     // Real-Time State Bridge (GUI live value streaming)
     #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub use crate::observer::{
         calculate_peak_db, calculate_rms_db, GateDetector, LevelMeterState, ObservableValue,
         ObserverConfig, StateObserver, SubscriptionTarget,
@@ -162,6 +182,7 @@ pub mod prelude {
 
     // Serialization (works with alloc via serde_json alloc feature)
     #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub use crate::serialize::{
         CableDef, CatalogResponse, ModuleCatalogEntry, ModuleDef, ModuleMetadata, ModuleRegistry,
         PatchDef, PortSummary, ValidationError, ValidationResult,
@@ -169,6 +190,7 @@ pub mod prelude {
 
     // Preset Library (works with alloc - just data structures)
     #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub use crate::presets::{
         ClassicPresets, PresetCategory, PresetInfo, PresetLibrary, SoundDesignPresets,
         TutorialPresets,
@@ -176,6 +198,7 @@ pub mod prelude {
 
     // Scala (.scl) microtuning parser (Q146)
     #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub use crate::scala::{ScalaError, ScalaScale};
 
     // ========================================================================
@@ -184,6 +207,7 @@ pub mod prelude {
 
     // Extended I/O (requires std for network, plugins, etc.)
     #[cfg(feature = "std")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
     pub use crate::extended_io::{
         AudioBusConfig, OscBinding, OscInput, OscMessage, OscPattern, OscReceiver, OscValue,
         PluginCategory, PluginInfo, PluginParameter, PluginWrapper, WebAudioConfig,
@@ -192,6 +216,7 @@ pub mod prelude {
 
     // Module Development Kit (requires std)
     #[cfg(feature = "std")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
     pub use crate::mdk::{
         AudioAnalysis, DocFormat, DocGenerator, ModuleCategory, ModulePresets, ModuleTemplate,
         ModuleTestHarness, PortTemplate, StateFieldTemplate, TestResult, TestSuiteResult,
@@ -199,6 +224,7 @@ pub mod prelude {
 
     // Visual Tools (requires std)
     #[cfg(feature = "std")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
     pub use crate::visual::{
         AutomationData, AutomationPoint, AutomationRecorder, AutomationTrack, DotExporter,
         DotStyle, LevelMeter, Scope, SpectrumAnalyzer, TriggerMode,
@@ -206,10 +232,12 @@ pub mod prelude {
 
     // Offline rendering / WAV export (requires std) (Q145)
     #[cfg(feature = "std")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
     pub use crate::render::{render, render_to_wav};
 
     // WASM bindings (requires wasm feature)
     #[cfg(feature = "wasm")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "wasm")))]
     pub use crate::wasm::{QuiverEngine, QuiverError};
 }
 
