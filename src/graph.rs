@@ -10,7 +10,6 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::vec;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 use slotmap::{DefaultKey, SlotMap};
@@ -19,9 +18,12 @@ use slotmap::{DefaultKey, SlotMap};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ValidationMode {
     /// No validation - allow any connections
-    #[default]
     None,
-    /// Warn on incompatible connections but allow them
+    /// Warn on incompatible connections but allow them.
+    ///
+    /// This is the default: it surfaces likely mistakes (e.g. patching Audio into a Gate
+    /// input) as collectable [`Patch::warnings`] without blocking experimentation.
+    #[default]
     Warn,
     /// Error on incompatible connections
     Strict,
@@ -130,7 +132,12 @@ impl SignalKind {
 /// Unique identifier for a node in the patch graph
 pub type NodeId = DefaultKey;
 
-/// Unique identifier for a cable connection
+/// Stable, unique identifier for a cable connection.
+///
+/// Assigned by [`Patch::connect`] (and its variants) from a monotonically increasing
+/// counter and stored inside the [`Cable`]. Unlike a positional index into the cable list,
+/// a `CableId` remains valid after other cables are disconnected/removed, so it is safe to
+/// hold and later pass to [`Patch::disconnect`].
 pub type CableId = usize;
 
 /// Reference to a specific port on a specific node
@@ -143,6 +150,9 @@ pub struct PortRef {
 /// A cable connecting two ports
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cable {
+    /// Stable identifier assigned at connect time (see [`CableId`]).
+    #[serde(default)]
+    pub id: CableId,
     pub from: PortRef,
     pub to: PortRef,
     /// Optional attenuation/gain (-2.0 to 2.0, where 1.0 = unity)
@@ -159,14 +169,37 @@ struct Node {
     position: Option<(f32, f32)>,
 }
 
-/// Error types for patch operations
+/// Error types for patch operations.
+///
+/// Marked `#[non_exhaustive]`: downstream `match` expressions must include a wildcard arm,
+/// so new variants can be added in future without breaking callers.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum PatchError {
-    InvalidNode,
-    InvalidPort,
+    /// A referenced node does not exist in the patch.
+    InvalidNode {
+        node: NodeId,
+    },
+    /// A referenced port does not exist on the given node.
+    ///
+    /// Carries enough context to be actionable: the offending node, the requested port by
+    /// name and/or id (whichever the caller supplied), and the list of valid port names on
+    /// that node so the message can suggest the intended target.
+    InvalidPort {
+        node: NodeId,
+        name: Option<String>,
+        port: Option<PortId>,
+        available: Vec<String>,
+    },
     InvalidCable,
+    /// A feedback cycle with no cycle-breaker (delay) was detected.
+    ///
+    /// `nodes` are the [`NodeId`]s stuck in the cycle; `names` are their resolved module
+    /// names captured at error-construction time so [`Display`](core::fmt::Display) can
+    /// print the actual path without a back-reference to the [`Patch`].
     CycleDetected {
         nodes: Vec<NodeId>,
+        names: Vec<String>,
     },
     CompilationFailed(String),
     /// Signal type mismatch (only in Strict validation mode)
@@ -180,11 +213,33 @@ pub enum PatchError {
 impl core::fmt::Display for PatchError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            PatchError::InvalidNode => write!(f, "Invalid node"),
-            PatchError::InvalidPort => write!(f, "Invalid port"),
+            PatchError::InvalidNode { node } => write!(f, "Invalid node: {:?}", node),
+            PatchError::InvalidPort {
+                node,
+                name,
+                port,
+                available,
+            } => {
+                write!(f, "Invalid port")?;
+                match (name, port) {
+                    (Some(n), _) => write!(f, " '{}'", n)?,
+                    (None, Some(p)) => write!(f, " #{}", p)?,
+                    (None, None) => {}
+                }
+                write!(f, " on node {:?}", node)?;
+                if available.is_empty() {
+                    write!(f, " (module exposes no matching ports)")
+                } else {
+                    write!(f, " (available ports: {})", available.join(", "))
+                }
+            }
             PatchError::InvalidCable => write!(f, "Invalid cable"),
-            PatchError::CycleDetected { nodes } => {
-                write!(f, "Cycle detected involving {} nodes", nodes.len())
+            PatchError::CycleDetected { nodes, names } => {
+                if names.is_empty() {
+                    write!(f, "Cycle detected involving {} nodes", nodes.len())
+                } else {
+                    write!(f, "Cycle detected: {}", names.join(" -> "))
+                }
             }
             PatchError::CompilationFailed(msg) => write!(f, "Compilation failed: {}", msg),
             PatchError::SignalMismatch {
@@ -223,28 +278,80 @@ impl NodeHandle {
         }
     }
 
-    /// Reference an output port by name
-    pub fn out(&self, name: &str) -> PortRef {
-        let port = self
-            .spec
-            .output_by_name(name)
-            .unwrap_or_else(|| panic!("Unknown output port: {}", name));
-        PortRef {
-            node: self.id,
-            port: port.id,
+    /// Reference an output port by name, returning an error if it does not exist.
+    ///
+    /// Prefer this over the panicking [`out`](Self::out) when the port name comes from
+    /// untrusted or dynamic input (e.g. deserializing a patch). The error lists the valid
+    /// output ports for this module.
+    pub fn output(&self, name: &str) -> Result<PortRef, PatchError> {
+        match self.spec.output_by_name(name) {
+            Some(port) => Ok(PortRef {
+                node: self.id,
+                port: port.id,
+            }),
+            None => Err(PatchError::InvalidPort {
+                node: self.id,
+                name: Some(name.to_string()),
+                port: None,
+                available: self.output_names().iter().map(|s| s.to_string()).collect(),
+            }),
         }
     }
 
-    /// Reference an input port by name
-    pub fn in_(&self, name: &str) -> PortRef {
-        let port = self
-            .spec
-            .input_by_name(name)
-            .unwrap_or_else(|| panic!("Unknown input port: {}", name));
-        PortRef {
-            node: self.id,
-            port: port.id,
+    /// Reference an input port by name, returning an error if it does not exist.
+    ///
+    /// The fallible companion to [`in_`](Self::in_); see [`output`](Self::output).
+    pub fn input(&self, name: &str) -> Result<PortRef, PatchError> {
+        match self.spec.input_by_name(name) {
+            Some(port) => Ok(PortRef {
+                node: self.id,
+                port: port.id,
+            }),
+            None => Err(PatchError::InvalidPort {
+                node: self.id,
+                name: Some(name.to_string()),
+                port: None,
+                available: self.input_names().iter().map(|s| s.to_string()).collect(),
+            }),
         }
+    }
+
+    /// Reference an output port by name (panicking convenience).
+    ///
+    /// Panics with a message listing the valid output ports if `name` is unknown. For a
+    /// non-panicking version use [`output`](Self::output).
+    pub fn out(&self, name: &str) -> PortRef {
+        self.output(name).unwrap_or_else(|_| {
+            panic!(
+                "Unknown output port: '{}'. Valid output ports: [{}]",
+                name,
+                self.output_names().join(", ")
+            )
+        })
+    }
+
+    /// Reference an input port by name (panicking convenience).
+    ///
+    /// Panics with a message listing the valid input ports if `name` is unknown. For a
+    /// non-panicking version use [`input`](Self::input).
+    pub fn in_(&self, name: &str) -> PortRef {
+        self.input(name).unwrap_or_else(|_| {
+            panic!(
+                "Unknown input port: '{}'. Valid input ports: [{}]",
+                name,
+                self.input_names().join(", ")
+            )
+        })
+    }
+
+    /// List the names of this module's input ports (in spec order).
+    pub fn input_names(&self) -> Vec<&str> {
+        self.spec.inputs.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    /// List the names of this module's output ports (in spec order).
+    pub fn output_names(&self) -> Vec<&str> {
+        self.spec.outputs.iter().map(|p| p.name.as_str()).collect()
     }
 
     /// Get the port specification
@@ -258,9 +365,18 @@ pub struct Patch {
     nodes: SlotMap<NodeId, Node>,
     cables: Vec<Cable>,
 
+    // Monotonic source of stable CableIds (never reused)
+    next_cable_id: CableId,
+
     // Execution state
     execution_order: Vec<NodeId>,
     buffers: StdMap<PortRef, f64>,
+
+    // True when the graph has been mutated since the last successful compile().
+    // tick() checks this and recompiles lazily.
+    dirty: bool,
+    // Error from the most recent failed compile (auto or explicit), if any.
+    last_compile_error: Option<PatchError>,
 
     // Configuration
     sample_rate: f64,
@@ -279,11 +395,18 @@ impl Patch {
         Self {
             nodes: SlotMap::new(),
             cables: Vec::new(),
+            next_cable_id: 0,
             execution_order: Vec::new(),
             buffers: StdMap::new(),
+            // A fresh patch is "dirty" so the first tick() compiles automatically even if
+            // the caller forgets to call compile().
+            dirty: true,
+            last_compile_error: None,
             sample_rate,
             output_node: None,
-            validation_mode: ValidationMode::None,
+            // Default is Warn (see ValidationMode): mismatched connections are flagged as
+            // warnings without blocking, matching the documented behavior.
+            validation_mode: ValidationMode::Warn,
             warnings: Vec::new(),
         }
     }
@@ -350,7 +473,7 @@ impl Patch {
     /// Remove a module from the patch
     pub fn remove(&mut self, node: NodeId) -> Result<(), PatchError> {
         if self.nodes.remove(node).is_none() {
-            return Err(PatchError::InvalidNode);
+            return Err(PatchError::InvalidNode { node });
         }
 
         // Remove all cables connected to this node
@@ -365,21 +488,32 @@ impl Patch {
         Ok(())
     }
 
-    /// Connect an output port to an input port
+    /// Allocate the next stable cable id.
+    fn alloc_cable_id(&mut self) -> CableId {
+        let id = self.next_cable_id;
+        self.next_cable_id += 1;
+        id
+    }
+
+    /// Connect an output port to an input port.
+    ///
+    /// Returns a stable [`CableId`] that remains valid for [`disconnect`](Self::disconnect)
+    /// even after other cables are removed.
     pub fn connect(&mut self, from: PortRef, to: PortRef) -> Result<CableId, PatchError> {
         self.validate_output_port(from)?;
         self.validate_input_port(to)?;
         self.validate_signal_compatibility(from, to)?;
 
-        let cable = Cable {
+        let id = self.alloc_cable_id();
+        self.cables.push(Cable {
+            id,
             from,
             to,
             attenuation: None,
             offset: None,
-        };
-        self.cables.push(cable);
+        });
         self.invalidate();
-        Ok(self.cables.len() - 1)
+        Ok(id)
     }
 
     /// Connect with attenuation (0.0-1.0 range for backwards compatibility)
@@ -393,15 +527,16 @@ impl Patch {
         self.validate_input_port(to)?;
         self.validate_signal_compatibility(from, to)?;
 
-        let cable = Cable {
+        let id = self.alloc_cable_id();
+        self.cables.push(Cable {
+            id,
             from,
             to,
             attenuation: Some(attenuation.clamp(0.0, 1.0)),
             offset: None,
-        };
-        self.cables.push(cable);
+        });
         self.invalidate();
-        Ok(self.cables.len() - 1)
+        Ok(id)
     }
 
     /// Connect with full modulation controls (attenuverter and offset)
@@ -418,15 +553,16 @@ impl Patch {
         self.validate_input_port(to)?;
         self.validate_signal_compatibility(from, to)?;
 
-        let cable = Cable {
+        let id = self.alloc_cable_id();
+        self.cables.push(Cable {
+            id,
             from,
             to,
             attenuation: Some(attenuation.clamp(-2.0, 2.0)),
             offset: Some(offset.clamp(-10.0, 10.0)),
-        };
-        self.cables.push(cable);
+        });
         self.invalidate();
-        Ok(self.cables.len() - 1)
+        Ok(id)
     }
 
     /// Validate signal kind compatibility between ports
@@ -500,19 +636,52 @@ impl Patch {
         to.iter().map(|&dest| self.connect(from, dest)).collect()
     }
 
-    /// Disconnect a cable by ID
+    /// Disconnect a cable by its stable [`CableId`].
+    ///
+    /// Scans for the cable whose id matches (patch cable counts are small), so previously
+    /// returned ids stay valid regardless of how many other cables have been removed.
     pub fn disconnect(&mut self, cable_id: CableId) -> Result<(), PatchError> {
-        if cable_id >= self.cables.len() {
-            return Err(PatchError::InvalidCable);
-        }
-        self.cables.remove(cable_id);
+        let idx = self
+            .cables
+            .iter()
+            .position(|c| c.id == cable_id)
+            .ok_or(PatchError::InvalidCable)?;
+        self.cables.remove(idx);
         self.invalidate();
         Ok(())
     }
 
-    /// Set the output node for the patch
+    /// Set the output node for the patch (infallible convenience).
+    ///
+    /// Marks the patch dirty so the next [`tick`](Self::tick) reflects the new routing. If
+    /// `node` is invalid or exposes no output ports, [`tick`](Self::tick) simply reads
+    /// silence; use [`try_set_output`](Self::try_set_output) for a validated, fallible
+    /// alternative.
     pub fn set_output(&mut self, node: NodeId) {
         self.output_node = Some(node);
+        self.dirty = true;
+    }
+
+    /// Set the output node, validating that it exists and exposes at least one output port.
+    ///
+    /// The checked companion to [`set_output`](Self::set_output), for callers (e.g. GUIs
+    /// or loaders) that prefer a `Result` over silent misrouting.
+    pub fn try_set_output(&mut self, node: NodeId) -> Result<(), PatchError> {
+        let n = self
+            .nodes
+            .get(node)
+            .ok_or(PatchError::InvalidNode { node })?;
+        if n.module.port_spec().outputs.is_empty() {
+            return Err(PatchError::InvalidPort {
+                node,
+                name: None,
+                port: None,
+                available: Vec::new(),
+            });
+        }
+        self.output_node = Some(node);
+        self.dirty = true;
+        Ok(())
     }
 
     /// Set a parameter on a module
@@ -564,41 +733,77 @@ impl Patch {
         &self.execution_order
     }
 
+    /// Mark the compiled schedule stale and drop stale output buffers.
+    ///
+    /// Called after every structural mutation. Clearing `buffers` here guarantees that a
+    /// read after a mutation (before the next recompile) cannot leak the previous graph's
+    /// last-tick values; `tick()` recompiles lazily via the `dirty` flag.
     fn invalidate(&mut self) {
         self.execution_order.clear();
+        self.buffers.clear();
+        self.dirty = true;
     }
 
     fn validate_output_port(&self, port_ref: PortRef) -> Result<(), PatchError> {
         let node = self
             .nodes
             .get(port_ref.node)
-            .ok_or(PatchError::InvalidNode)?;
-        node.module
-            .port_spec()
-            .outputs
-            .iter()
-            .find(|p| p.id == port_ref.port)
-            .ok_or(PatchError::InvalidPort)?;
-        Ok(())
+            .ok_or(PatchError::InvalidNode {
+                node: port_ref.node,
+            })?;
+        let spec = node.module.port_spec();
+        if spec.outputs.iter().any(|p| p.id == port_ref.port) {
+            Ok(())
+        } else {
+            Err(PatchError::InvalidPort {
+                node: port_ref.node,
+                name: None,
+                port: Some(port_ref.port),
+                available: spec.outputs.iter().map(|p| p.name.clone()).collect(),
+            })
+        }
     }
 
     fn validate_input_port(&self, port_ref: PortRef) -> Result<(), PatchError> {
         let node = self
             .nodes
             .get(port_ref.node)
-            .ok_or(PatchError::InvalidNode)?;
-        node.module
-            .port_spec()
-            .inputs
-            .iter()
-            .find(|p| p.id == port_ref.port)
-            .ok_or(PatchError::InvalidPort)?;
-        Ok(())
+            .ok_or(PatchError::InvalidNode {
+                node: port_ref.node,
+            })?;
+        let spec = node.module.port_spec();
+        if spec.inputs.iter().any(|p| p.id == port_ref.port) {
+            Ok(())
+        } else {
+            Err(PatchError::InvalidPort {
+                node: port_ref.node,
+                name: None,
+                port: Some(port_ref.port),
+                available: spec.inputs.iter().map(|p| p.name.clone()).collect(),
+            })
+        }
     }
 
-    /// Compile the patch into an executable order
+    /// Compile the patch into an executable order.
+    ///
+    /// On success clears the dirty flag and any previous compile error. On failure
+    /// (e.g. an unbroken feedback cycle) the stale schedule and buffers are dropped so a
+    /// subsequent [`tick`](Self::tick) outputs silence, the error is stored (retrievable
+    /// via [`last_compile_error`](Self::last_compile_error)), and the same error is
+    /// returned.
     pub fn compile(&mut self) -> Result<(), PatchError> {
-        let order = self.topological_sort()?;
+        let order = match self.topological_sort() {
+            Ok(order) => order,
+            Err(e) => {
+                self.execution_order.clear();
+                self.buffers.clear();
+                // Do not stay dirty: avoid re-running a known-failing sort every tick.
+                // A later structural mutation re-sets dirty via invalidate().
+                self.dirty = false;
+                self.last_compile_error = Some(e.clone());
+                return Err(e);
+            }
+        };
         self.execution_order = order;
 
         // Pre-allocate output buffers
@@ -615,56 +820,117 @@ impl Patch {
             }
         }
 
+        self.dirty = false;
+        self.last_compile_error = None;
         Ok(())
+    }
+
+    /// Whether the module at `node` is a feedback cycle-breaker (delay-style).
+    fn node_breaks_feedback(&self, node: NodeId) -> bool {
+        self.nodes
+            .get(node)
+            .map(|n| n.module.breaks_feedback_cycle())
+            .unwrap_or(false)
     }
 
     fn topological_sort(&self) -> Result<Vec<NodeId>, PatchError> {
         let mut in_degree: StdMap<NodeId, usize> = self.nodes.keys().map(|k| (k, 0)).collect();
         let mut successors: StdMap<NodeId, Vec<NodeId>> =
-            self.nodes.keys().map(|k| (k, vec![])).collect();
+            self.nodes.keys().map(|k| (k, Vec::new())).collect();
 
         for cable in &self.cables {
-            *in_degree.entry(cable.to.node).or_insert(0) += 1;
-            successors
-                .entry(cable.from.node)
-                .or_default()
-                .push(cable.to.node);
+            // Feedback support: exclude edges feeding INTO a cycle-breaker (delay) node.
+            // Such a node is scheduled without waiting for its upstream producers and, at
+            // runtime, reads their previous-tick output buffers — a one-sample feedback
+            // delay. This lets loops routed through a UnitDelay/DelayLine compile while
+            // genuine breakerless cycles are still rejected below.
+            if self.node_breaks_feedback(cable.to.node) {
+                continue;
+            }
+            if let Some(deg) = in_degree.get_mut(&cable.to.node) {
+                *deg += 1;
+            }
+            if let Some(succ) = successors.get_mut(&cable.from.node) {
+                succ.push(cable.to.node);
+            }
         }
 
-        // Kahn's algorithm
-        let mut queue: VecDeque<NodeId> = in_degree
-            .iter()
-            .filter(|(_, &deg)| deg == 0)
-            .map(|(&id, _)| id)
-            .collect();
+        // Kahn's algorithm, seeded in deterministic slotmap (insertion) order so the
+        // resulting execution_order is reproducible across runs/builds (no HashMap
+        // iteration order dependence).
+        let mut queue: VecDeque<NodeId> = VecDeque::new();
+        for id in self.nodes.keys() {
+            if in_degree.get(&id).copied().unwrap_or(0) == 0 {
+                queue.push_back(id);
+            }
+        }
 
         let mut result = Vec::with_capacity(self.nodes.len());
 
         while let Some(node) = queue.pop_front() {
             result.push(node);
-            for &succ in successors.get(&node).unwrap_or(&vec![]) {
-                let deg = in_degree.get_mut(&succ).unwrap();
-                *deg -= 1;
-                if *deg == 0 {
-                    queue.push_back(succ);
+            // Successor lists are built in cable order (a Vec), keeping this deterministic.
+            if let Some(succ) = successors.get(&node) {
+                for &s in succ {
+                    if let Some(deg) = in_degree.get_mut(&s) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(s);
+                        }
+                    }
                 }
             }
         }
 
         if result.len() != self.nodes.len() {
-            let in_cycle: Vec<NodeId> = in_degree
-                .into_iter()
-                .filter(|(_, deg)| *deg > 0)
-                .map(|(id, _)| id)
+            // Collect stuck nodes deterministically and capture their names for Display.
+            let nodes: Vec<NodeId> = self
+                .nodes
+                .keys()
+                .filter(|k| in_degree.get(k).copied().unwrap_or(0) > 0)
                 .collect();
-            return Err(PatchError::CycleDetected { nodes: in_cycle });
+            let names = nodes
+                .iter()
+                .map(|&id| self.get_name(id).unwrap_or("<unknown>").to_string())
+                .collect();
+            return Err(PatchError::CycleDetected { nodes, names });
         }
 
         Ok(result)
     }
 
-    /// Process a single sample, returning stereo output
+    /// The error from the most recent failed compile (auto or explicit), if any.
+    ///
+    /// Cleared by the next successful [`compile`](Self::compile) or [`tick`](Self::tick).
+    /// After [`tick`](Self::tick) unexpectedly returns silence, check this to learn why the
+    /// graph did not compile (e.g. [`PatchError::CycleDetected`]).
+    pub fn last_compile_error(&self) -> Option<&PatchError> {
+        self.last_compile_error.as_ref()
+    }
+
+    /// Process a single sample, returning stereo output.
+    ///
+    /// # Lazy (re)compilation
+    ///
+    /// `tick` is self-healing. Every structural mutation
+    /// (`add`/`connect`/`disconnect`/`remove`/`set_output`) marks the patch dirty; `tick`
+    /// detects this and recompiles automatically before processing, so the output always
+    /// reflects the *current* graph — you never have to remember to call
+    /// [`compile`](Self::compile) again after an edit, and a `tick` before the first
+    /// `compile` works too.
+    ///
+    /// If the automatic recompile fails (for example a mutation introduced a feedback
+    /// cycle with no delay to break it), `tick` outputs silence `(0.0, 0.0)` and the error
+    /// is retained in [`last_compile_error`](Self::last_compile_error). A patch with no
+    /// output node, or an empty graph, likewise ticks to silence.
     pub fn tick(&mut self) -> (f64, f64) {
+        // Lazily (re)compile if the graph was mutated since the last compile. On failure
+        // compile() records last_compile_error and leaves an empty schedule, so the loop
+        // below is a no-op and we fall through to silence.
+        if self.dirty {
+            let _ = self.compile();
+        }
+
         for &node_id in &self.execution_order.clone() {
             let inputs = self.gather_inputs(node_id);
             let mut outputs = PortValues::new();
@@ -689,6 +955,9 @@ impl Patch {
         let spec = node.module.port_spec();
         let mut values = PortValues::new();
 
+        // Pass 1: resolve every input that has a patched cable, plus plain (non-normalled)
+        // defaults. Normalled-but-unpatched inputs are deferred to pass 2 so they can read
+        // the *current-tick* resolved value of the sibling INPUT port they normal to.
         for input in &spec.inputs {
             let port_ref = PortRef {
                 node: node_id,
@@ -713,19 +982,28 @@ impl Patch {
 
             if has_connection {
                 values.set(input.id, sum);
-            } else if let Some(normalled) = input.normalled_to {
-                // Use normalled (internal) connection
-                let normalled_ref = PortRef {
-                    node: node_id,
-                    port: normalled,
-                };
-                if let Some(&v) = self.buffers.get(&normalled_ref) {
-                    values.set(input.id, v);
-                } else {
-                    values.set(input.id, input.default);
-                }
+            } else if input.normalled_to.is_none() {
+                // Unpatched with no normal: use the port's default.
+                values.set(input.id, input.default);
+            }
+            // else: normalled + unpatched -> resolved in pass 2 below.
+        }
+
+        // Pass 2: resolve normalled inputs. `normalled_to` names a sibling INPUT port on the
+        // SAME node; we read that port's value resolved above (this tick), NOT the output
+        // buffer namespace. This gives, e.g., StereoOutput's mono fallback (right normals to
+        // left) the current-sample left value on both channels instead of a stale/colliding
+        // output-buffer read. If the referenced sibling has not been resolved (e.g. a
+        // normal to a later normalled port, or a missing id), fall back to this port's
+        // default.
+        for input in &spec.inputs {
+            if values.has(input.id) {
+                continue;
+            }
+            if let Some(normalled) = input.normalled_to {
+                let v = values.get(normalled).unwrap_or(input.default);
+                values.set(input.id, v);
             } else {
-                // Use default value
                 values.set(input.id, input.default);
             }
         }
@@ -743,28 +1021,31 @@ impl Patch {
         }
     }
 
+    /// Read the stereo output from the output node's first two output ports (in
+    /// [`PortSpec`] order), rather than hardcoded port ids 0/1. The first output port is
+    /// the left channel; the second (if any) is the right. A mono node (single output) is
+    /// duplicated to both channels. Missing output node or buffers yield silence.
     fn read_output(&self) -> (f64, f64) {
-        if let Some(output_node) = self.output_node {
-            let left = self
-                .buffers
+        let Some(output_node) = self.output_node else {
+            return (0.0, 0.0);
+        };
+        let Some(node) = self.nodes.get(output_node) else {
+            return (0.0, 0.0);
+        };
+        let outputs = &node.module.port_spec().outputs;
+
+        let read = |port: PortId| -> Option<f64> {
+            self.buffers
                 .get(&PortRef {
                     node: output_node,
-                    port: 0, // Assuming port 0 is left
+                    port,
                 })
                 .copied()
-                .unwrap_or(0.0);
-            let right = self
-                .buffers
-                .get(&PortRef {
-                    node: output_node,
-                    port: 1, // Assuming port 1 is right
-                })
-                .copied()
-                .unwrap_or(left); // Mono fallback
-            (left, right)
-        } else {
-            (0.0, 0.0)
-        }
+        };
+
+        let left = outputs.first().and_then(|p| read(p.id)).unwrap_or(0.0);
+        let right = outputs.get(1).and_then(|p| read(p.id)).unwrap_or(left); // Mono fallback: duplicate left to right
+        (left, right)
     }
 
     /// Reset all modules in the patch
@@ -842,10 +1123,50 @@ impl Patch {
     }
 }
 
+/// Manual `Debug` for `Patch` so `println!("{:?}", patch)` works for inspection without
+/// requiring `GraphModule: Debug`. Prints each node's name and `type_id`, the cable list,
+/// the output node, validation mode, dirty flag, and warning count.
+impl core::fmt::Debug for Patch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Wrapper so nodes format as `name (type_id)` without a GraphModule: Debug bound.
+        struct NodeDebug<'a> {
+            id: NodeId,
+            name: &'a str,
+            type_id: &'a str,
+        }
+        impl core::fmt::Debug for NodeDebug<'_> {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                write!(f, "{:?}: {} ({})", self.id, self.name, self.type_id)
+            }
+        }
+
+        let nodes: Vec<NodeDebug> = self
+            .nodes
+            .iter()
+            .map(|(id, n)| NodeDebug {
+                id,
+                name: n.name.as_str(),
+                type_id: n.module.type_id(),
+            })
+            .collect();
+
+        f.debug_struct("Patch")
+            .field("sample_rate", &self.sample_rate)
+            .field("nodes", &nodes)
+            .field("cables", &self.cables)
+            .field("output_node", &self.output_node)
+            .field("validation_mode", &self.validation_mode)
+            .field("dirty", &self.dirty)
+            .field("warnings", &self.warnings.len())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::port::{PortDef, SignalKind};
+    use alloc::vec;
 
     // Simple passthrough module for testing
     struct Passthrough {
@@ -1293,5 +1614,479 @@ mod tests {
 
         patch.set_validation_mode(ValidationMode::Warn);
         assert_eq!(patch.validation_mode(), ValidationMode::Warn);
+    }
+
+    // ========================================================================
+    // Wave B-0 audit remediation tests
+    // ========================================================================
+
+    // A module that sums two inputs (ids 0, 1) into one output (id 10).
+    struct SumModule {
+        spec: PortSpec,
+    }
+    impl SumModule {
+        fn new() -> Self {
+            Self {
+                spec: PortSpec {
+                    inputs: vec![
+                        PortDef::new(0, "a", SignalKind::Audio),
+                        PortDef::new(1, "b", SignalKind::Audio),
+                    ],
+                    outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+                },
+            }
+        }
+    }
+    impl GraphModule for SumModule {
+        fn port_spec(&self) -> &PortSpec {
+            &self.spec
+        }
+        fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+            outputs.set(10, inputs.get_or(0, 0.0) + inputs.get_or(1, 0.0));
+        }
+        fn reset(&mut self) {}
+        fn set_sample_rate(&mut self, _: f64) {}
+    }
+
+    // A one-sample delay that declares itself a feedback cycle-breaker.
+    struct FeedbackDelay {
+        spec: PortSpec,
+        buffer: f64,
+    }
+    impl FeedbackDelay {
+        fn new() -> Self {
+            Self {
+                spec: PortSpec {
+                    inputs: vec![PortDef::new(0, "in", SignalKind::Audio)],
+                    outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+                },
+                buffer: 0.0,
+            }
+        }
+    }
+    impl GraphModule for FeedbackDelay {
+        fn port_spec(&self) -> &PortSpec {
+            &self.spec
+        }
+        fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+            outputs.set(10, self.buffer);
+            self.buffer = inputs.get_or(0, 0.0);
+        }
+        fn reset(&mut self) {
+            self.buffer = 0.0;
+        }
+        fn set_sample_rate(&mut self, _: f64) {}
+        fn breaks_feedback_cycle(&self) -> bool {
+            true
+        }
+    }
+
+    // A constant source with a single non-zero-id output (id 10).
+    struct ConstSource {
+        spec: PortSpec,
+        value: f64,
+    }
+    impl ConstSource {
+        fn new(value: f64) -> Self {
+            Self {
+                spec: PortSpec {
+                    inputs: vec![],
+                    outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+                },
+                value,
+            }
+        }
+    }
+    impl GraphModule for ConstSource {
+        fn port_spec(&self) -> &PortSpec {
+            &self.spec
+        }
+        fn tick(&mut self, _: &PortValues, outputs: &mut PortValues) {
+            outputs.set(10, self.value);
+        }
+        fn reset(&mut self) {}
+        fn set_sample_rate(&mut self, _: f64) {}
+    }
+
+    // Q075: CableIds are stable across disconnects of other cables.
+    #[test]
+    fn test_cable_ids_are_stable_across_disconnect() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("a", Passthrough::new());
+        let b = patch.add("b", SumModule::new());
+        let c = patch.add("c", SumModule::new());
+
+        let c1 = patch.connect(a.out("out"), b.in_("a")).unwrap();
+        let c2 = patch.connect(a.out("out"), b.in_("b")).unwrap();
+        let c3 = patch.connect(a.out("out"), c.in_("a")).unwrap();
+        assert_eq!(patch.cable_count(), 3);
+
+        // Disconnect the FIRST cable. With Vec-index ids this would shift c3 down.
+        patch.disconnect(c1).unwrap();
+        assert_eq!(patch.cable_count(), 2);
+
+        // Disconnecting the THIRD cable by its still-valid id must remove exactly it,
+        // leaving only c2 (a.out -> b.b).
+        patch.disconnect(c3).unwrap();
+        assert_eq!(patch.cable_count(), 1);
+        let remaining = &patch.cables()[0];
+        assert_eq!(remaining.id, c2);
+        assert_eq!(remaining.to, b.in_("b"));
+
+        // A stale id (already removed) errors rather than dropping the wrong cable.
+        assert!(matches!(
+            patch.disconnect(c1),
+            Err(PatchError::InvalidCable)
+        ));
+    }
+
+    // Q076/Q181: mutating after compile is reflected on the next tick (lazy recompile).
+    #[test]
+    fn test_mutation_after_compile_is_reflected_on_tick() {
+        let mut patch = Patch::new(44100.0);
+        let src = patch.add("src", ConstSource::new(1.0));
+        let out = patch.add("out", Passthrough::new());
+        patch.connect(src.out("out"), out.in_("in")).unwrap();
+        patch.set_output(out.id());
+        patch.compile().unwrap();
+
+        // First tick: passthrough carries the source through.
+        let (l0, _) = patch.tick();
+        assert!((l0 - 1.0).abs() < 1e-9);
+
+        // Mutate AFTER compile: add a second source summed in. No explicit recompile.
+        let src2 = patch.add("src2", ConstSource::new(2.0));
+        let sum = patch.add("sum", SumModule::new());
+        // Rewire: src -> sum.a, src2 -> sum.b, sum -> out
+        patch
+            .disconnect_ports(src.out("out"), out.in_("in"))
+            .unwrap();
+        patch.connect(src.out("out"), sum.in_("a")).unwrap();
+        patch.connect(src2.out("out"), sum.in_("b")).unwrap();
+        patch.connect(sum.out("out"), out.in_("in")).unwrap();
+
+        // tick() must lazily recompile and reflect the NEW graph (1.0 + 2.0 = 3.0),
+        // not freeze at the stale 1.0.
+        let (l1, _) = patch.tick();
+        assert!((l1 - 3.0).abs() < 1e-9, "expected 3.0, got {}", l1);
+    }
+
+    // Q076/Q181: a cycle-creating mutation surfaces via last_compile_error and ticks silent.
+    #[test]
+    fn test_cycle_mutation_surfaces_via_last_compile_error() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("a", Passthrough::new());
+        let b = patch.add("b", Passthrough::new());
+        patch.connect(a.out("out"), b.in_("in")).unwrap();
+        patch.set_output(b.id());
+        patch.compile().unwrap();
+        assert!(patch.last_compile_error().is_none());
+
+        // Introduce a breakerless cycle: b -> a.
+        patch.connect(b.out("out"), a.in_("in")).unwrap();
+
+        // tick() auto-recompiles, fails, outputs silence, and records the error.
+        let (l, r) = patch.tick();
+        assert_eq!((l, r), (0.0, 0.0));
+        match patch.last_compile_error() {
+            Some(PatchError::CycleDetected { names, .. }) => {
+                assert_eq!(names.len(), 2);
+            }
+            other => panic!("expected CycleDetected, got {:?}", other),
+        }
+    }
+
+    // Q077: a feedback loop routed through a cycle-breaker compiles and decays.
+    #[test]
+    fn test_feedback_loop_with_delay_compiles_and_decays() {
+        // A one-shot impulse: 1.0 on the first tick, 0.0 thereafter. It stays connected so
+        // no mid-run mutation clears the feedback buffers.
+        struct Impulse {
+            spec: PortSpec,
+            fired: bool,
+        }
+        impl GraphModule for Impulse {
+            fn port_spec(&self) -> &PortSpec {
+                &self.spec
+            }
+            fn tick(&mut self, _: &PortValues, outputs: &mut PortValues) {
+                outputs.set(10, if self.fired { 0.0 } else { 1.0 });
+                self.fired = true;
+            }
+            fn reset(&mut self) {
+                self.fired = false;
+            }
+            fn set_sample_rate(&mut self, _: f64) {}
+        }
+
+        let mut patch = Patch::new(44100.0);
+        let impulse = patch.add(
+            "impulse",
+            Impulse {
+                spec: PortSpec {
+                    inputs: vec![],
+                    outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+                },
+                fired: false,
+            },
+        );
+        let sum = patch.add("sum", SumModule::new());
+        let delay = patch.add("delay", FeedbackDelay::new());
+
+        // impulse -> sum.a ; delay.out -> sum.b (feedback, x0.5) ; sum.out -> delay.in
+        // (edge into the breaker) ; output = delay.out
+        patch.connect(impulse.out("out"), sum.in_("a")).unwrap();
+        patch
+            .connect_attenuated(delay.out("out"), sum.in_("b"), 0.5)
+            .unwrap();
+        patch.connect(sum.out("out"), delay.in_("in")).unwrap();
+        patch.set_output(delay.id());
+
+        // Must compile despite the sum<->delay cycle (delay breaks it).
+        patch.compile().expect("feedback loop should compile");
+        assert!(patch.last_compile_error().is_none());
+
+        let mut outs = Vec::new();
+        for _ in 0..14 {
+            outs.push(patch.tick().0);
+        }
+
+        // The loop must ring: there are several non-zero echoes...
+        let nonzero: Vec<f64> = outs.iter().copied().filter(|v| v.abs() > 1e-9).collect();
+        assert!(
+            nonzero.len() >= 3,
+            "expected multiple decaying echoes, got {:?}",
+            outs
+        );
+        // ...and successive echo magnitudes decay (0.5 feedback): the first echo is the
+        // loudest, the tail is quieter.
+        let peak_early = outs.iter().cloned().fold(0.0_f64, f64::max);
+        let peak_late = outs[outs.len() - 3..]
+            .iter()
+            .cloned()
+            .fold(0.0_f64, f64::max);
+        assert!(
+            peak_late < peak_early,
+            "echo should decay: early peak {}, late peak {}",
+            peak_early,
+            peak_late
+        );
+    }
+
+    // Q077: a cycle with no breaker still fails to compile.
+    #[test]
+    fn test_breakerless_cycle_still_errors() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("a", Passthrough::new());
+        let b = patch.add("b", Passthrough::new());
+        patch.connect(a.out("out"), b.in_("in")).unwrap();
+        patch.connect(b.out("out"), a.in_("in")).unwrap();
+        assert!(matches!(
+            patch.compile(),
+            Err(PatchError::CycleDetected { .. })
+        ));
+    }
+
+    // Q079: normalled input reads the sibling INPUT's current-tick value, not a stale
+    // output-buffer read. StereoOutput with only `left` patched -> both channels identical.
+    #[test]
+    fn test_normalled_input_uses_current_sibling_value() {
+        use crate::modules::StereoOutput;
+        let mut patch = Patch::new(44100.0);
+        // Time-varying source so a one-sample lag would be detectable.
+        struct Ramp {
+            spec: PortSpec,
+            n: f64,
+        }
+        impl GraphModule for Ramp {
+            fn port_spec(&self) -> &PortSpec {
+                &self.spec
+            }
+            fn tick(&mut self, _: &PortValues, outputs: &mut PortValues) {
+                self.n += 1.0;
+                outputs.set(10, self.n);
+            }
+            fn reset(&mut self) {
+                self.n = 0.0;
+            }
+            fn set_sample_rate(&mut self, _: f64) {}
+        }
+        let ramp = patch.add(
+            "ramp",
+            Ramp {
+                spec: PortSpec {
+                    inputs: vec![],
+                    outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+                },
+                n: 0.0,
+            },
+        );
+        let out = patch.add("out", StereoOutput::new());
+        // Patch only LEFT; RIGHT is normalled to LEFT.
+        patch.connect(ramp.out("out"), out.in_("left")).unwrap();
+        patch.set_output(out.id());
+        patch.compile().unwrap();
+
+        for _ in 0..5 {
+            let (l, r) = patch.tick();
+            assert!(l > 0.0);
+            assert_eq!(l, r, "mono fallback must be current-sample, not delayed");
+        }
+    }
+
+    // Q080: compilation is deterministic — same patch built twice -> same execution_order.
+    #[test]
+    fn test_execution_order_is_deterministic() {
+        fn build_order() -> Vec<usize> {
+            let mut patch = Patch::new(44100.0);
+            // Several independent sources feeding one sum -> deterministic tie-breaking.
+            let s1 = patch.add("s1", ConstSource::new(1.0));
+            let s2 = patch.add("s2", ConstSource::new(2.0));
+            let s3 = patch.add("s3", ConstSource::new(3.0));
+            let sum = patch.add("sum", SumModule::new());
+            patch.connect(s1.out("out"), sum.in_("a")).unwrap();
+            patch.connect(s2.out("out"), sum.in_("b")).unwrap();
+            patch.connect(s3.out("out"), sum.in_("a")).unwrap();
+            patch.compile().unwrap();
+            // Map NodeIds to their insertion rank for a build-independent comparison.
+            let ids = [s1.id(), s2.id(), s3.id(), sum.id()];
+            patch
+                .execution_order()
+                .iter()
+                .map(|nid| ids.iter().position(|x| x == nid).unwrap())
+                .collect()
+        }
+        assert_eq!(build_order(), build_order());
+    }
+
+    // Q121: read_output reads the output node's first two outputs (mono duplicated),
+    // regardless of their port ids (here a single output with id 10).
+    #[test]
+    fn test_read_output_uses_first_two_outputs_mono_duplicated() {
+        let mut patch = Patch::new(44100.0);
+        let src = patch.add("src", ConstSource::new(0.7));
+        patch.set_output(src.id());
+        patch.compile().unwrap();
+        let (l, r) = patch.tick();
+        assert!((l - 0.7).abs() < 1e-9);
+        assert_eq!(l, r, "mono node must duplicate to both channels");
+    }
+
+    // Q121/6a: try_set_output validates node existence and presence of outputs.
+    #[test]
+    fn test_try_set_output_validates() {
+        let mut patch = Patch::new(44100.0);
+        let src = patch.add("src", ConstSource::new(1.0));
+        assert!(patch.try_set_output(src.id()).is_ok());
+
+        // A node with no outputs is rejected.
+        struct SinkNoOut {
+            spec: PortSpec,
+        }
+        impl GraphModule for SinkNoOut {
+            fn port_spec(&self) -> &PortSpec {
+                &self.spec
+            }
+            fn tick(&mut self, _: &PortValues, _: &mut PortValues) {}
+            fn reset(&mut self) {}
+            fn set_sample_rate(&mut self, _: f64) {}
+        }
+        let sink = patch.add(
+            "sink",
+            SinkNoOut {
+                spec: PortSpec {
+                    inputs: vec![PortDef::new(0, "in", SignalKind::Audio)],
+                    outputs: vec![],
+                },
+            },
+        );
+        assert!(matches!(
+            patch.try_set_output(sink.id()),
+            Err(PatchError::InvalidPort { .. })
+        ));
+    }
+
+    // Q122/Q180: NodeHandle fallible port lookups and name discovery.
+    #[test]
+    fn test_node_handle_fallible_ports_and_names() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("a", Passthrough::new());
+
+        assert!(a.output("out").is_ok());
+        assert!(a.input("in").is_ok());
+
+        // Unknown ports return an InvalidPort carrying the available names.
+        match a.output("nope") {
+            Err(PatchError::InvalidPort { available, .. }) => {
+                assert!(available.iter().any(|n| n == "out"));
+            }
+            other => panic!("expected InvalidPort, got {:?}", other),
+        }
+        assert!(a.input("nope").is_err());
+
+        assert_eq!(a.input_names(), vec!["in"]);
+        assert_eq!(a.output_names(), vec!["out"]);
+    }
+
+    // Q182: Display lists the module's available ports on an invalid connection.
+    #[test]
+    fn test_invalid_port_display_lists_available() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("a", Passthrough::new());
+        let b = patch.add("b", Passthrough::new());
+        // Connect to a non-existent input port id on b.
+        let bad = PortRef {
+            node: b.id(),
+            port: 999,
+        };
+        let err = patch.connect(a.out("out"), bad).unwrap_err();
+        let msg = alloc::format!("{}", err);
+        assert!(msg.contains("Invalid port"), "got: {}", msg);
+        assert!(
+            msg.contains("in"),
+            "should list available port 'in': {}",
+            msg
+        );
+    }
+
+    // Q185: CycleDetected Display prints the module names in the cycle.
+    #[test]
+    fn test_cycle_detected_display_names() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("osc", Passthrough::new());
+        let b = patch.add("filt", Passthrough::new());
+        patch.connect(a.out("out"), b.in_("in")).unwrap();
+        patch.connect(b.out("out"), a.in_("in")).unwrap();
+        let err = patch.compile().unwrap_err();
+        let msg = alloc::format!("{}", err);
+        assert!(msg.contains("Cycle detected"), "got: {}", msg);
+        assert!(
+            msg.contains("osc") && msg.contains("filt"),
+            "cycle message should name modules: {}",
+            msg
+        );
+    }
+
+    // Q183: the default validation mode is Warn.
+    #[test]
+    fn test_default_validation_mode_is_warn() {
+        let patch = Patch::new(44100.0);
+        assert_eq!(patch.validation_mode(), ValidationMode::Warn);
+        assert_eq!(ValidationMode::default(), ValidationMode::Warn);
+    }
+
+    // Q187: Patch implements Debug for println-style inspection.
+    #[test]
+    fn test_patch_debug_impl() {
+        let mut patch = Patch::new(44100.0);
+        let a = patch.add("my_osc", Passthrough::new());
+        let b = patch.add("my_out", Passthrough::new());
+        patch.connect(a.out("out"), b.in_("in")).unwrap();
+        patch.set_output(b.id());
+        let s = alloc::format!("{:?}", patch);
+        assert!(s.contains("Patch"));
+        assert!(s.contains("my_osc"));
+        assert!(s.contains("my_out"));
+        assert!(s.contains("validation_mode"));
     }
 }

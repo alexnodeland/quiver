@@ -1321,32 +1321,42 @@ impl Patch {
                 PatchError::CompilationFailed(format!("Unknown module: {}", to_module))
             })?;
 
+            // Resolve port refs with the fallible NodeHandle::output/input so a mistyped
+            // port name in hand-edited/untrusted JSON returns a descriptive Err (module
+            // name, requested port, and the module's valid ports) instead of panicking via
+            // the convenience out()/in_() methods.
+            let from_ref = from_handle.output(from_port).map_err(|_| {
+                PatchError::CompilationFailed(format!(
+                    "Unknown output port '{}' on module '{}' (available: {})",
+                    from_port,
+                    from_module,
+                    from_handle.output_names().join(", ")
+                ))
+            })?;
+            let to_ref = to_handle.input(to_port).map_err(|_| {
+                PatchError::CompilationFailed(format!(
+                    "Unknown input port '{}' on module '{}' (available: {})",
+                    to_port,
+                    to_module,
+                    to_handle.input_names().join(", ")
+                ))
+            })?;
+
             match (cable_def.attenuation, cable_def.offset) {
                 (Some(attenuation), Some(offset)) => {
-                    patch.connect_modulated(
-                        from_handle.out(from_port),
-                        to_handle.in_(to_port),
-                        attenuation,
-                        offset,
-                    )?;
+                    patch.connect_modulated(from_ref, to_ref, attenuation, offset)?;
                 }
                 (Some(attenuation), None) => {
-                    patch.connect_attenuated(
-                        from_handle.out(from_port),
-                        to_handle.in_(to_port),
-                        attenuation,
-                    )?;
+                    patch.connect_attenuated(from_ref, to_ref, attenuation)?;
                 }
                 (None, Some(offset)) => {
                     patch.connect_modulated(
-                        from_handle.out(from_port),
-                        to_handle.in_(to_port),
-                        1.0, // Unity gain
+                        from_ref, to_ref, 1.0, // Unity gain
                         offset,
                     )?;
                 }
                 (None, None) => {
-                    patch.connect(from_handle.out(from_port), to_handle.in_(to_port))?;
+                    patch.connect(from_ref, to_ref)?;
                 }
             }
         }
@@ -2031,5 +2041,31 @@ mod tests {
 
         // VCO should have "essential" tag
         assert!(metadata.tags.contains(&"essential".to_string()));
+    }
+
+    #[test]
+    fn test_from_def_mistyped_cable_port_returns_err() {
+        // Q180: a valid module type with a mistyped port name in a cable must return Err
+        // from from_def (no panic via the convenience out()/in_() methods).
+        let registry = ModuleRegistry::new();
+        let mut def = PatchDef::new("Bad Ports");
+        def.modules.push(ModuleDef::new("vco", "vco"));
+        def.modules.push(ModuleDef::new("output", "stereo_output"));
+        // "definitely_not_a_port" is not a real VCO output port.
+        def.cables
+            .push(CableDef::new("vco.definitely_not_a_port", "output.left"));
+
+        let result = Patch::from_def(&def, &registry, 44100.0);
+        assert!(result.is_err(), "expected Err for mistyped cable port");
+        match result {
+            Err(PatchError::CompilationFailed(msg)) => {
+                assert!(
+                    msg.contains("definitely_not_a_port") && msg.contains("vco"),
+                    "error should name the bad port and module: {}",
+                    msg
+                );
+            }
+            other => panic!("expected CompilationFailed, got {:?}", other),
+        }
     }
 }

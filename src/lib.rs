@@ -192,5 +192,13 @@ pub mod prelude {
     pub use crate::wasm::{QuiverEngine, QuiverError};
 }
 
-// Re-export key types at crate root for convenience
+// Re-export the curated [`prelude`] at the crate root for convenience, so `use quiver::*`
+// (or `use quiver::Vco`) works for quick starts and examples — a common pattern for
+// batteries-included crates.
+//
+// This is intentional and additive: it does not hide the granular paths. If you prefer
+// tight imports and want to avoid pulling ~150 names into scope, keep importing directly
+// from the submodules instead — e.g. `use quiver::modules::Vco;`,
+// `use quiver::graph::Patch;`, `use quiver::port::SignalKind;`. Both styles remain
+// available; pick per call site.
 pub use prelude::*;

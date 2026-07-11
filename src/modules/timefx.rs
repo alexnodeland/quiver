@@ -50,6 +50,10 @@ impl GraphModule for UnitDelay {
 
     fn set_sample_rate(&mut self, _: f64) {}
 
+    fn breaks_feedback_cycle(&self) -> bool {
+        true
+    }
+
     fn type_id(&self) -> &'static str {
         "unit_delay"
     }
@@ -145,6 +149,10 @@ impl GraphModule for DelayLine {
         let buffer_size = (sample_rate * Self::MAX_DELAY_SECS) as usize + 1;
         self.buffer = vec![0.0; buffer_size];
         self.write_pos = 0;
+    }
+
+    fn breaks_feedback_cycle(&self) -> bool {
+        true
     }
 
     fn type_id(&self) -> &'static str {
