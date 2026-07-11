@@ -47,16 +47,20 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build WASM package
+      # 1. Compile Rust -> wasm-bindgen glue into packages/@quiver/wasm/ (quiver.js,
+      #    quiver.d.ts, quiver_bg.wasm). The TypeScript build depends on this.
+      - name: Build WASM glue
         run: make wasm
 
+      # 2. Install the whole workspace from the committed root lockfile.
       - name: Install npm dependencies
         run: npm ci
 
+      # 3. Build the TypeScript packages in dependency order:
+      #    @quiver/wasm (tsup, needs the glue from step 1) -> @quiver/types ->
+      #    @quiver/react (imports the built @quiver/wasm + @quiver/types types).
       - name: Build TypeScript packages
-        run: |
-          cd packages/@quiver/types && npm run build
-          cd ../react && npm run build
+        run: npm run build:ts
 
       - name: Verify package versions
         run: |
@@ -73,27 +77,31 @@ jobs:
             fi
           done
 
-      - name: Publish @quiver/wasm
-        if: ${{ github.event.inputs.dry_run != 'true' }}
+      # Dry-run proof that each package tarball assembles (runs on every trigger).
+      - name: Pack packages (dry run)
         run: |
-          cd packages/@quiver/wasm
-          npm publish --access public --provenance
+          npm pack --dry-run --workspace @quiver/types
+          npm pack --dry-run --workspace @quiver/wasm
+          npm pack --dry-run --workspace @quiver/react
+
+      # Publish in dependency order: @quiver/types and @quiver/wasm first, then
+      # @quiver/react (which depends on both). --provenance is optional; it needs the
+      # `id-token: write` permission set above and public npm.
+      - name: Publish @quiver/types
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: npm publish --workspace @quiver/types --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish @quiver/types
+      - name: Publish @quiver/wasm
         if: ${{ github.event.inputs.dry_run != 'true' }}
-        run: |
-          cd packages/@quiver/types
-          npm publish --access public --provenance
+        run: npm publish --workspace @quiver/wasm --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @quiver/react
         if: ${{ github.event.inputs.dry_run != 'true' }}
-        run: |
-          cd packages/@quiver/react
-          npm publish --access public --provenance
+        run: npm publish --workspace @quiver/react --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

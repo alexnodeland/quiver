@@ -1,21 +1,44 @@
 {
   "name": "@quiver/wasm",
   "version": "0.1.0",
-  "description": "Quiver modular synthesizer WASM bindings",
-  "main": "quiver.js",
-  "module": "quiver.js",
-  "types": "quiver.d.ts",
+  "description": "Quiver modular synthesizer WASM bindings and AudioWorklet helpers",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./audio": {
+      "types": "./dist/audio.d.ts",
+      "import": "./dist/audio.js"
+    },
+    "./worklet": "./dist/worklet.js",
+    "./quiver": {
+      "types": "./quiver.d.ts",
+      "import": "./quiver.js"
+    },
+    "./quiver_bg.wasm": "./quiver_bg.wasm",
+    "./package.json": "./package.json"
+  },
   "files": [
+    "dist",
     "quiver.js",
     "quiver.d.ts",
     "quiver_bg.wasm",
     "quiver_bg.wasm.d.ts",
-    "src/"
+    "src"
   ],
   "scripts": {
-    "build": "cd ../../.. && make wasm",
-    "build:dev": "cd ../../.. && make wasm-dev",
-    "prepublishOnly": "npm run build"
+    "build:wasm": "cd ../../.. && make wasm",
+    "build:wasm:dev": "cd ../../.. && make wasm-dev",
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "tsup"
   },
   "keywords": [
     "wasm",
@@ -23,7 +46,8 @@
     "audio",
     "synthesizer",
     "modular",
-    "quiver"
+    "quiver",
+    "audioworklet"
   ],
   "author": "Alex Nodeland",
   "license": "MIT",
@@ -38,5 +62,9 @@
   "publishConfig": {
     "access": "public"
   },
-  "sideEffects": false
+  "sideEffects": false,
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
 }

@@ -4,14 +4,17 @@
   "version": "0.1.0",
   "description": "Quiver modular audio synthesis library",
   "workspaces": [
-    "packages/@quiver/*"
+    "packages/@quiver/*",
+    "demos/browser"
   ],
   "scripts": {
     "build:wasm": "make wasm",
     "build:wasm:dev": "make wasm-dev",
-    "build:types": "cd packages/@quiver/types && npm run build",
-    "build:react": "cd packages/@quiver/react && npm run build",
-    "build": "npm run build:wasm && npm run build:types && npm run build:react"
+    "build:wasm:ts": "npm run build --workspace @quiver/wasm",
+    "build:types": "npm run build --workspace @quiver/types",
+    "build:react": "npm run build --workspace @quiver/react",
+    "build:ts": "npm run build:wasm:ts && npm run build:types && npm run build:react",
+    "build": "npm run build:wasm && npm run build:ts"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

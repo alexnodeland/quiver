@@ -17,8 +17,8 @@
     "src"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts",
-    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "build": "tsup",
+    "dev": "tsup --watch",
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run build"
@@ -45,7 +45,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@quiver/types": "workspace:*"
+    "@quiver/types": "^0.1.0",
+    "@quiver/wasm": "^0.1.0"
   },
   "peerDependencies": {
     "@xyflow/react": ">=12.0.0",
@@ -53,8 +54,10 @@
   },
   "devDependencies": {
     "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
     "@xyflow/react": "^12.0.0",
     "react": "^18.0.0",
+    "react-dom": "^18.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0"
   }
