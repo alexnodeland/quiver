@@ -286,6 +286,7 @@ On main branch only (expensive checks):
 - `Wavetable` - Wavetable oscillator with morphing
 - `FormantOsc` - Formant oscillator for vocal sounds
 - `KarplusStrong` - Physical modeling string synthesis
+- `SamplePlayer` - Mono sample playback with V/Oct pitch, start position, and looping
 
 ### Filters
 - `Svf` - State-variable filter (LP, HP, BP, Notch)
@@ -294,9 +295,10 @@ On main branch only (expensive checks):
 ### Envelopes & Dynamics
 - `Adsr` - Attack-Decay-Sustain-Release envelope
 - `EnvelopeFollower` - Amplitude follower
-- `Compressor` - Dynamic range compressor
-- `Limiter` - Brick-wall limiter
-- `NoiseGate` - Noise gate
+- `Compressor` - Dynamic range compressor (sidechain input)
+- `Limiter` - Brick-wall limiter (sidechain input)
+- `NoiseGate` - Noise gate (sidechain input)
+- `Ducker` - Sidechain ducking driven by a key input
 
 ### Amplifiers & Mixers
 - `Vca` - Voltage-controlled amplifier
@@ -310,7 +312,8 @@ On main branch only (expensive checks):
 - `Phaser` - Phaser effect
 - `Tremolo` - Amplitude modulation tremolo
 - `Vibrato` - Pitch modulation vibrato
-- `Distortion` - Various distortion algorithms
+- `Distortion` - Various distortion algorithms (opt-in 2x/4x oversampling via `set_oversample`)
+- `Wavefolder` - West-coast wavefolder for complex harmonics (opt-in oversampling)
 - `Bitcrusher` - Bit depth and sample rate reduction
 - `Reverb` - Algorithmic reverb
 - `PitchShifter` - Pitch shifting
@@ -332,6 +335,9 @@ On main branch only (expensive checks):
 - `Rectifier` - Full/half-wave rectifier
 - `PrecisionAdder` - Precision CV adder
 - `ParametricEq` - Parametric equalizer
+- `MidSideEncode` - Left/right to mid/side encoder
+- `MidSideDecode` - Mid/side to left/right decoder with width control
+- `ScaleQuantizer` - Musical scale quantizer with alloc-gated microtuning (`set_custom_scale`, `load_scala`)
 
 ### Logic & CV
 - `Comparator` - Voltage comparator

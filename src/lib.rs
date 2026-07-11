@@ -49,7 +49,13 @@ pub mod observer;
 #[cfg(feature = "alloc")]
 pub mod presets;
 #[cfg(feature = "alloc")]
+pub mod scala;
+#[cfg(feature = "alloc")]
 pub mod serialize;
+
+// Std-only offline rendering (WAV export).
+#[cfg(feature = "std")]
+pub mod render;
 
 // Std-only modules (require full std for network, plugins, etc.)
 #[cfg(feature = "std")]
@@ -103,6 +109,13 @@ pub mod prelude {
     pub use crate::modules::{
         ArpPattern, Arpeggiator, ChordMemory, ChordType, FormantOsc, Granular, ParametricEq,
         PitchShifter, Reverb, Vocoder, Wavetable, WavetableType,
+    };
+
+    // Remediation wave modules: sample playback (Q142), opt-in oversampling for
+    // nonlinear stages (Q143), mid/side utilities (Q150), sidechain ducker (Q148),
+    // and the canonical `Wavefolder` export (Q149).
+    pub use crate::modules::{
+        Ducker, MidSideDecode, MidSideEncode, Oversample, Oversampler, SamplePlayer, Wavefolder,
     };
 
     // Analog Modeling
@@ -161,6 +174,10 @@ pub mod prelude {
         TutorialPresets,
     };
 
+    // Scala (.scl) microtuning parser (Q146)
+    #[cfg(feature = "alloc")]
+    pub use crate::scala::{ScalaError, ScalaScale};
+
     // ========================================================================
     // Std-only exports (require full std)
     // ========================================================================
@@ -186,6 +203,10 @@ pub mod prelude {
         AutomationData, AutomationPoint, AutomationRecorder, AutomationTrack, DotExporter,
         DotStyle, LevelMeter, Scope, SpectrumAnalyzer, TriggerMode,
     };
+
+    // Offline rendering / WAV export (requires std) (Q145)
+    #[cfg(feature = "std")]
+    pub use crate::render::{render, render_to_wav};
 
     // WASM bindings (requires wasm feature)
     #[cfg(feature = "wasm")]

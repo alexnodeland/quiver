@@ -537,6 +537,48 @@ impl ModuleRegistry {
         );
 
         self.register_factory_with_keywords(
+            "ducker",
+            "Ducker",
+            "Dynamics",
+            "Sidechain ducking driven by a key input",
+            &["ducker", "duck", "sidechain", "key", "dynamics", "pump"],
+            &[],
+            |sr| Box::new(Ducker::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "sample_player",
+            "Sample Player",
+            "Oscillators",
+            "Mono sample playback with V/Oct pitch and looping",
+            &["sample", "player", "playback", "sampler", "wav", "loop"],
+            &[],
+            // Serialized default is an empty (silent) buffer; load audio via the
+            // non-RT SamplePlayer::set_buffer setter after instantiation.
+            |sr| Box::new(SamplePlayer::empty(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "mid_side_encode",
+            "Mid/Side Encode",
+            "Utilities",
+            "Encode left/right stereo to mid/side",
+            &["mid", "side", "ms", "stereo", "encode", "matrix"],
+            &[],
+            |_| Box::new(MidSideEncode::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "mid_side_decode",
+            "Mid/Side Decode",
+            "Utilities",
+            "Decode mid/side to left/right with width control",
+            &["mid", "side", "ms", "stereo", "decode", "width"],
+            &[],
+            |_| Box::new(MidSideDecode::new()),
+        );
+
+        self.register_factory_with_keywords(
             "bitcrusher",
             "Bitcrusher",
             "Effects",
@@ -1886,6 +1928,24 @@ mod tests {
         assert!(catalog.modules.iter().any(|m| m.type_id == "vco"));
         assert!(catalog.modules.iter().any(|m| m.type_id == "svf"));
         assert!(catalog.modules.iter().any(|m| m.type_id == "adsr"));
+    }
+
+    #[test]
+    fn test_remediation_modules_registered_and_instantiate() {
+        let registry = ModuleRegistry::new();
+        // Each new module (Q142/Q148/Q150) must instantiate and report the
+        // matching type_id it registered under.
+        for id in [
+            "sample_player",
+            "ducker",
+            "mid_side_encode",
+            "mid_side_decode",
+        ] {
+            let module = registry
+                .instantiate(id, 44100.0)
+                .unwrap_or_else(|| panic!("module '{id}' not registered"));
+            assert_eq!(module.type_id(), id, "type_id mismatch for '{id}'");
+        }
     }
 
     #[test]
