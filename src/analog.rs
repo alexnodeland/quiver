@@ -13,12 +13,18 @@ use libm::Libm;
 pub mod saturation {
     use libm::Libm;
 
-    /// Hyperbolic tangent saturation (tube-like warmth)
+    /// Hyperbolic tangent saturation (tube-like warmth).
     ///
-    /// Higher drive values increase harmonic content.
+    /// Higher `drive` values increase harmonic content. The input is pre-scaled
+    /// (by `tanh(drive)/drive`) before the `tanh(x*drive)/tanh(drive)`
+    /// normalization so the small-signal gain at the origin is exactly unity —
+    /// low-level signals pass through transparently instead of being boosted (a
+    /// naive `tanh(x*drive)/tanh(drive)` has origin slope `drive/tanh(drive) > 1`,
+    /// e.g. 1.31 at `drive = 1`). The transfer function therefore reduces to
+    /// `tanh(x*tanh(drive))/tanh(drive)`, and the result is clamped to `[-1, 1]`.
     pub fn tanh_sat(x: f64, drive: f64) -> f64 {
-        let denominator = Libm::<f64>::tanh(drive).max(0.001);
-        Libm::<f64>::tanh(x * drive) / denominator
+        let t = Libm::<f64>::tanh(drive).max(0.001);
+        (Libm::<f64>::tanh(x * t) / t).clamp(-1.0, 1.0)
     }
 
     /// Soft clipping with adjustable knee
@@ -81,16 +87,38 @@ pub mod saturation {
         y
     }
 
-    /// Cubic soft saturation
+    /// Cubic soft saturation.
     ///
-    /// A simple polynomial saturation curve.
+    /// The classic `x - x³/3` soft-clip curve. Its zero-slope maximum of `2/3`
+    /// occurs at `x = 1` (not `2/3`), so the branch switches to the clamp at
+    /// `|x| = 1`. This joins the curve to the clamp value `2/3` continuously in
+    /// both value and slope — using the wrong threshold `2/3` leaves a ~0.099
+    /// step discontinuity at the knee that injects clicks/harmonics.
     pub fn cubic_sat(x: f64) -> f64 {
-        if Libm::<f64>::fabs(x) < 2.0 / 3.0 {
+        if Libm::<f64>::fabs(x) < 1.0 {
             x - x * x * x / 3.0
         } else {
             let sign = if x >= 0.0 { 1.0 } else { -1.0 };
             sign * 2.0 / 3.0
         }
+    }
+
+    /// Gentle asymmetric saturation with output gain compensation.
+    ///
+    /// Applies a mild asymmetric `tanh` shaper (slightly different positive and
+    /// negative drive) for subtle even-harmonic warmth, then compensates the
+    /// gain so a unit-amplitude input keeps its positive peak (under ~3% level
+    /// loss). A raw `tanh` shaper (e.g. `asym_sat(x, 1.0, 0.98)`) would squash
+    /// the `±1` peaks to `±0.76` — a ~24% level loss with almost no asymmetry.
+    pub fn gentle_asym_sat(x: f64) -> f64 {
+        // Gentle drives keep the waveform nearly linear; the small pos/neg
+        // difference produces mild even harmonics without a large asymmetry.
+        const POS_DRIVE: f64 = 0.3;
+        const NEG_DRIVE: f64 = 0.27;
+        // Normalize so a +1 input maps back to ~+1 output (tanh(POS_DRIVE) is
+        // the uncompensated positive peak).
+        let comp = 1.0 / Libm::<f64>::tanh(POS_DRIVE);
+        asym_sat(x, POS_DRIVE, NEG_DRIVE) * comp
     }
 }
 
@@ -192,9 +220,21 @@ impl ThermalModel {
         }
     }
 
-    /// Create a default thermal model
+    /// Create a default thermal model, calibrated as a phenomenological analog
+    /// warm-up model.
+    ///
+    /// The ODE is `temp' = energy*heat_rate - (temp-ambient)*cool_rate`:
+    /// - `ambient = 25 °C` — room-temperature reference.
+    /// - `cool_rate = 0.025 /s` → thermal time constant `tau = 1/cool_rate = 40 s`,
+    ///   i.e. tens of seconds to warm up and settle, like a real oscillator core
+    ///   (the previous `0.001` gave `tau ≈ 1000 s ≈ 16 min`, inaudible).
+    /// - `heat_rate = 0.4 °C per unit signal-energy·second` → with a typical
+    ///   oscillator signal energy (mean-square ≈ 0.2) the equilibrium offset is
+    ///   `energy * heat_rate / cool_rate ≈ 3 °C`, which at `1 cent/°C` (see
+    ///   [`detune_ratio`](Self::detune_ratio)) is a few cents of drift — audible
+    ///   but bounded.
     pub fn default_analog() -> Self {
-        Self::new(25.0, 0.01, 0.001)
+        Self::new(25.0, 0.4, 0.025)
     }
 
     /// Update temperature based on signal energy
@@ -212,6 +252,19 @@ impl ThermalModel {
     /// Get current temperature offset from ambient
     pub fn offset(&self) -> f64 {
         self.temperature - self.ambient
+    }
+
+    /// Pitch detuning caused by the current thermal offset, as a frequency
+    /// multiplier.
+    ///
+    /// Analog oscillators drift on the order of a cent or so per °C; this model
+    /// uses `1 cent/°C`, so a few °C of warm-up yields a few cents of detune.
+    /// The result is bounded because the thermal offset itself is bounded by
+    /// `energy * heat_rate / cool_rate`. `1 cent = 2^(1/1200)`.
+    pub fn detune_ratio(&self) -> f64 {
+        const DETUNE_CENTS_PER_DEGC: f64 = 1.0;
+        let cents = self.offset() * DETUNE_CENTS_PER_DEGC;
+        Libm::<f64>::pow(2.0, cents / 1200.0)
     }
 
     /// Reset to ambient temperature
@@ -333,11 +386,19 @@ pub struct VoctTrackingModel {
     /// Center octave (typically C4 = 0V = octave 4)
     center_octave: f64,
 
-    /// Random walk state for slow drift
+    /// Ornstein-Uhlenbeck drift state (slow pitch wander), in cents
     drift_state: f64,
 
-    /// Drift rate (how fast the tracking wanders)
-    drift_rate: f64,
+    /// OU mean-reversion time constant, in seconds (correlation time of the
+    /// drift). Tens of seconds gives a slow, musical wander.
+    drift_tau: f64,
+
+    /// OU noise amplitude, in cents per sqrt(second). With the OU process
+    /// `dX = -(X/tau) dt + sigma*sqrt(dt)*noise`, the stationary standard
+    /// deviation is `sigma * sqrt(Var(noise) * tau / 2)`. The noise source is
+    /// uniform `[-1, 1]` (variance `1/3`), so `std = sigma * sqrt(tau / 6)` —
+    /// about 3 cents for `tau = 30 s`, `sigma = 1.34`.
+    drift_sigma: f64,
 }
 
 impl VoctTrackingModel {
@@ -348,7 +409,8 @@ impl VoctTrackingModel {
             octave_error_coef: 1.0 + rng::random() * 2.0,  // 1-3 cents/octave
             center_octave: 4.0,
             drift_state: 0.0,
-            drift_rate: 0.0001,
+            drift_tau: 30.0,   // seconds (mean-reversion correlation time)
+            drift_sigma: 1.34, // ~3 cents stationary std with uniform noise
         }
     }
 
@@ -359,19 +421,29 @@ impl VoctTrackingModel {
             octave_error_coef: 0.0,
             center_octave: 4.0,
             drift_state: 0.0,
-            drift_rate: 0.0,
+            drift_tau: 30.0,
+            drift_sigma: 0.0,
         }
     }
 
     /// Apply tracking error to a V/Oct value, returning the modified V/Oct
     pub fn apply(&mut self, voct: f64, dt: f64) -> f64 {
-        // Update drift (slow random walk)
-        self.drift_state += rng::random_bipolar() * self.drift_rate * dt * 1000.0;
-        self.drift_state = self.drift_state.clamp(-10.0, 10.0);
+        // Slow pitch drift modeled as an Ornstein-Uhlenbeck process (a
+        // mean-reverting random walk): dX = -(X/tau) dt + sigma*sqrt(dt)*noise.
+        // The sqrt(dt) noise scaling makes the wander sample-rate invariant in
+        // wall-clock time (unlike a dt-scaled random walk, whose diffusion rate
+        // is proportional to 1/sample_rate).
+        let noise = rng::random_bipolar();
+        self.drift_state += -self.drift_state / self.drift_tau * dt
+            + self.drift_sigma * Libm::<f64>::sqrt(dt) * noise;
+        self.drift_state = self.drift_state.clamp(-25.0, 25.0);
 
-        // Calculate octave distance from center
+        // Signed octave distance from center. A real analog V/Oct error is a
+        // scale-factor error, so pitch runs sharp above the center octave and
+        // flat below it — a monotone signed deviation, not the non-physical
+        // symmetric V-shape produced by using the absolute distance.
         let current_octave = self.center_octave + voct;
-        let octave_distance = (current_octave - self.center_octave).abs();
+        let octave_distance = current_octave - self.center_octave;
 
         // Total error in cents
         let error_cents =
@@ -407,9 +479,6 @@ pub struct HighFrequencyRolloff {
     /// Current filter state
     state: f64,
 
-    /// Filter coefficient
-    coef: f64,
-
     /// Sample rate
     sample_rate: f64,
 }
@@ -417,11 +486,9 @@ pub struct HighFrequencyRolloff {
 impl HighFrequencyRolloff {
     /// Create a new rolloff filter with given cutoff frequency
     pub fn new(sample_rate: f64, cutoff_hz: f64) -> Self {
-        let coef = Self::calculate_coef(sample_rate, cutoff_hz);
         Self {
             cutoff_hz,
             state: 0.0,
-            coef,
             sample_rate,
         }
     }
@@ -431,27 +498,38 @@ impl HighFrequencyRolloff {
         Self::new(sample_rate, 12000.0)
     }
 
+    /// One-pole low-pass coefficient for a given cutoff, clamped into `(0, 1)`.
+    ///
+    /// The recursion `y += a*(x - y)` has pole `1 - a` and is stable only for
+    /// `0 < a < 1`; `omega/(1+omega)` is naturally in `(0, 1)` for `omega > 0`,
+    /// and the clamp is a hard safety bound against degenerate inputs.
     fn calculate_coef(sample_rate: f64, cutoff_hz: f64) -> f64 {
         let omega = TAU * cutoff_hz / sample_rate;
-        omega / (1.0 + omega)
+        (omega / (1.0 + omega)).clamp(1.0e-6, 0.999)
     }
 
-    /// Apply frequency-dependent rolloff
-    /// Higher frequencies get more attenuation
+    /// Apply frequency-dependent rolloff.
+    ///
+    /// Higher oscillator frequencies experience progressively more
+    /// high-frequency rolloff (slew-rate limiting, parasitic capacitance). This
+    /// is modeled by *lowering the effective cutoff* as the played frequency
+    /// rises above the nominal cutoff, then recomputing a stable one-pole
+    /// coefficient — never by dividing the coefficient (which drove it past the
+    /// stability bound and diverged for every note below ~3.8 kHz).
     pub fn apply(&mut self, input: f64, frequency: f64) -> f64 {
-        // Increase rolloff for higher frequencies
-        let freq_factor = (frequency / self.cutoff_hz).max(0.1);
-        let effective_coef = self.coef / freq_factor.min(4.0);
+        let freq_ratio = (frequency / self.cutoff_hz).max(0.0);
+        let effective_cutoff = self.cutoff_hz / (1.0 + freq_ratio);
+        let coef = Self::calculate_coef(self.sample_rate, effective_cutoff);
 
-        // One-pole lowpass filter
-        self.state += effective_coef * (input - self.state);
+        // One-pole lowpass filter; `coef` is guaranteed in (0, 1) so this is
+        // unconditionally stable.
+        self.state += coef * (input - self.state);
         self.state
     }
 
-    /// Set sample rate and recalculate coefficient
+    /// Set sample rate
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
-        self.coef = Self::calculate_coef(sample_rate, self.cutoff_hz);
     }
 
     /// Reset filter state
@@ -498,7 +576,7 @@ impl AnalogVco {
             phase: 0.0,
             sample_rate,
             freq_component: ComponentModel::new(0.02, 0.0001), // 2% tolerance
-            thermal: ThermalModel::new(25.0, 0.01, 0.001),
+            thermal: ThermalModel::default_analog(),
             dc_offset: rng::random_bipolar() * 0.01,
             voct_tracking: VoctTrackingModel::new(),
             hf_rolloff: HighFrequencyRolloff::default_analog(sample_rate),
@@ -548,7 +626,7 @@ impl GraphModule for AnalogVco {
         // Apply component tolerance and thermal drift to frequency
         let base_freq = 261.63 * Libm::<f64>::pow(2.0, voct_with_error);
         let freq = self.freq_component.apply(base_freq);
-        let freq = freq * (1.0 + self.thermal.offset() * 0.001); // Thermal detuning
+        let freq = freq * self.thermal.detune_ratio(); // Thermal detuning (a few cents warmed)
         let freq = freq * Libm::<f64>::pow(2.0, fm);
 
         // Update thermal model
@@ -574,8 +652,9 @@ impl GraphModule for AnalogVco {
         let saw = 2.0 * self.phase - 1.0;
         let sqr = if self.phase < pw { 1.0 } else { -1.0 };
 
-        // Add DC offset and slight asymmetric saturation
-        let saw = saturation::asym_sat(saw + self.dc_offset, 1.0, 0.98);
+        // Add DC offset and gentle, gain-compensated asymmetric saturation for
+        // subtle even-harmonic warmth without squashing the peak level.
+        let saw = saturation::gentle_asym_sat(saw + self.dc_offset);
 
         // Apply sync ramp for smooth sync transients
         let sin = sin * self.sync_ramp;
@@ -696,9 +775,11 @@ mod tests {
         assert!(low_drive.abs() < 1.0);
         assert!(high_drive.abs() < 1.0);
 
-        // Very high drive: approaches limits
+        // Very high drive at a unit input: strongly saturated but still bounded.
+        // (With unity origin gain, a unit input maps near tanh(1) ≈ 0.76 rather
+        // than being pushed to the ±1 rail.)
         let saturated = saturation::tanh_sat(1.0, 10.0);
-        assert!(saturated > 0.9 && saturated <= 1.0);
+        assert!(saturated > 0.5 && saturated <= 1.0);
     }
 
     #[test]
@@ -1057,5 +1138,243 @@ mod tests {
         // Reset should clear drift
         tracking.reset();
         assert!(tracking.drift_state == 0.0);
+    }
+
+    // ---- Wave B audit remediation tests ----
+
+    // Q043: the HF rolloff one-pole coefficient must stay in (0, 1) so the
+    // AnalogVco sin output no longer diverges to ±inf on ordinary notes.
+    #[test]
+    fn test_hf_rolloff_stable_low_freq() {
+        let mut rolloff = HighFrequencyRolloff::new(44100.0, 12000.0);
+        let mut out = 0.0;
+        // Alternating drive at a low note (261.63 Hz) — the worst case that
+        // previously drove the coefficient to ~6.3 and blew up in ~10 ms.
+        for i in 0..100_000 {
+            let input = if i % 2 == 0 { 1.0 } else { -1.0 };
+            out = rolloff.apply(input, 261.63);
+            assert!(out.is_finite(), "rolloff diverged at sample {i}: {out}");
+        }
+        assert!(out.abs() <= 1.0);
+    }
+
+    // Q043: AnalogVco sin (and all outputs) stay finite and bounded across the
+    // full musical range, including the notes that previously diverged.
+    #[test]
+    fn test_analog_vco_stable_across_frequencies() {
+        rng::seed(0xC0FFEE);
+        // C4 (0 V), ~1 kHz, and ~8 kHz expressed in V/Oct (261.63 * 2^voct).
+        for &voct in &[0.0, 1.9342, 4.9344] {
+            let mut vco = AnalogVco::new(44100.0);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            inputs.set(0, voct);
+
+            for n in 0..100_000 {
+                vco.tick(&inputs, &mut outputs);
+                for &port in &[10, 11, 12, 13] {
+                    let v = outputs.get(port).unwrap();
+                    assert!(v.is_finite(), "port {port} @ voct {voct} sample {n}: {v}");
+                    assert!(v.abs() <= 6.0, "port {port} @ voct {voct} sample {n}: {v}");
+                }
+            }
+        }
+    }
+
+    // Q044: cubic_sat is continuous at the knee (|x| = 1), no ~0.099 step.
+    #[test]
+    fn test_cubic_sat_knee_continuity() {
+        let below = saturation::cubic_sat(0.999_999);
+        let above = saturation::cubic_sat(1.000_001);
+        assert!(
+            (below - above).abs() < 1.0e-6,
+            "knee discontinuity: below={below}, above={above}"
+        );
+        // The curve joins the clamp value exactly.
+        assert!((saturation::cubic_sat(1.0) - 2.0 / 3.0).abs() < 1.0e-12);
+        // Symmetric knee on the negative side too.
+        let nb = saturation::cubic_sat(-0.999_999);
+        let na = saturation::cubic_sat(-1.000_001);
+        assert!((nb - na).abs() < 1.0e-6);
+    }
+
+    // Q045: the drift is an Ornstein-Uhlenbeck process whose wander is
+    // sample-rate invariant in wall-clock time (sqrt(dt) noise scaling).
+    #[test]
+    fn test_voct_drift_sample_rate_invariance() {
+        // Ensemble variance of the drift after a fixed wall-time, over many
+        // independent instances. In the (short) pure-diffusion regime this is
+        // sigma_eff^2 * t, which must not depend on the sample rate.
+        fn ensemble_var(sample_rate: f64, wall_time: f64, trials: usize) -> f64 {
+            let dt = 1.0 / sample_rate;
+            let n = (wall_time * sample_rate) as usize;
+            let mut vals = alloc::vec::Vec::with_capacity(trials);
+            for _ in 0..trials {
+                let mut m = VoctTrackingModel::new();
+                m.drift_state = 0.0;
+                for _ in 0..n {
+                    m.apply(0.0, dt);
+                }
+                vals.push(m.drift_state);
+            }
+            let mean: f64 = vals.iter().sum::<f64>() / trials as f64;
+            vals.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / trials as f64
+        }
+
+        rng::seed(0x5EED_1234);
+        let var_low = ensemble_var(44_100.0, 0.4, 80);
+        let var_high = ensemble_var(96_000.0, 0.4, 80);
+
+        assert!(var_low.is_finite() && var_high.is_finite());
+        // Both should be near the theoretical sigma_eff^2 * t ≈ 0.24.
+        assert!(
+            (0.08..0.7).contains(&var_low),
+            "var_low out of expected band: {var_low}"
+        );
+        assert!(
+            (0.08..0.7).contains(&var_high),
+            "var_high out of expected band: {var_high}"
+        );
+        // And comparable to each other (sample-rate invariant).
+        let ratio = var_low / var_high;
+        assert!(
+            (0.4..2.5).contains(&ratio),
+            "sample-rate dependent: ratio={ratio}, low={var_low}, high={var_high}"
+        );
+    }
+
+    // Q045: the drift never runs away — it stays well within the clamp.
+    #[test]
+    fn test_voct_drift_bounded() {
+        rng::seed(0xD817);
+        let mut m = VoctTrackingModel::new();
+        let dt = 1.0 / 44_100.0;
+        let mut max_abs = 0.0_f64;
+        for _ in 0..1_000_000 {
+            m.apply(0.0, dt);
+            assert!(m.drift_state.is_finite());
+            assert!(m.drift_state.abs() <= 25.0);
+            max_abs = max_abs.max(m.drift_state.abs());
+        }
+        // With ~3 cent stationary std, ~23 s of audio should wander a few cents
+        // but nowhere near the ±25 clamp — confirms it is neither frozen nor
+        // runaway.
+        assert!(max_abs > 0.5, "drift is frozen: max_abs={max_abs}");
+        assert!(max_abs < 25.0, "drift hit the clamp: max_abs={max_abs}");
+    }
+
+    // Q046: tracking error is signed (sharp above center, flat below), not a
+    // symmetric V-shape.
+    #[test]
+    fn test_voct_tracking_signed_error() {
+        let mut tracking = VoctTrackingModel::perfect();
+        tracking.octave_error_coef = 3.0; // known positive scale error
+                                          // dt = 0 keeps the drift fixed for a clean comparison.
+        let e_below = tracking.apply(-2.0, 0.0) - (-2.0);
+        let e_center = tracking.apply(0.0, 0.0);
+        let e_above = tracking.apply(2.0, 0.0) - 2.0;
+
+        assert!(
+            e_below < 0.0,
+            "should be flat (negative) below center: {e_below}"
+        );
+        assert!(
+            e_center.abs() < 1.0e-9,
+            "should be ~0 at center: {e_center}"
+        );
+        assert!(
+            e_above > 0.0,
+            "should be sharp (positive) above center: {e_above}"
+        );
+        // Monotone increasing — no V-shape kink.
+        assert!(e_below < e_center && e_center < e_above);
+    }
+
+    // Q047: tanh_sat has unity small-signal gain at the origin (no low-level
+    // boost), is monotonic, and stays bounded.
+    #[test]
+    fn test_tanh_sat_unity_origin_gain() {
+        for &drive in &[0.25, 0.5, 1.0, 2.0, 4.0] {
+            let h = 1.0e-6;
+            let deriv =
+                (saturation::tanh_sat(h, drive) - saturation::tanh_sat(-h, drive)) / (2.0 * h);
+            assert!(
+                (deriv - 1.0).abs() < 1.0e-3,
+                "origin gain != 1 at drive={drive}: {deriv}"
+            );
+            // Monotonic increasing over the operating range.
+            assert!(saturation::tanh_sat(0.6, drive) > saturation::tanh_sat(0.3, drive));
+            // Bounded to [-1, 1], even for out-of-range inputs.
+            assert!(saturation::tanh_sat(1.0, drive).abs() <= 1.0);
+            assert!(saturation::tanh_sat(-1.0, drive).abs() <= 1.0);
+            assert!(saturation::tanh_sat(100.0, drive).abs() <= 1.0);
+            assert!(saturation::tanh_sat(-100.0, drive).abs() <= 1.0);
+        }
+    }
+
+    // Q048: the thermal model produces an audible-but-bounded detune trajectory
+    // that warms up over tens of seconds.
+    #[test]
+    fn test_thermal_detune_trajectory() {
+        let mut thermal = ThermalModel::default_analog();
+        // Coarse dt (still << tau = 40 s) keeps the test fast; forward Euler is
+        // effectively exact here.
+        let dt = 1.0 / 1000.0;
+        // Representative saw-like signal energy (mean square ≈ 0.19).
+        let energy = 0.19;
+
+        // Tests always build with std, so the inherent `log2` is available.
+        let cents = |t: &ThermalModel| t.detune_ratio().log2() * 1200.0;
+
+        // Cold start: no detune.
+        assert!(cents(&thermal).abs() < 0.01);
+
+        // Warm up for one time constant (~40 s).
+        for _ in 0..(40.0 / dt) as usize {
+            thermal.update(energy, dt);
+        }
+        let cents_1tau = cents(&thermal);
+
+        // Continue out to ~5 time constants (near equilibrium).
+        for _ in 0..(160.0 / dt) as usize {
+            thermal.update(energy, dt);
+        }
+        let cents_eq = cents(&thermal);
+
+        // Audible: at least ~1 cent of drift once warmed.
+        assert!(cents_eq > 1.0, "detune inaudible: {cents_eq} cents");
+        // Bounded: only a few cents, never a wild pitch shift.
+        assert!(cents_eq < 8.0, "detune unbounded: {cents_eq} cents");
+        // First-order warm-up: one time constant reaches ~63% of equilibrium.
+        let ratio = cents_1tau / cents_eq;
+        assert!(
+            (0.5..0.8).contains(&ratio),
+            "warm-up time constant off: ratio={ratio}"
+        );
+        assert!(cents_1tau < cents_eq);
+    }
+
+    // Q049: the AnalogVco saw shaper preserves peak level (<3% loss) while
+    // keeping a mild even-harmonic asymmetry.
+    #[test]
+    fn test_gentle_asym_sat_peak_level() {
+        let pos_peak = saturation::gentle_asym_sat(1.0);
+        // Positive peak within 3% of unity (previously ~24% loss).
+        assert!(
+            (pos_peak - 1.0).abs() < 0.03,
+            "peak level loss too large: {pos_peak}"
+        );
+        assert!(pos_peak.abs() <= 1.05, "peak overshoots: {pos_peak}");
+
+        let neg_peak = saturation::gentle_asym_sat(-1.0);
+        // Some, but mild, asymmetry (the source of even harmonics).
+        let asymmetry = (pos_peak + neg_peak).abs();
+        assert!(asymmetry > 0.01, "no even-harmonic asymmetry: {asymmetry}");
+        assert!(asymmetry < 0.2, "asymmetry not mild: {asymmetry}");
+
+        // Sign-preserving and monotonic through the origin.
+        assert!(saturation::gentle_asym_sat(0.5) > 0.0);
+        assert!(saturation::gentle_asym_sat(-0.5) < 0.0);
+        assert!(saturation::gentle_asym_sat(0.6) > saturation::gentle_asym_sat(0.3));
     }
 }
