@@ -160,5 +160,62 @@ fn main() {
         println!("{}: {}", mode_name, desc);
     }
 
+    // ------------------------------------------------------------------
+    // Building an ACTUAL polyphonic synthesizer with PolyPatch
+    // ------------------------------------------------------------------
+    // PolyPatch inserts an in-graph voice controller into each voice, so the
+    // allocator's per-voice pitch/gate signals actually reach real DSP. Here
+    // each voice is: voice controller -> Vco -> Vca (shaped by an Adsr) -> out.
+    println!("\n--- Audible PolyPatch (4 voices) ---\n");
+
+    let sample_rate = 48_000.0;
+    let mut synth = PolyPatch::with_voice_fn(num_voices, sample_rate, |patch, ctrl| {
+        let sr = patch.sample_rate();
+        let vco = patch.add("vco", Vco::new(sr));
+        let adsr = patch.add("adsr", Adsr::new(sr));
+        let vca = patch.add("vca", Vca::new());
+        let out = patch.add("out", StereoOutput::new());
+        // The controller exposes voct / gate / trigger / velocity outputs.
+        patch.connect(ctrl.out("voct"), vco.in_("voct"))?;
+        patch.connect(ctrl.out("gate"), adsr.in_("gate"))?;
+        patch.connect(vco.out("saw"), vca.in_("in"))?;
+        patch.connect(adsr.out("env"), vca.in_("cv"))?;
+        patch.connect(vca.out("out"), out.in_("left"))?;
+        patch.set_output(out.id());
+        Ok(())
+    })
+    .expect("failed to build voice graph");
+
+    // Play the Cmaj7 chord. Voices output modular-level (~±5 V) audio.
+    for &note in &chord {
+        synth.note_on(note, 100);
+    }
+    // Let the envelopes settle past the onset transient, then measure the
+    // gain-compensated steady-state peak (1/sqrt(N) keeps chords from clipping).
+    for _ in 0..(sample_rate as usize / 10) {
+        synth.tick();
+    }
+    let mut peak = 0.0f64;
+    for _ in 0..(sample_rate as usize / 10) {
+        let (l, r) = synth.tick();
+        peak = peak.max(l.abs()).max(r.abs());
+    }
+    println!(
+        "  {} voices sounding; gain-compensated steady peak = {:.3} (audible, bounded)",
+        synth.allocator().active_count(),
+        peak
+    );
+
+    // Release the chord: the ADSR release tails complete before voices free,
+    // and the summed output is gain-compensated so chords do not clip.
+    synth.all_notes_off();
+    for _ in 0..(sample_rate as usize / 4) {
+        synth.tick();
+    }
+    println!(
+        "  After release: {} voices still freeing (tails complete, not truncated).",
+        synth.allocator().active_count()
+    );
+
     println!("\nPolyphony enables expressive keyboard playing and chord voicings.");
 }

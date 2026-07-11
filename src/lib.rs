@@ -113,8 +113,8 @@ pub mod prelude {
 
     // Phase 4: Polyphony Support
     pub use crate::polyphony::{
-        AllocationMode, PolyPatch, UnisonConfig, Voice, VoiceAllocator, VoiceInput, VoiceMixer,
-        VoiceState,
+        AllocationMode, PolyPatch, UnisonConfig, Voice, VoiceAllocator, VoiceControl, VoiceInput,
+        VoiceMixer, VoiceState,
     };
 
     // Phase 4: SIMD and Block Processing
