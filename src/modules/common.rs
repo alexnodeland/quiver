@@ -95,6 +95,27 @@ pub fn polyblep(t: f64, dt: f64) -> f64 {
     }
 }
 
+/// PolyBLAMP residual for bandlimiting a *slope* discontinuity (a corner) at
+/// phase `t` with step `dt` (normalized frequency).
+///
+/// This is the integral of [`polyblep`] and peaks at `1/3` exactly at the
+/// corner. Add `delta_slope_per_sample * polyblamp(t, dt)` to a naive waveform
+/// to round a corner where the per-sample slope changes by
+/// `delta_slope_per_sample`. Used for bandlimited triangles (which have slope,
+/// not value, discontinuities).
+#[inline]
+pub fn polyblamp(t: f64, dt: f64) -> f64 {
+    if t < dt {
+        let t = t / dt - 1.0;
+        -1.0 / 3.0 * t * t * t
+    } else if t > 1.0 - dt {
+        let t = (t - 1.0) / dt + 1.0;
+        1.0 / 3.0 * t * t * t
+    } else {
+        0.0
+    }
+}
+
 /// Rising-edge detector for gate/trigger/clock signals.
 ///
 /// Tracks the previous sample and reports a rising edge when the signal crosses
@@ -124,6 +145,36 @@ impl EdgeDetector {
         let rising = v > threshold && self.prev <= threshold;
         self.prev = v;
         rising
+    }
+
+    /// Like [`rising`](Self::rising), but on a rising edge also returns the
+    /// estimated fractional sample position of the threshold crossing.
+    ///
+    /// The returned `frac` is in `[0, 1]`: `0` means the crossing happened right
+    /// at the previous sample instant, `1` means it happened right at the
+    /// current sample. It is derived by linearly interpolating between the
+    /// previous and current sample. Records `v` as the new previous sample.
+    #[inline]
+    pub fn rising_frac(&mut self, v: f64) -> Option<f64> {
+        self.rising_frac_above(v, GATE_THRESHOLD_V)
+    }
+
+    /// [`rising_frac`](Self::rising_frac) with an explicit `threshold`.
+    #[inline]
+    pub fn rising_frac_above(&mut self, v: f64, threshold: f64) -> Option<f64> {
+        let prev = self.prev;
+        self.prev = v;
+        if v > threshold && prev <= threshold {
+            let denom = v - prev;
+            let frac = if denom > 0.0 {
+                ((threshold - prev) / denom).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            Some(frac)
+        } else {
+            None
+        }
     }
 
     /// Reset the detector's previous sample to `0.0`.

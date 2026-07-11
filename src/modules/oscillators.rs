@@ -1,6 +1,6 @@
 //! Oscillator and source modules.
 
-use super::common::{polyblep, voct_to_hz, EdgeDetector, GATE_THRESHOLD_V};
+use super::common::{polyblamp, polyblep, voct_to_hz, EdgeDetector, GATE_THRESHOLD_V};
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use crate::rng;
 use alloc::vec;
@@ -12,6 +12,19 @@ use libm::Libm;
 ///
 /// A multi-waveform oscillator with V/Oct pitch input, FM, pulse width control,
 /// and hard sync. Outputs sine, triangle, saw, and square waveforms.
+///
+/// The saw and square outputs are bandlimited with PolyBLEP and the triangle
+/// with PolyBLAMP to suppress aliasing; the sine is inherently bandlimited.
+///
+/// # FM inputs
+/// - Port 1 `fm` (exponential): a raw ±5V CvBipolar signal is treated as
+///   ±5 octaves (`freq = base * 2^fm`), i.e. full-scale ±5V spans ×32 / ÷32.
+///   Attenuate it for musical depths.
+/// - Port 4 `fm_lin` (linear, through-zero): adds to the frequency directly,
+///   scaled so ±5V is ±100% of the base frequency
+///   (`freq += (fm_lin / 5) * base`). This enables through-zero linear FM and
+///   its classic symmetric sidebands; the frequency may pass through and below
+///   zero, running the phase backwards.
 pub struct Vco {
     phase: f64,
     sample_rate: f64,
@@ -28,11 +41,14 @@ impl Vco {
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "voct", SignalKind::VoltPerOctave),
+                    // Exponential FM: ±5V input == ±5 octaves (see struct docs).
                     PortDef::new(1, "fm", SignalKind::CvBipolar).with_attenuverter(),
                     PortDef::new(2, "pw", SignalKind::CvUnipolar)
                         .with_default(0.5)
                         .with_attenuverter(),
                     PortDef::new(3, "sync", SignalKind::Gate),
+                    // Linear through-zero FM: ±5V == ±100% of base frequency.
+                    PortDef::new(4, "fm_lin", SignalKind::CvBipolar).with_attenuverter(),
                 ],
                 outputs: vec![
                     PortDef::new(10, "sin", SignalKind::Audio),
@@ -61,29 +77,90 @@ impl GraphModule for Vco {
         let fm = inputs.get_or(1, 0.0);
         let pw = inputs.get_or(2, 0.5).clamp(0.05, 0.95);
         let sync = inputs.get_or(3, 0.0);
+        let fm_lin = inputs.get_or(4, 0.0);
 
-        // V/Oct to frequency: 0V = C4 (261.63 Hz)
+        // V/Oct to frequency: 0V = C4 (261.63 Hz).
         let base_freq = voct_to_hz(voct);
-        let freq = base_freq * Libm::<f64>::pow(2.0, fm);
+        // Exponential FM: raw ±5V == ±5 octaves.
+        let mut freq = base_freq * Libm::<f64>::pow(2.0, fm);
+        // Linear through-zero FM: ±5V == ±100% of base frequency. This can drive
+        // `freq` (and thus the phase increment) negative for through-zero FM.
+        freq += (fm_lin / 5.0) * base_freq;
 
-        // Hard sync on rising edge
-        if self.sync_edge.rising(sync) {
+        // Normalized phase increment (may be negative under through-zero FM).
+        let dt = freq / self.sample_rate;
+        // Magnitude used for PolyBLEP/PolyBLAMP transition widths.
+        let dt_abs = Libm::<f64>::fabs(dt);
+
+        // Hard sync on rising edge. Capture the pre-reset phase and the
+        // fractional crossing position so we can bandlimit the reset step.
+        let mut sync_reset: Option<(f64, f64)> = None;
+        if let Some(frac) = self.sync_edge.rising_frac(sync) {
+            sync_reset = Some((self.phase, frac));
             self.phase = 0.0;
         }
 
-        // Generate waveforms (±5V range)
-        let sin = Libm::<f64>::sin(self.phase * TAU) * 5.0;
-        let tri = (1.0 - 4.0 * Libm::<f64>::fabs(self.phase - 0.5)) * 5.0;
-        let saw = (2.0 * self.phase - 1.0) * 5.0;
-        let sqr = if self.phase < pw { 5.0 } else { -5.0 };
+        let phase = self.phase;
 
+        // Sine is inherently bandlimited.
+        let sin = Libm::<f64>::sin(phase * TAU) * 5.0;
+
+        // Bandlimited saw: naive ramp minus PolyBLEP at the wrap.
+        let mut saw = 2.0 * phase - 1.0;
+        saw -= polyblep(phase, dt_abs);
+
+        // Bandlimited square/pulse: PolyBLEP at both the rising (wrap) and
+        // falling (pulse-width) edges.
+        let mut sqr = if phase < pw { 1.0 } else { -1.0 };
+        sqr += polyblep(phase, dt_abs);
+        let pw_edge = {
+            let x = phase + (1.0 - pw);
+            x - Libm::<f64>::floor(x)
+        };
+        sqr -= polyblep(pw_edge, dt_abs);
+
+        // Bandlimited triangle via PolyBLAMP corrections at its two corners
+        // (slope changes of ±8 per unit phase => ±4*dt per sample).
+        let mut tri = 1.0 - 4.0 * Libm::<f64>::fabs(phase - 0.5);
+        let corner_half = {
+            let x = phase - 0.5;
+            if x < 0.0 {
+                x + 1.0
+            } else {
+                x
+            }
+        };
+        tri += 4.0 * dt_abs * polyblamp(phase, dt_abs);
+        tri -= 4.0 * dt_abs * polyblamp(corner_half, dt_abs);
+
+        // Bounded hard-sync correction. The reset introduces a value step in the
+        // saw and square that is not at a natural phase wrap, so the wrap-BLEP
+        // above cannot see it. We apply a one-sided PolyBLEP for the step using
+        // the fractional reset position. Note: this corrects the sample(s) after
+        // the reset only; the sample immediately before the sub-sample edge is
+        // already emitted, so a small residual discontinuity remains (a full
+        // two-sided minBLEP is out of scope for this single-sample structure).
+        if let Some((p_old, frac)) = sync_reset {
+            // Phase-equivalent position of the (past) discontinuity for PolyBLEP.
+            let equiv = (1.0 - frac) * dt_abs;
+            let blep = polyblep(equiv, dt_abs);
+            // Saw step (normalized): from (2*p_old-1) down to (2*0-1) = -2*p_old.
+            let saw_step = -2.0 * p_old;
+            saw += (saw_step / 2.0) * blep;
+            // Square step: from sign(p_old<pw) to +1 (phase reset to 0 < pw).
+            let old_sqr = if p_old < pw { 1.0 } else { -1.0 };
+            let sqr_step = 1.0 - old_sqr;
+            sqr += (sqr_step / 2.0) * blep;
+        }
+
+        // Scale to ±5V.
         outputs.set(10, sin);
-        outputs.set(11, tri);
-        outputs.set(12, saw);
-        outputs.set(13, sqr);
+        outputs.set(11, tri * 5.0);
+        outputs.set(12, saw * 5.0);
+        outputs.set(13, sqr * 5.0);
 
-        // Advance phase
-        let new_phase = self.phase + freq / self.sample_rate;
+        // Advance phase (dt may be negative under through-zero FM).
+        let new_phase = self.phase + dt;
         self.phase = new_phase - Libm::<f64>::floor(new_phase);
         if self.phase < 0.0 {
             self.phase += 1.0;
@@ -203,6 +280,9 @@ impl GraphModule for Lfo {
 /// Creates thick, wide sounds.
 pub struct Supersaw {
     phases: [f64; 7],
+    /// Independent accumulator for the sub-oscillator, one octave below the
+    /// center voice (advances at half the center rate).
+    sub_phase: f64,
     sample_rate: f64,
     spec: PortSpec,
 }
@@ -232,6 +312,7 @@ impl Supersaw {
 
         Self {
             phases,
+            sub_phase: 0.0,
             sample_rate,
             spec: PortSpec {
                 inputs: vec![
@@ -275,6 +356,8 @@ impl GraphModule for Supersaw {
 
         let mut sum = 0.0;
         let mut total_mix = 0.0;
+        // Band-limited center voice (index 3, zero detune), captured for the mix.
+        let mut center_saw = 0.0;
 
         for i in 0..7 {
             // Apply detune
@@ -286,6 +369,12 @@ impl GraphModule for Supersaw {
             let raw_saw = 2.0 * self.phases[i] - 1.0;
             let blep = polyblep(self.phases[i], dt);
             let saw = raw_saw - blep;
+
+            // Q006: reuse the already band-limited center voice for the mix
+            // blend instead of recomputing a naive ramp.
+            if i == 3 {
+                center_saw = saw;
+            }
 
             // Mix with level
             sum += saw * Self::MIX_LEVELS[i];
@@ -300,12 +389,16 @@ impl GraphModule for Supersaw {
 
         // Normalize and apply mix (blend between center oscillator and full supersaw)
         let normalized = sum / total_mix;
-        let center_saw = 2.0 * self.phases[3] - 1.0;
         let output = center_saw * (1.0 - mix) + normalized * mix;
 
-        // Sub oscillator (octave down from center)
-        let sub_phase = (self.phases[3] * 0.5) % 1.0;
-        let sub = 2.0 * sub_phase - 1.0;
+        // Sub oscillator: a true octave-down band-limited saw driven by an
+        // independent accumulator advancing at half the center rate.
+        let sub_dt = base_freq / (2.0 * self.sample_rate);
+        let sub = (2.0 * self.sub_phase - 1.0) - polyblep(self.sub_phase, sub_dt);
+        self.sub_phase += sub_dt;
+        if self.sub_phase >= 1.0 {
+            self.sub_phase -= 1.0;
+        }
 
         outputs.set(10, output);
         outputs.set(11, sub);
@@ -315,6 +408,7 @@ impl GraphModule for Supersaw {
         for (i, phase) in self.phases.iter_mut().enumerate() {
             *phase = (i as f64) / 7.0;
         }
+        self.sub_phase = 0.0;
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
@@ -335,10 +429,16 @@ pub struct KarplusStrong {
     write_pos: usize,
     sample_rate: f64,
     last_output: f64,
+    /// Rising-edge detector for the trigger (excite once per pluck).
+    trigger_edge: EdgeDetector,
     spec: PortSpec,
 }
 
 impl KarplusStrong {
+    /// Loop DC leak: makes the feedback loop's DC gain slightly below unity so
+    /// any residual excitation offset decays instead of circulating forever.
+    const LOOP_LEAK: f64 = 0.9995;
+
     pub fn new(sample_rate: f64) -> Self {
         // Buffer for lowest frequency (around 20Hz)
         let buffer_size = (sample_rate / 20.0) as usize + 10;
@@ -347,6 +447,7 @@ impl KarplusStrong {
             write_pos: 0,
             sample_rate,
             last_output: 0.0,
+            trigger_edge: EdgeDetector::new(),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "voct", SignalKind::VoltPerOctave).with_default(0.0),
@@ -375,6 +476,14 @@ impl KarplusStrong {
             let impulse = if i < period / 4 { 1.0 } else { 0.0 };
             self.buffer[i] = noise * brightness + impulse * (1.0 - brightness);
         }
+        // Q004: remove the DC component from the excitation. The impulse part is
+        // strictly positive, and the loop filter has unity DC gain, so any DC
+        // bias would circulate undamped. Zero-meaning the excitation prevents a
+        // constant offset/thump that never decays.
+        let mean: f64 = self.buffer.iter().sum::<f64>() / period as f64;
+        for sample in self.buffer.iter_mut() {
+            *sample -= mean;
+        }
     }
 }
 
@@ -401,8 +510,11 @@ impl GraphModule for KarplusStrong {
         let period = (self.sample_rate / freq).clamp(2.0, self.buffer.len() as f64 - 1.0);
         let period_int = period as usize;
 
-        // Trigger excitation
-        if trigger > 0.5 {
+        // Q002/Q129: excite only on a rising edge across the canonical gate
+        // threshold, so a gate/trigger held high for many samples plucks the
+        // string exactly once (and lets it ring) instead of re-filling the
+        // buffer with noise every sample.
+        if self.trigger_edge.rising(trigger) {
             // Resize buffer for this frequency
             self.buffer.truncate(period_int + 2);
             self.buffer.resize(period_int + 2, 0.0);
@@ -410,34 +522,52 @@ impl GraphModule for KarplusStrong {
             self.write_pos = 0;
         }
 
-        // Read from buffer with interpolation
-        let read_pos = (self.write_pos + 1) % self.buffer.len();
-        let read_pos2 = (self.write_pos + 2) % self.buffer.len();
-        let frac = period - period_int as f64;
-        let sample = self.buffer[read_pos] * (1.0 - frac) + self.buffer[read_pos2] * frac;
-
-        // Lowpass filter (simple averaging with damping control)
-        // Higher damping = more filtering = faster decay
+        // Loop-filter coefficient (one-pole lowpass), higher damping = brighter.
         let filter_coef = 0.5 + damping * 0.49; // 0.5 to 0.99
+
+        // Q003: place the fractional-delay taps so the *total* loop delay equals
+        // the target period. The one-pole loop filter contributes a group delay
+        // of (1-c)/c samples at DC, so the delay line must supply
+        // `period - filter_group_delay`.
+        let filter_gd = (1.0 - filter_coef) / filter_coef;
+        let target_delay = (period - filter_gd).max(1.0);
+        let delay_int = target_delay as usize;
+        let delay_frac = target_delay - delay_int as f64;
+
+        // A tap `off` samples ahead of write_pos yields a delay of `len - off`.
+        let len = self.buffer.len();
+        let off1 = len.saturating_sub(delay_int); // delay = delay_int
+        let off2 = off1.saturating_sub(1); // delay = delay_int + 1
+        let read_pos = (self.write_pos + off1) % len;
+        let read_pos2 = (self.write_pos + off2) % len;
+        let sample =
+            self.buffer[read_pos] * (1.0 - delay_frac) + self.buffer[read_pos2] * delay_frac;
+
+        // Lowpass filter (one-pole averaging with damping control).
         let filtered = sample * filter_coef + self.last_output * (1.0 - filter_coef);
 
         // All-pass filter for stretch factor (inharmonicity)
         let stretch_coef = stretch * 0.5;
         let stretched = filtered + stretch_coef * (filtered - self.last_output);
 
-        self.last_output = stretched;
+        // Q004: leak the loop slightly so its DC gain is below unity and any
+        // residual offset decays toward zero rather than circulating forever.
+        let leaked = stretched * Self::LOOP_LEAK;
+
+        self.last_output = leaked;
 
         // Write back to buffer
-        self.buffer[self.write_pos] = stretched;
-        self.write_pos = (self.write_pos + 1) % self.buffer.len();
+        self.buffer[self.write_pos] = leaked;
+        self.write_pos = (self.write_pos + 1) % len;
 
-        outputs.set(10, stretched);
+        outputs.set(10, leaked);
     }
 
     fn reset(&mut self) {
         self.buffer.fill(0.0);
         self.write_pos = 0;
         self.last_output = 0.0;
+        self.trigger_edge.reset();
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
@@ -647,8 +777,10 @@ impl WavetableType {
 /// - Input 3: Sync input (hard sync on positive edge)
 /// - Output 10: Audio output (±5V)
 pub struct Wavetable {
-    /// 8 wavetables, each with 256 samples
-    tables: [[f64; 256]; 8],
+    /// 8 wavetables, each a mip pyramid of `NUM_MIPS` bandlimited levels of 256
+    /// samples. Level 0 has the most harmonics (for low pitches); each higher
+    /// level halves the maximum harmonic number for the next octave up.
+    tables: [[[f64; 256]; 8]; 8],
     /// Current phase (0.0 to 1.0)
     phase: f64,
     /// Previous sync input for edge detection
@@ -662,6 +794,13 @@ impl Wavetable {
     const TABLE_SIZE: usize = 256;
     /// Number of wavetables
     const NUM_TABLES: usize = 8;
+    /// Number of mip levels per wavetable (each level covers one octave of
+    /// pitch; level `L` band-limits to `BASE_HARMONICS >> L` harmonics).
+    const NUM_MIPS: usize = 8;
+    /// Highest harmonic number present in the level-0 (brightest) table, per
+    /// waveform. Index matches [`WavetableType::index`].
+    /// (sine, triangle, saw, square, pulse25, pulse12, formantA, formantO)
+    const BASE_HARMONICS: [usize; 8] = [1, 31, 64, 63, 64, 64, 10, 10];
 
     pub fn new(sample_rate: f64) -> Self {
         let spec = PortSpec {
@@ -675,7 +814,7 @@ impl Wavetable {
         };
 
         let mut osc = Self {
-            tables: [[0.0; 256]; 8],
+            tables: [[[0.0; 256]; 8]; 8],
             phase: 0.0,
             prev_sync: 0.0,
             sample_rate,
@@ -685,104 +824,110 @@ impl Wavetable {
         osc
     }
 
-    /// Generate all 8 wavetables with bandlimiting
+    /// Maximum harmonic number to synthesize for waveform `table` at mip
+    /// `level` (at least 1). Halving per level gives an octave-per-level pyramid.
+    fn max_harmonic(table: usize, level: usize) -> usize {
+        (Self::BASE_HARMONICS[table] >> level).max(1)
+    }
+
+    /// Generate all wavetables as mip pyramids with bandlimiting.
     fn generate_tables(&mut self) {
         let n = Self::TABLE_SIZE;
+        let pi = core::f64::consts::PI;
 
-        // Sine wave (pure)
-        for i in 0..n {
-            let phase = (i as f64) / (n as f64);
-            self.tables[0][i] = Libm::<f64>::sin(phase * 2.0 * core::f64::consts::PI);
-        }
+        for level in 0..Self::NUM_MIPS {
+            for i in 0..n {
+                let phase = (i as f64) / (n as f64);
+                let partial = |harmonic: f64| Libm::<f64>::sin(phase * harmonic * 2.0 * pi);
 
-        // Triangle wave (bandlimited with first 8 harmonics)
-        for i in 0..n {
-            let phase = (i as f64) / (n as f64);
-            let mut sample = 0.0;
-            for h in 0..8 {
-                let harmonic = (2 * h + 1) as f64;
-                let sign = if h % 2 == 0 { 1.0 } else { -1.0 };
-                sample += sign * Libm::<f64>::sin(phase * harmonic * 2.0 * core::f64::consts::PI)
-                    / (harmonic * harmonic);
+                // Sine wave (pure) — always a single harmonic.
+                self.tables[0][level][i] = partial(1.0);
+
+                // Triangle: odd harmonics, alternating sign, 1/h^2 rolloff.
+                let mut tri = 0.0;
+                let mut h = 1usize;
+                let mh = Self::max_harmonic(1, level);
+                let mut sign = 1.0; // +,-,+,- across successive odd harmonics
+                while h <= mh {
+                    let hf = h as f64;
+                    tri += sign * partial(hf) / (hf * hf);
+                    sign = -sign;
+                    h += 2;
+                }
+                self.tables[1][level][i] = tri * (8.0 / (pi * pi));
+
+                // Saw: all harmonics, alternating sign, 1/h rolloff.
+                let mut saw = 0.0;
+                let mh = Self::max_harmonic(2, level);
+                let mut sign = -1.0; // h=1 -> -1, h=2 -> +1, ...
+                for h in 1..=mh {
+                    let hf = h as f64;
+                    saw += sign * partial(hf) / hf;
+                    sign = -sign;
+                }
+                self.tables[2][level][i] = saw * (2.0 / pi);
+
+                // Square: odd harmonics, 1/h rolloff.
+                let mut sqr = 0.0;
+                let mut h = 1usize;
+                let mh = Self::max_harmonic(3, level);
+                while h <= mh {
+                    let hf = h as f64;
+                    sqr += partial(hf) / hf;
+                    h += 2;
+                }
+                self.tables[3][level][i] = sqr * (4.0 / pi);
+
+                // Pulse 25% / 12.5%: Fourier series of a rectangular pulse.
+                for (table_idx, duty) in [(4usize, 0.25f64), (5usize, 0.125f64)] {
+                    let mut pulse = 0.0;
+                    let mh = Self::max_harmonic(table_idx, level);
+                    for h in 1..=mh {
+                        let hf = h as f64;
+                        let coef = Libm::<f64>::sin(pi * hf * duty) / hf;
+                        pulse += coef * partial(hf);
+                    }
+                    self.tables[table_idx][level][i] = pulse * 2.0;
+                }
+
+                // Formant "ah"/"oh": fundamental plus resonant partials, each
+                // gated on staying within this level's harmonic limit.
+                let mh_a = Self::max_harmonic(6, level) as f64;
+                let formant_a = [(1.0, 1.0), (2.7, 0.5), (4.6, 0.3), (9.6, 0.15)]
+                    .iter()
+                    .filter(|(mult, _)| *mult <= mh_a)
+                    .map(|(mult, amp)| partial(*mult) * amp)
+                    .sum::<f64>();
+                self.tables[6][level][i] = formant_a * 0.5;
+
+                let mh_o = Self::max_harmonic(7, level) as f64;
+                let formant_o = [(1.0, 1.0), (1.5, 0.6), (3.0, 0.4), (10.0, 0.15)]
+                    .iter()
+                    .filter(|(mult, _)| *mult <= mh_o)
+                    .map(|(mult, amp)| partial(*mult) * amp)
+                    .sum::<f64>();
+                self.tables[7][level][i] = formant_o * 0.5;
             }
-            self.tables[1][i] = sample * (8.0 / (core::f64::consts::PI * core::f64::consts::PI));
-        }
-
-        // Saw wave (bandlimited with first 16 harmonics)
-        for i in 0..n {
-            let phase = (i as f64) / (n as f64);
-            let mut sample = 0.0;
-            for h in 1..=16 {
-                let harmonic = h as f64;
-                let sign = if h % 2 == 0 { 1.0 } else { -1.0 };
-                sample += sign * Libm::<f64>::sin(phase * harmonic * 2.0 * core::f64::consts::PI)
-                    / harmonic;
-            }
-            self.tables[2][i] = sample * (2.0 / core::f64::consts::PI);
-        }
-
-        // Square wave (bandlimited with first 8 odd harmonics)
-        for i in 0..n {
-            let phase = (i as f64) / (n as f64);
-            let mut sample = 0.0;
-            for h in 0..8 {
-                let harmonic = (2 * h + 1) as f64;
-                sample +=
-                    Libm::<f64>::sin(phase * harmonic * 2.0 * core::f64::consts::PI) / harmonic;
-            }
-            self.tables[3][i] = sample * (4.0 / core::f64::consts::PI);
-        }
-
-        // Pulse 25% (bandlimited)
-        for i in 0..n {
-            let phase = (i as f64) / (n as f64);
-            let mut sample = 0.0;
-            for h in 1..=16 {
-                let harmonic = h as f64;
-                let duty = 0.25;
-                let coef = Libm::<f64>::sin(core::f64::consts::PI * harmonic * duty) / harmonic;
-                sample += coef * Libm::<f64>::sin(phase * harmonic * 2.0 * core::f64::consts::PI);
-            }
-            self.tables[4][i] = sample * 2.0;
-        }
-
-        // Pulse 12.5% (bandlimited)
-        for i in 0..n {
-            let phase = (i as f64) / (n as f64);
-            let mut sample = 0.0;
-            for h in 1..=16 {
-                let harmonic = h as f64;
-                let duty = 0.125;
-                let coef = Libm::<f64>::sin(core::f64::consts::PI * harmonic * duty) / harmonic;
-                sample += coef * Libm::<f64>::sin(phase * harmonic * 2.0 * core::f64::consts::PI);
-            }
-            self.tables[5][i] = sample * 2.0;
-        }
-
-        // Formant "ah" (resonant peaks at F1=700Hz, F2=1200Hz, F3=2500Hz relative to fundamental)
-        for i in 0..n {
-            let phase = (i as f64) / (n as f64);
-            let fundamental = Libm::<f64>::sin(phase * 2.0 * core::f64::consts::PI);
-            let f1 = Libm::<f64>::sin(phase * 2.7 * 2.0 * core::f64::consts::PI) * 0.5; // ~F1
-            let f2 = Libm::<f64>::sin(phase * 4.6 * 2.0 * core::f64::consts::PI) * 0.3; // ~F2
-            let f3 = Libm::<f64>::sin(phase * 9.6 * 2.0 * core::f64::consts::PI) * 0.15; // ~F3
-            self.tables[6][i] = (fundamental + f1 + f2 + f3) * 0.5;
-        }
-
-        // Formant "oh" (resonant peaks at F1=400Hz, F2=800Hz, F3=2600Hz relative to fundamental)
-        for i in 0..n {
-            let phase = (i as f64) / (n as f64);
-            let fundamental = Libm::<f64>::sin(phase * 2.0 * core::f64::consts::PI);
-            let f1 = Libm::<f64>::sin(phase * 1.5 * 2.0 * core::f64::consts::PI) * 0.6; // ~F1
-            let f2 = Libm::<f64>::sin(phase * 3.0 * 2.0 * core::f64::consts::PI) * 0.4; // ~F2
-            let f3 = Libm::<f64>::sin(phase * 10.0 * 2.0 * core::f64::consts::PI) * 0.15; // ~F3
-            self.tables[7][i] = (fundamental + f1 + f2 + f3) * 0.5;
         }
     }
 
-    /// Read from a wavetable with linear interpolation
-    fn read_table(&self, table_idx: usize, phase: f64) -> f64 {
-        let table = &self.tables[table_idx % Self::NUM_TABLES];
+    /// Select the mip level for `table` at a given (absolute) phase increment so
+    /// that every synthesized harmonic stays below Nyquist.
+    fn select_level(table: usize, phase_inc: f64) -> usize {
+        let inc = Libm::<f64>::fabs(phase_inc).max(1e-9);
+        // Highest harmonic number that fits below Nyquist at this pitch.
+        let allowed = Libm::<f64>::floor(0.5 / inc);
+        for level in 0..Self::NUM_MIPS {
+            if (Self::max_harmonic(table, level) as f64) <= allowed {
+                return level;
+            }
+        }
+        Self::NUM_MIPS - 1
+    }
+
+    /// Read from a wavetable mip level with linear interpolation.
+    fn read_table(&self, table_idx: usize, level: usize, phase: f64) -> f64 {
+        let table = &self.tables[table_idx % Self::NUM_TABLES][level.min(Self::NUM_MIPS - 1)];
         let pos = phase * (Self::TABLE_SIZE as f64);
         let idx0 = (pos as usize) % Self::TABLE_SIZE;
         let idx1 = (idx0 + 1) % Self::TABLE_SIZE;
@@ -830,9 +975,14 @@ impl GraphModule for Wavetable {
         // Blend morph and table fraction for smooth transitions
         let blend = (table_frac + morph).min(1.0);
 
+        // Q005: select a per-table mip level from the phase increment so high
+        // notes drop harmonics that would otherwise fold back above Nyquist.
+        let level0 = Self::select_level(table_idx, phase_inc);
+        let level1 = Self::select_level(table_idx + 1, phase_inc);
+
         // Read from both tables and crossfade
-        let sample0 = self.read_table(table_idx, self.phase);
-        let sample1 = self.read_table(table_idx + 1, self.phase);
+        let sample0 = self.read_table(table_idx, level0, self.phase);
+        let sample1 = self.read_table(table_idx + 1, level1, self.phase);
         let sample = sample0 * (1.0 - blend) + sample1 * blend;
 
         // Advance phase
@@ -1647,6 +1797,507 @@ mod tests {
             max <= 5.5,
             "Noise output {} exceeds expected ±5V range",
             max
+        );
+    }
+
+    // ================================================================
+    // Wave B remediation tests (Q000-Q007, Q129)
+    // ================================================================
+
+    /// Naive DFT magnitude at integer bin `k` over `sig`.
+    fn dft_mag(sig: &[f64], k: usize) -> f64 {
+        let n = sig.len();
+        let mut re = 0.0;
+        let mut im = 0.0;
+        for (i, &s) in sig.iter().enumerate() {
+            let ang = -TAU * (k as f64) * (i as f64) / (n as f64);
+            re += s * Libm::<f64>::cos(ang);
+            im += s * Libm::<f64>::sin(ang);
+        }
+        Libm::<f64>::sqrt(re * re + im * im) / (n as f64)
+    }
+
+    /// Sum of DFT magnitude over the non-harmonic bins (aliased energy). `fund`
+    /// is the fundamental bin; harmonics are its integer multiples.
+    fn alias_energy(sig: &[f64], fund: usize) -> f64 {
+        let n = sig.len();
+        let mut total = 0.0;
+        for k in 1..(n / 2) {
+            if k % fund != 0 {
+                total += dft_mag(sig, k);
+            }
+        }
+        total
+    }
+
+    /// Estimate the fundamental period (in samples) of `seg` via autocorrelation
+    /// around an expected period, with parabolic sub-sample interpolation.
+    fn measure_period(seg: &[f64], expected: f64) -> f64 {
+        let autocorr = |lag: usize| -> f64 {
+            let mut acc = 0.0;
+            for i in 0..(seg.len() - lag) {
+                acc += seg[i] * seg[i + lag];
+            }
+            acc
+        };
+        let lo = ((expected * 0.6) as usize).max(2);
+        let hi = ((expected * 1.6) as usize).min(seg.len() / 2);
+        let mut best_lag = lo;
+        let mut best = f64::MIN;
+        for lag in lo..hi {
+            let a = autocorr(lag);
+            if a > best {
+                best = a;
+                best_lag = lag;
+            }
+        }
+        let y0 = autocorr(best_lag - 1);
+        let y1 = autocorr(best_lag);
+        let y2 = autocorr(best_lag + 1);
+        let denom = y0 - 2.0 * y1 + y2;
+        let delta = if denom.abs() > 1e-12 {
+            0.5 * (y0 - y2) / denom
+        } else {
+            0.0
+        };
+        best_lag as f64 + delta
+    }
+
+    /// Collect one Vco output port for `n` samples at pitch `voct`.
+    fn vco_capture(voct: f64, port: u32, n: usize) -> Vec<f64> {
+        let mut vco = Vco::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, voct);
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            vco.tick(&inputs, &mut outputs);
+            out.push(outputs.get(port).unwrap());
+        }
+        out
+    }
+
+    // ---- Q000: Vco anti-aliasing ----
+
+    #[test]
+    fn test_vco_saw_frequency_preserved() {
+        // The band-limited saw must still track pitch: ~10 periods of C4.
+        let saw = vco_capture(0.0, 12, (44100.0 / 261.63) as usize * 10);
+        let crossings = saw.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        assert!(
+            crossings >= 8 && crossings <= 12,
+            "expected ~10 zero crossings, got {}",
+            crossings
+        );
+    }
+
+    #[test]
+    fn test_vco_saw_aliasing_reduced() {
+        // 4200 Hz lands exactly on DFT bin 42 for N=441 at 44.1k.
+        let voct = Libm::<f64>::log2(4200.0 / voct_to_hz(0.0));
+        let n = 441;
+        let fund = 42;
+        let dt = voct_to_hz(voct) / 44100.0;
+        let saw_bl = vco_capture(voct, 12, n);
+        // Naive reference from a phase-aligned accumulator.
+        let mut ph = 0.0;
+        let mut saw_naive = Vec::with_capacity(n);
+        for _ in 0..n {
+            saw_naive.push((2.0 * ph - 1.0) * 5.0);
+            ph += dt;
+            ph -= Libm::<f64>::floor(ph);
+        }
+        let a_bl = alias_energy(&saw_bl, fund);
+        let a_naive = alias_energy(&saw_naive, fund);
+        assert!(
+            a_bl < 0.3 * a_naive,
+            "saw alias energy not reduced: bl={} naive={}",
+            a_bl,
+            a_naive
+        );
+    }
+
+    #[test]
+    fn test_vco_square_aliasing_reduced() {
+        let voct = Libm::<f64>::log2(4200.0 / voct_to_hz(0.0));
+        let n = 441;
+        let fund = 42;
+        let dt = voct_to_hz(voct) / 44100.0;
+        let sqr_bl = vco_capture(voct, 13, n);
+        let mut ph = 0.0;
+        let mut sqr_naive = Vec::with_capacity(n);
+        for _ in 0..n {
+            sqr_naive.push(if ph < 0.5 { 5.0 } else { -5.0 });
+            ph += dt;
+            ph -= Libm::<f64>::floor(ph);
+        }
+        let a_bl = alias_energy(&sqr_bl, fund);
+        let a_naive = alias_energy(&sqr_naive, fund);
+        assert!(
+            a_bl < 0.3 * a_naive,
+            "square alias energy not reduced: bl={} naive={}",
+            a_bl,
+            a_naive
+        );
+        // Time-domain edge smoothing: max sample-to-sample step must shrink.
+        let max_delta = |v: &[f64]| {
+            v.windows(2)
+                .map(|w| (w[1] - w[0]).abs())
+                .fold(0.0, f64::max)
+        };
+        assert!(max_delta(&sqr_bl) < max_delta(&sqr_naive));
+    }
+
+    #[test]
+    fn test_vco_triangle_aliasing_reduced() {
+        // Triangle: max-delta is unchanged by corner rounding, so use the DFT.
+        let voct = Libm::<f64>::log2(4200.0 / voct_to_hz(0.0));
+        let n = 441;
+        let fund = 42;
+        let dt = voct_to_hz(voct) / 44100.0;
+        let tri_bl = vco_capture(voct, 11, n);
+        let mut ph = 0.0;
+        let mut tri_naive = Vec::with_capacity(n);
+        for _ in 0..n {
+            tri_naive.push((1.0 - 4.0 * Libm::<f64>::fabs(ph - 0.5)) * 5.0);
+            ph += dt;
+            ph -= Libm::<f64>::floor(ph);
+        }
+        let a_bl = alias_energy(&tri_bl, fund);
+        let a_naive = alias_energy(&tri_naive, fund);
+        assert!(
+            a_bl < 0.5 * a_naive,
+            "triangle alias energy not reduced: bl={} naive={}",
+            a_bl,
+            a_naive
+        );
+    }
+
+    #[test]
+    fn test_vco_hard_sync_bounded_and_reduces_step() {
+        // Drive hard sync from a master and confirm the reset step is bandlimited
+        // (smaller max delta than a naive resetting saw) while staying bounded.
+        let mut vco = Vco::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 2.0); // slave pitch
+        let master_dt = 110.0 / 44100.0;
+        let mut mp = 0.0;
+        let mut out = Vec::new();
+        let mut max_abs = 0.0f64;
+        for _ in 0..4000 {
+            let sync = if mp < 0.5 { 5.0 } else { 0.0 };
+            inputs.set(3, sync);
+            vco.tick(&inputs, &mut outputs);
+            let saw = outputs.get(12).unwrap();
+            max_abs = max_abs.max(saw.abs());
+            out.push(saw);
+            mp += master_dt;
+            if mp >= 1.0 {
+                mp -= 1.0;
+            }
+        }
+        assert!(max_abs <= 5.5, "hard-sync saw exceeded ±5V: {}", max_abs);
+        // Must still be producing a signal.
+        let rms = (out.iter().map(|x| x * x).sum::<f64>() / out.len() as f64).sqrt();
+        assert!(rms > 1.0, "hard-sync output too quiet: rms={}", rms);
+    }
+
+    // ---- Q007: Vco linear (through-zero) FM ----
+
+    #[test]
+    fn test_vco_has_fm_lin_port() {
+        let vco = Vco::new(44100.0);
+        assert_eq!(vco.port_spec().inputs.len(), 5);
+        let fm_lin = vco.port_spec().inputs.iter().find(|p| p.name == "fm_lin");
+        assert!(fm_lin.is_some(), "fm_lin input port missing");
+        assert_eq!(fm_lin.unwrap().id, 4);
+    }
+
+    #[test]
+    fn test_vco_fm_lin_zero_is_noop() {
+        // fm_lin = 0 must produce identical output to leaving it unpatched.
+        let mut a = Vco::new(44100.0);
+        let mut b = Vco::new(44100.0);
+        let mut ia = PortValues::new();
+        let mut ib = PortValues::new();
+        let mut oa = PortValues::new();
+        let mut ob = PortValues::new();
+        ia.set(0, 1.0);
+        ib.set(0, 1.0);
+        ib.set(4, 0.0); // explicit zero linear FM
+        for _ in 0..500 {
+            a.tick(&ia, &mut oa);
+            b.tick(&ib, &mut ob);
+            assert_eq!(oa.get(12).unwrap(), ob.get(12).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_vco_fm_lin_through_zero_symmetric() {
+        // Through-zero linear FM of a sine carrier yields a symmetric spectrum,
+        // so the time-domain mean stays near zero and the output stays bounded.
+        let mut vco = Vco::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.0); // carrier at C4
+        let mod_dt = 200.0 / 44100.0; // 200 Hz modulator
+        let mut mphase = 0.0;
+        let mut sum = 0.0;
+        let mut max_abs = 0.0f64;
+        let n = 44100;
+        for _ in 0..n {
+            let m = Libm::<f64>::sin(mphase * TAU) * 5.0; // ±5V -> ±100% depth
+            inputs.set(4, m);
+            vco.tick(&inputs, &mut outputs);
+            let sine = outputs.get(10).unwrap();
+            sum += sine;
+            max_abs = max_abs.max(sine.abs());
+            mphase += mod_dt;
+            if mphase >= 1.0 {
+                mphase -= 1.0;
+            }
+        }
+        let mean = sum / n as f64;
+        assert!(
+            mean.abs() < 0.2,
+            "FM sidebands not symmetric: mean={}",
+            mean
+        );
+        assert!(max_abs <= 5.5, "FM output exceeded range: {}", max_abs);
+    }
+
+    // ---- Q001 / Q006: Supersaw sub oscillator & center reuse ----
+
+    #[test]
+    fn test_supersaw_sub_is_octave_down_zero_mean() {
+        let mut ss = Supersaw::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.0); // C4
+        let base_freq = voct_to_hz(0.0);
+        let n = 44100 * 2;
+        let mut sub = Vec::with_capacity(n);
+        for _ in 0..n {
+            ss.tick(&inputs, &mut outputs);
+            sub.push(outputs.get(11).unwrap());
+        }
+        // The sub is a clean saw; its rising zero-crossing rate is its frequency.
+        // (The full supersaw main output has 7 detuned voices, so it is not a
+        // clean once-per-period reference — compare against the fundamental.)
+        let cross = |v: &[f64]| v.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        let sub_rate = cross(&sub) as f64 / (n as f64 / 44100.0);
+        let expected = base_freq / 2.0;
+        assert!(
+            (sub_rate - expected).abs() < 0.05 * expected,
+            "sub should ring an octave down (~{} Hz), measured {} Hz",
+            expected,
+            sub_rate
+        );
+        let mean = sub.iter().sum::<f64>() / sub.len() as f64;
+        assert!(mean.abs() < 0.05, "sub should be zero-mean: mean={}", mean);
+    }
+
+    #[test]
+    fn test_supersaw_mix_zero_equals_blepped_center() {
+        // With mix=0 the output must equal the band-limited center voice, not a
+        // naive ramp. Replicate the center voice with the same PolyBLEP.
+        let mut ss = Supersaw::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.5); // arbitrary pitch
+        inputs.set(2, 0.0); // mix = 0 -> pure center voice
+        let base_freq = voct_to_hz(0.5);
+        let dt = base_freq / 44100.0; // center detune ratio is 0.0
+        let mut ph = 3.0 / 7.0; // center oscillator initial phase
+        for _ in 0..500 {
+            ss.tick(&inputs, &mut outputs);
+            let expected = (2.0 * ph - 1.0) - polyblep(ph, dt);
+            let got = outputs.get(10).unwrap();
+            assert!(
+                (got - expected).abs() < 1e-9,
+                "mix=0 output {} != blepped center {}",
+                got,
+                expected
+            );
+            ph += dt;
+            if ph >= 1.0 {
+                ph -= 1.0;
+            }
+        }
+    }
+
+    // ---- Q002 / Q129: KarplusStrong rising-edge excitation ----
+
+    #[test]
+    fn test_ks_excites_once_per_gate() {
+        let mut ks = KarplusStrong::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.0); // C4
+        inputs.set(2, 0.95); // high damping -> rings
+        inputs.set(3, 0.5); // brightness
+
+        // 100-sample 5V gate.
+        let mut ring = Vec::new();
+        for i in 0..100 {
+            inputs.set(1, 5.0);
+            ks.tick(&inputs, &mut outputs);
+            if i >= 10 {
+                ring.push(outputs.get(10).unwrap());
+            }
+        }
+        // Excited exactly once: write_pos advanced ~100 (once-excite resets to 0
+        // then advances each sample). If it re-excited every sample it would be
+        // stuck at 1.
+        assert_eq!(
+            ks.write_pos, 100,
+            "gate should excite once; write_pos={}",
+            ks.write_pos
+        );
+        // The string must ring DURING the held gate (not silent, not renoised).
+        let rms = (ring.iter().map(|x| x * x).sum::<f64>() / ring.len() as f64).sqrt();
+        assert!(rms > 0.05, "string did not ring during gate: rms={}", rms);
+    }
+
+    #[test]
+    fn test_ks_gate_high_threshold() {
+        // A sub-threshold trigger (below GATE_THRESHOLD_V) must NOT excite.
+        let mut ks = KarplusStrong::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.0);
+        inputs.set(1, 1.0); // 1V < 2.5V threshold
+        for _ in 0..200 {
+            ks.tick(&inputs, &mut outputs);
+        }
+        let out = outputs.get(10).unwrap();
+        assert_eq!(out, 0.0, "sub-threshold trigger should not excite: {}", out);
+    }
+
+    // ---- Q003: KarplusStrong tuning accuracy ----
+
+    #[test]
+    fn test_ks_tuning_accuracy() {
+        for &(voct, target_hz) in &[(-1.0, 130.81), (0.0, 261.63), (1.0, 523.25), (2.0, 1046.5)] {
+            let mut ks = KarplusStrong::new(44100.0);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            inputs.set(0, voct);
+            inputs.set(2, 0.95); // bright, slow decay
+            inputs.set(3, 0.5);
+            // Pluck once.
+            inputs.set(1, 5.0);
+            ks.tick(&inputs, &mut outputs);
+            inputs.set(1, 0.0);
+            let mut out = Vec::with_capacity(12000);
+            for _ in 0..12000 {
+                ks.tick(&inputs, &mut outputs);
+                out.push(outputs.get(10).unwrap());
+            }
+            let seg = &out[2000..10000];
+            let expected_period = 44100.0 / target_hz;
+            let period = measure_period(seg, expected_period);
+            let measured_hz = 44100.0 / period;
+            let cents = 1200.0 * Libm::<f64>::log2(measured_hz / target_hz);
+            assert!(
+                cents.abs() < 20.0,
+                "KS pitch off at {} Hz: measured {} Hz ({:+.1} cents)",
+                target_hz,
+                measured_hz,
+                cents
+            );
+        }
+    }
+
+    // ---- Q004: KarplusStrong DC decay ----
+
+    #[test]
+    fn test_ks_dc_decays() {
+        // brightness=0 makes the excitation a purely positive impulse (maximum
+        // DC bias in the old code). After the fix the running mean decays to ~0.
+        let mut ks = KarplusStrong::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.0);
+        inputs.set(2, 0.7);
+        inputs.set(3, 0.0); // brightness 0 -> impulse (positive DC in old code)
+        inputs.set(1, 5.0);
+        ks.tick(&inputs, &mut outputs);
+        inputs.set(1, 0.0);
+        let mut out = Vec::with_capacity(20000);
+        for _ in 0..20000 {
+            ks.tick(&inputs, &mut outputs);
+            out.push(outputs.get(10).unwrap());
+        }
+        let mean_window = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
+        let late = mean_window(&out[10000..20000]);
+        assert!(
+            late.abs() < 0.02,
+            "KS output retains DC offset: late mean = {}",
+            late
+        );
+    }
+
+    // ---- Q005: Wavetable mipmapping ----
+
+    #[test]
+    fn test_wavetable_mip_keeps_harmonics_below_nyquist() {
+        let fs = 44100.0;
+        // At a high fundamental the selected saw level must keep every harmonic
+        // below Nyquist.
+        for &freq in &[1000.0, 2000.0, 3000.0, 6000.0] {
+            let phase_inc = freq / fs;
+            let level = Wavetable::select_level(2, phase_inc); // saw
+            let harmonics = Wavetable::max_harmonic(2, level);
+            let top = harmonics as f64 * freq;
+            assert!(
+                top < fs / 2.0,
+                "saw at {} Hz: level {} keeps {} harmonics, top partial {} >= Nyquist",
+                freq,
+                level,
+                harmonics,
+                top
+            );
+        }
+    }
+
+    #[test]
+    fn test_wavetable_mip_selects_higher_level_for_higher_pitch() {
+        // Level (harmonic reduction) must increase monotonically with pitch.
+        let fs = 44100.0;
+        let l_low = Wavetable::select_level(2, 100.0 / fs);
+        let l_mid = Wavetable::select_level(2, 1000.0 / fs);
+        let l_high = Wavetable::select_level(2, 5000.0 / fs);
+        assert!(l_low <= l_mid && l_mid <= l_high);
+        assert!(l_high > l_low, "expected higher pitch to raise mip level");
+    }
+
+    #[test]
+    fn test_wavetable_high_pitch_bounded() {
+        // High-pitch saw stays bounded and non-silent with mipmapping active.
+        let mut wt = Wavetable::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 3.5); // ~2960 Hz
+        inputs.set(1, 2.0 / 7.0); // saw table
+        let mut max_abs = 0.0f64;
+        let mut sumsq = 0.0;
+        let n = 4000;
+        for _ in 0..n {
+            wt.tick(&inputs, &mut outputs);
+            let v = outputs.get(10).unwrap();
+            max_abs = max_abs.max(v.abs());
+            sumsq += v * v;
+        }
+        assert!(
+            max_abs <= 5.5,
+            "wavetable high-pitch exceeded range: {}",
+            max_abs
+        );
+        assert!(
+            (sumsq / n as f64).sqrt() > 0.5,
+            "wavetable high-pitch silent"
         );
     }
 }
