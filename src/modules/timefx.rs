@@ -370,8 +370,15 @@ impl GraphModule for Chorus {
 /// Flanger
 ///
 /// Classic flanging effect using a short modulated delay with feedback.
+///
+/// Mono-in, stereo-out: the two delay lines share one LFO but read it at a
+/// per-channel phase offset controlled by the `spread` input, decorrelating the
+/// left and right sweeps. The legacy `out` port reproduces the historical mono
+/// channel exactly and is bit-identical to `left`, so existing patches keep
+/// working; connect `left`/`right` for the stereo image.
 pub struct Flanger {
-    buffer: Vec<f64>,
+    /// Dual delay lines, indexed `[left, right]`.
+    buffers: [Vec<f64>; 2],
     write_pos: usize,
     lfo_phase: f64,
     sample_rate: f64,
@@ -384,7 +391,7 @@ impl Flanger {
     pub fn new(sample_rate: f64) -> Self {
         let buffer_size = (sample_rate * Self::MAX_DELAY_MS / 1000.0) as usize + 10;
         Self {
-            buffer: vec![0.0; buffer_size],
+            buffers: [vec![0.0; buffer_size], vec![0.0; buffer_size]],
             write_pos: 0,
             lfo_phase: 0.0,
             sample_rate,
@@ -403,8 +410,17 @@ impl Flanger {
                     PortDef::new(4, "mix", SignalKind::CvUnipolar)
                         .with_default(0.5)
                         .with_attenuverter(),
+                    // Stereo spread: 0 collapses to mono (L==R==out), 1 offsets
+                    // the right sweep by 180 degrees for maximum decorrelation.
+                    PortDef::new(5, "spread", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
                 ],
-                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Audio),
+                    PortDef::new(11, "left", SignalKind::Audio),
+                    PortDef::new(12, "right", SignalKind::Audio),
+                ],
             },
         }
     }
@@ -427,30 +443,49 @@ impl GraphModule for Flanger {
         let depth_cv = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
         let feedback = inputs.get_or(3, 0.0).clamp(-0.95, 0.95);
         let mix = inputs.get_or(4, 0.5).clamp(0.0, 1.0);
+        let spread = inputs.get_or(5, 0.5).clamp(0.0, 1.0);
 
         let lfo_freq = 0.05 * Libm::<f64>::pow(100.0, rate_cv);
         let base_delay_ms = 1.0;
         let mod_depth_ms = depth_cv * (Self::MAX_DELAY_MS - base_delay_ms);
 
-        let lfo = (Libm::<f64>::sin(self.lfo_phase * TAU) + 1.0) * 0.5;
+        // Per-channel LFO phase offset: spread 0..1 maps to 0..0.5 cycles
+        // (0..180 degrees). The left channel tracks the base phase (so `out`
+        // stays bit-identical to the historical mono behavior); the right
+        // channel leads by the offset to decorrelate the two sweeps.
+        let phase_offset = spread * 0.5;
+        let max_read = (self.buffers[0].len() - 1) as f64;
+
+        let mut wet = [0.0; 2];
+        for (ch, w) in wet.iter_mut().enumerate() {
+            let phase = self.lfo_phase + if ch == 0 { 0.0 } else { phase_offset };
+            let lfo = (Libm::<f64>::sin(phase * TAU) + 1.0) * 0.5;
+            let delay_ms = base_delay_ms + lfo * mod_depth_ms;
+            let delay_samples = (delay_ms * self.sample_rate / 1000.0).clamp(1.0, max_read);
+            let delayed = read_interpolated(&self.buffers[ch], self.write_pos, delay_samples);
+            // Per-channel feedback tap keeps the two lines independent.
+            self.buffers[ch][self.write_pos] = input + delayed * feedback;
+            *w = delayed;
+        }
+
         self.lfo_phase += lfo_freq / self.sample_rate;
         if self.lfo_phase >= 1.0 {
             self.lfo_phase -= 1.0;
         }
+        self.write_pos = (self.write_pos + 1) % self.buffers[0].len();
 
-        let delay_ms = base_delay_ms + lfo * mod_depth_ms;
-        let delay_samples =
-            (delay_ms * self.sample_rate / 1000.0).clamp(1.0, (self.buffer.len() - 1) as f64);
-
-        let delayed = read_interpolated(&self.buffer, self.write_pos, delay_samples);
-        self.buffer[self.write_pos] = input + delayed * feedback;
-        self.write_pos = (self.write_pos + 1) % self.buffer.len();
-
-        outputs.set(10, input * (1.0 - mix) + delayed * mix);
+        let left = input * (1.0 - mix) + wet[0] * mix;
+        let right = input * (1.0 - mix) + wet[1] * mix;
+        // `out` mirrors `left` for backward compatibility with mono patches.
+        outputs.set(10, left);
+        outputs.set(11, left);
+        outputs.set(12, right);
     }
 
     fn reset(&mut self) {
-        self.buffer.fill(0.0);
+        for buffer in &mut self.buffers {
+            buffer.fill(0.0);
+        }
         self.write_pos = 0;
         self.lfo_phase = 0.0;
     }
@@ -458,7 +493,9 @@ impl GraphModule for Flanger {
     fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
         let buffer_size = (sample_rate * Self::MAX_DELAY_MS / 1000.0) as usize + 10;
-        self.buffer = vec![0.0; buffer_size];
+        for buffer in &mut self.buffers {
+            *buffer = vec![0.0; buffer_size];
+        }
         self.write_pos = 0;
     }
 
@@ -470,11 +507,17 @@ impl GraphModule for Flanger {
 /// Phaser
 ///
 /// Classic phaser effect using cascaded all-pass filters.
+///
+/// Mono-in, stereo-out: two independent allpass chains share one LFO but read
+/// it at a per-channel phase offset controlled by the `spread` input, giving
+/// decorrelated left/right notch sweeps and per-channel feedback taps. The
+/// legacy `out` port reproduces the historical mono channel exactly and is
+/// bit-identical to `left`, so existing patches keep working.
 pub struct Phaser {
-    /// Previous input per allpass stage (`x[n-1]`).
-    allpass_x1: [f64; 6],
-    /// Previous output per allpass stage (`y[n-1]`).
-    allpass_y1: [f64; 6],
+    /// Previous input per allpass stage (`x[n-1]`), indexed `[channel][stage]`.
+    allpass_x1: [[f64; 6]; 2],
+    /// Previous output per allpass stage (`y[n-1]`), indexed `[channel][stage]`.
+    allpass_y1: [[f64; 6]; 2],
     lfo_phase: f64,
     sample_rate: f64,
     spec: PortSpec,
@@ -483,8 +526,8 @@ pub struct Phaser {
 impl Phaser {
     pub fn new(sample_rate: f64) -> Self {
         Self {
-            allpass_x1: [0.0; 6],
-            allpass_y1: [0.0; 6],
+            allpass_x1: [[0.0; 6]; 2],
+            allpass_y1: [[0.0; 6]; 2],
             lfo_phase: 0.0,
             sample_rate,
             spec: PortSpec {
@@ -503,8 +546,17 @@ impl Phaser {
                         .with_default(0.5)
                         .with_attenuverter(),
                     PortDef::new(5, "stages", SignalKind::CvUnipolar).with_default(1.0),
+                    // Stereo spread: 0 collapses to mono (L==R==out), 1 offsets
+                    // the right sweep by 180 degrees for maximum decorrelation.
+                    PortDef::new(6, "spread", SignalKind::CvUnipolar)
+                        .with_default(0.5)
+                        .with_attenuverter(),
                 ],
-                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Audio),
+                    PortDef::new(11, "left", SignalKind::Audio),
+                    PortDef::new(12, "right", SignalKind::Audio),
+                ],
             },
         }
     }
@@ -552,38 +604,58 @@ impl GraphModule for Phaser {
             6
         };
 
+        let spread = inputs.get_or(6, 0.5).clamp(0.0, 1.0);
+
         let lfo_freq = 0.05 * Libm::<f64>::pow(100.0, rate_cv);
-        let lfo = Libm::<f64>::sin(self.lfo_phase * TAU);
+
+        let min_freq = 200.0;
+        let max_freq = 4000.0;
+
+        // Per-channel LFO phase offset: spread 0..1 maps to 0..0.5 cycles
+        // (0..180 degrees). The left channel tracks the base phase (so `out`
+        // stays bit-identical to the historical mono behavior); the right
+        // channel leads by the offset to decorrelate the notch sweeps.
+        let phase_offset = spread * 0.5;
+
+        let mut wet = [0.0; 2];
+        for (ch, w) in wet.iter_mut().enumerate() {
+            let phase = self.lfo_phase + if ch == 0 { 0.0 } else { phase_offset };
+            let lfo = Libm::<f64>::sin(phase * TAU);
+            let freq = min_freq + (lfo * 0.5 + 0.5) * depth * (max_freq - min_freq);
+
+            let omega = TAU * freq / self.sample_rate;
+            let tan_w = Libm::<f64>::tan(omega * 0.5);
+            let coef = (1.0 - tan_w) / (1.0 + tan_w);
+
+            // Per-channel feedback tap from this chain's last stage.
+            let mut signal = input + self.allpass_y1[ch][num_stages - 1] * feedback;
+            for i in 0..num_stages {
+                signal = Self::allpass(
+                    signal,
+                    &mut self.allpass_x1[ch][i],
+                    &mut self.allpass_y1[ch][i],
+                    coef,
+                );
+            }
+            *w = signal;
+        }
+
         self.lfo_phase += lfo_freq / self.sample_rate;
         if self.lfo_phase >= 1.0 {
             self.lfo_phase -= 1.0;
         }
 
-        let min_freq = 200.0;
-        let max_freq = 4000.0;
-        let freq = min_freq + (lfo * 0.5 + 0.5) * depth * (max_freq - min_freq);
-
-        let w = TAU * freq / self.sample_rate;
-        let tan_w = Libm::<f64>::tan(w * 0.5);
-        let coef = (1.0 - tan_w) / (1.0 + tan_w);
-
-        let mut signal = input + self.allpass_y1[num_stages - 1] * feedback;
-
-        for i in 0..num_stages {
-            signal = Self::allpass(
-                signal,
-                &mut self.allpass_x1[i],
-                &mut self.allpass_y1[i],
-                coef,
-            );
-        }
-
-        outputs.set(10, input * (1.0 - mix) + signal * mix);
+        let left = input * (1.0 - mix) + wet[0] * mix;
+        let right = input * (1.0 - mix) + wet[1] * mix;
+        // `out` mirrors `left` for backward compatibility with mono patches.
+        outputs.set(10, left);
+        outputs.set(11, left);
+        outputs.set(12, right);
     }
 
     fn reset(&mut self) {
-        self.allpass_x1 = [0.0; 6];
-        self.allpass_y1 = [0.0; 6];
+        self.allpass_x1 = [[0.0; 6]; 2];
+        self.allpass_y1 = [[0.0; 6]; 2];
         self.lfo_phase = 0.0;
     }
 
@@ -1352,6 +1424,106 @@ mod tests {
         assert!(out_2.is_finite());
         assert!(out_6.is_finite());
     }
+
+    // Q144: Flanger and Phaser are now mono-in / stereo-out. The `out` port
+    // (id 10) must stay bit-identical to `left` (id 11) for backward compat,
+    // spread=0 must collapse to a mono image (L==R==out), and spread>0 must
+    // decorrelate the left and right channels.
+
+    #[test]
+    fn test_flanger_out_mirrors_left_and_mono_at_zero_spread() {
+        let mut flanger = Flanger::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(2, 0.8); // depth
+        inputs.set(4, 1.0); // full wet exposes the wet paths
+        inputs.set(5, 0.0); // spread = 0 -> mono
+
+        for k in 0..5000 {
+            inputs.set(0, Libm::<f64>::sin(k as f64 * 0.03));
+            flanger.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            let left = outputs.get(11).unwrap();
+            let right = outputs.get(12).unwrap();
+            assert_eq!(out, left, "out must equal left");
+            assert_eq!(left, right, "spread=0 must give bit-identical L/R");
+        }
+    }
+
+    #[test]
+    fn test_flanger_stereo_decorrelation() {
+        let mut flanger = Flanger::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(1, 0.5); // rate
+        inputs.set(2, 0.9); // depth
+        inputs.set(4, 1.0); // full wet
+        inputs.set(5, 1.0); // spread = 180 degrees
+
+        let mut diff = 0.0;
+        for k in 0..20000 {
+            inputs.set(0, Libm::<f64>::sin(k as f64 * 0.05));
+            flanger.tick(&inputs, &mut outputs);
+            // `out` still tracks the left channel with spread engaged.
+            assert_eq!(outputs.get(10).unwrap(), outputs.get(11).unwrap());
+            let left = outputs.get(11).unwrap();
+            let right = outputs.get(12).unwrap();
+            diff += (left - right).abs();
+        }
+        assert!(
+            diff > 1.0,
+            "left/right should decorrelate with spread; diff = {diff}"
+        );
+    }
+
+    #[test]
+    fn test_phaser_out_mirrors_left_and_mono_at_zero_spread() {
+        let mut phaser = Phaser::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(2, 0.8); // depth
+        inputs.set(4, 1.0); // full wet
+        inputs.set(6, 0.0); // spread = 0 -> mono
+
+        for k in 0..5000 {
+            inputs.set(0, Libm::<f64>::sin(k as f64 * 0.03));
+            phaser.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            let left = outputs.get(11).unwrap();
+            let right = outputs.get(12).unwrap();
+            assert_eq!(out, left, "out must equal left");
+            assert_eq!(left, right, "spread=0 must give bit-identical L/R");
+        }
+    }
+
+    #[test]
+    fn test_phaser_stereo_decorrelation() {
+        let mut phaser = Phaser::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(2, 0.9); // depth
+        inputs.set(4, 1.0); // full wet
+        inputs.set(6, 1.0); // spread = 180 degrees
+
+        let mut diff = 0.0;
+        for k in 0..20000 {
+            inputs.set(0, Libm::<f64>::sin(k as f64 * 0.07));
+            phaser.tick(&inputs, &mut outputs);
+            assert_eq!(outputs.get(10).unwrap(), outputs.get(11).unwrap());
+            let left = outputs.get(11).unwrap();
+            let right = outputs.get(12).unwrap();
+            diff += (left - right).abs();
+        }
+        assert!(
+            diff > 1.0,
+            "phaser left/right should decorrelate with spread; diff = {diff}"
+        );
+    }
+
     #[test]
     fn test_unit_delay_default_reset_sample_rate() {
         let mut delay = UnitDelay::default();
