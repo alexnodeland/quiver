@@ -67,15 +67,24 @@ impl GraphModule for Bitcrusher {
         let bits = 1.0 + bits_cv * 15.0;
         let downsample_factor = 1.0 + downsample_cv * 63.0;
 
+        // Q029: accumulate a fractional sample-and-hold phase. Subtracting the
+        // factor on wrap (instead of resetting to 0) lets fractional ratios such
+        // as 1.5 average correctly over time rather than rounding up to the next
+        // integer period.
         self.hold_counter += 1.0;
         if self.hold_counter >= downsample_factor {
-            self.hold_counter = 0.0;
+            self.hold_counter -= downsample_factor;
             self.hold_sample = input;
         }
 
-        let levels = Libm::<f64>::pow(2.0, bits);
-        let normalized = (self.hold_sample / 5.0 + 1.0) * 0.5;
-        let quantized = Libm::<f64>::floor(normalized * levels) / levels;
+        // Q032: mid-tread (rounding) quantizer over an integer number of codes.
+        // Rounding is unbiased (no ~0.5 LSB DC offset). Using an integer step
+        // count and clamping the normalized value maps full-scale exactly to the
+        // top code instead of one step beyond the intended range.
+        let levels = Libm::<f64>::round(Libm::<f64>::pow(2.0, bits)).max(2.0);
+        let steps = levels - 1.0;
+        let normalized = ((self.hold_sample / 5.0 + 1.0) * 0.5).clamp(0.0, 1.0);
+        let quantized = Libm::<f64>::round(normalized * steps) / steps;
         outputs.set(10, (quantized * 2.0 - 1.0) * 5.0);
     }
 
@@ -91,20 +100,41 @@ impl GraphModule for Bitcrusher {
     }
 }
 
+/// Lowest cutoff of the distortion tone control (tone CV = 0).
+const DISTORTION_TONE_MIN_HZ: f64 = 500.0;
+/// Highest cutoff of the distortion tone control (tone CV = 1, ~transparent).
+const DISTORTION_TONE_MAX_HZ: f64 = 18_000.0;
+
 /// Distortion
 ///
 /// Waveshaping distortion with multiple algorithms:
-/// - Soft clip (tanh-style)
+/// - Soft clip (bounded `tanh`)
 /// - Hard clip
 /// - Foldback
 /// - Asymmetric (tube-style)
+///
+/// All shapers operate in the normalized ±1 domain (the Audio convention is
+/// ±5V) so their saturation points match the signal level, and every algorithm
+/// stays within ±5V. The `tone` control is a real one-pole low-pass whose
+/// cutoff is swept from `DISTORTION_TONE_MIN_HZ` (dark) to
+/// `DISTORTION_TONE_MAX_HZ` (≈ transparent).
 pub struct Distortion {
+    /// One-pole low-pass state for the tone control (Q025).
+    tone_lp: f64,
+    sample_rate: f64,
     spec: PortSpec,
 }
 
 impl Distortion {
-    pub fn new(_sample_rate: f64) -> Self {
+    pub fn new(sample_rate: f64) -> Self {
+        let sample_rate = if sample_rate > 0.0 {
+            sample_rate
+        } else {
+            44100.0
+        };
         Self {
+            tone_lp: 0.0,
+            sample_rate,
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -126,45 +156,46 @@ impl Distortion {
         }
     }
 
-    // Soft clip using tanh-style curve
+    // Soft clip using a genuinely bounded `tanh` (Q026). Operates in the
+    // normalized ±1 domain then rescales to ±5V, so the output saturates at ±5V.
     fn soft_clip(x: f64, drive: f64) -> f64 {
-        let gained = x * (1.0 + drive * 10.0);
-        // Fast tanh approximation
-        let x2 = gained * gained;
-        gained * (27.0 + x2) / (27.0 + 9.0 * x2)
+        let gained = (x / 5.0) * (1.0 + drive * 10.0);
+        Libm::<f64>::tanh(gained) * 5.0
     }
 
-    // Hard clip
+    // Hard clip (Q026): normalize, clamp to ±1, rescale to ±5V so its level
+    // matches the surrounding ±5V modules.
     fn hard_clip(x: f64, drive: f64) -> f64 {
-        let gained = x * (1.0 + drive * 10.0);
-        gained.clamp(-1.0, 1.0)
+        let gained = (x / 5.0) * (1.0 + drive * 10.0);
+        gained.clamp(-1.0, 1.0) * 5.0
     }
 
-    // Foldback distortion
+    // Foldback distortion (Q026 normalization + Q030 closed-form fold).
     fn foldback(x: f64, drive: f64) -> f64 {
-        let gained = x * (1.0 + drive * 5.0);
-        let threshold = 1.0;
-        let mut folded = gained;
-        while folded > threshold || folded < -threshold {
-            if folded > threshold {
-                folded = 2.0 * threshold - folded;
-            } else if folded < -threshold {
-                folded = -2.0 * threshold - folded;
-            }
-        }
-        folded
+        let gained = (x / 5.0) * (1.0 + drive * 5.0);
+        Self::triangle_fold(gained, 1.0) * 5.0
     }
 
-    // Asymmetric tube-style distortion
+    /// Closed-form triangle foldback (Q030): reflects `x` back into
+    /// `[-threshold, threshold]` via the periodic triangle identity, replacing
+    /// a data-dependent `while` loop with constant-time arithmetic. It is
+    /// mathematically identical to repeatedly reflecting about ±threshold.
+    fn triangle_fold(x: f64, threshold: f64) -> f64 {
+        let period = 4.0 * threshold;
+        threshold - Libm::<f64>::fabs(rem_euclid_f64(x + threshold, period) - 2.0 * threshold)
+    }
+
+    // Asymmetric tube-style distortion (Q026): normalized, bounded to ±5V.
     fn asymmetric(x: f64, drive: f64) -> f64 {
-        let gained = x * (1.0 + drive * 8.0);
-        if gained >= 0.0 {
-            // Softer positive clipping
+        let gained = (x / 5.0) * (1.0 + drive * 8.0);
+        let shaped = if gained >= 0.0 {
+            // Softer positive knee, bounded to [0, 1).
             1.0 - Libm::<f64>::exp(-gained)
         } else {
-            // Harder negative clipping
-            -Self::soft_clip(-gained, drive * 0.5)
-        }
+            // Harder negative clipping via bounded tanh, bounded to (-1, 0].
+            Libm::<f64>::tanh(gained)
+        };
+        shaped * 5.0
     }
 }
 
@@ -195,16 +226,30 @@ impl GraphModule for Distortion {
             _ => Self::asymmetric(input, drive),
         };
 
-        // Simple tone control: blend between original and low-passed
-        // Higher tone = more highs preserved
-        let filtered = distorted * tone + distorted * (1.0 - tone) * 0.7;
+        // Q025: real one-pole low-pass tone control with retained state. The
+        // cutoff is swept logarithmically by the tone CV from
+        // DISTORTION_TONE_MIN_HZ (dark) to DISTORTION_TONE_MAX_HZ (≈ transparent),
+        // so higher tone genuinely preserves more high-frequency content.
+        let cutoff = DISTORTION_TONE_MIN_HZ
+            * Libm::<f64>::pow(DISTORTION_TONE_MAX_HZ / DISTORTION_TONE_MIN_HZ, tone);
+        let alpha =
+            1.0 - Libm::<f64>::exp(-2.0 * core::f64::consts::PI * cutoff / self.sample_rate);
+        self.tone_lp += alpha * (distorted - self.tone_lp);
+        let filtered = self.tone_lp;
 
         outputs.set(10, input * (1.0 - mix) + filtered * mix);
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.tone_lp = 0.0;
+    }
 
-    fn set_sample_rate(&mut self, _: f64) {}
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        if sample_rate > 0.0 {
+            self.sample_rate = sample_rate;
+        }
+        self.tone_lp = 0.0;
+    }
 
     fn type_id(&self) -> &'static str {
         "distortion"
@@ -271,6 +316,16 @@ impl GraphModule for RingModulator {
 ///
 /// Real-time pitch shifting using two overlapping grains with crossfade.
 /// Uses a circular delay buffer with variable playback rate.
+///
+/// # Latency and aliasing (Q033)
+/// The wet path is delayed: each grain reads from behind the write pointer by at
+/// least half the window, and further behind for pitch-up (by `(rate-1)·window`)
+/// so a grain's read pointer can never overtake the write pointer within its
+/// lifetime. To keep that margin inside the ring buffer, the effective window is
+/// automatically shortened at high pitch-up ratios. No oversampling is
+/// performed, so the resampled grains alias; the effect is intended as a
+/// character/lo-fi shifter, not a transparent one. Pitch is bounded to ±24
+/// semitones (playback rate 0.25×–4×).
 ///
 /// # Ports
 /// - Input 0: Audio input
@@ -354,8 +409,8 @@ impl GraphModule for PitchShifter {
         // Window size: 10-100ms
         let window_cv = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
         let window_ms = 10.0 + window_cv * 90.0;
-        let window_samples = (window_ms * self.sample_rate / 1000.0) as usize;
-        let window_samples = window_samples.min(Self::BUFFER_SIZE / 2);
+        let mut window_samples = (window_ms * self.sample_rate / 1000.0) as usize;
+        window_samples = window_samples.min(Self::BUFFER_SIZE / 2);
 
         // Mix
         let mix = inputs.get_or(3, 1.0).clamp(0.0, 1.0);
@@ -366,6 +421,21 @@ impl GraphModule for PitchShifter {
 
         // Calculate playback rate
         let rate = Libm::<f64>::pow(2.0, shift_semitones / 12.0);
+
+        // Q033: keep each grain's read pointer strictly behind the write pointer
+        // for the grain's whole lifetime. Relative to the write pointer a grain
+        // gains (rate-1) samples per sample, i.e. (rate-1)·window over a window;
+        // we start it that far behind (plus a half-window cushion) and shorten
+        // the window when pitching up so that margin fits inside the buffer.
+        if rate > 1.0 {
+            let max_lead = Self::BUFFER_SIZE as f64 * 0.4;
+            let window_cap = (max_lead / (rate - 1.0)) as usize;
+            window_samples = window_samples.min(window_cap);
+        }
+        window_samples = window_samples.max(1);
+        let read_margin =
+            (rate - 1.0).max(0.0) * window_samples as f64 + window_samples as f64 * 0.5;
+
         let phase_inc = 1.0 / window_samples as f64;
 
         // Process both grains
@@ -397,9 +467,11 @@ impl GraphModule for PitchShifter {
             // Reset grain when phase completes
             if self.grain_phase[i] >= 1.0 {
                 self.grain_phase[i] -= 1.0;
-                // Reset position to current write position minus half window
+                // Reset position behind the write pointer by the read margin so
+                // the grain's read pointer cannot overtake the write pointer
+                // (Q033).
                 self.grain_pos[i] = rem_euclid_f64(
-                    self.write_pos as f64 - window_samples as f64 * 0.5,
+                    self.write_pos as f64 - read_margin,
                     Self::BUFFER_SIZE as f64,
                 );
             }
@@ -437,6 +509,13 @@ const VOCODER_FREQ_MIN: f64 = 100.0;
 
 /// Maximum frequency for vocoder bands (Hz)
 const VOCODER_FREQ_MAX: f64 = 8000.0;
+
+/// Largest Chamberlin SVF coefficient `f = 2·sin(π·freq/sr)` a band center is
+/// allowed to produce. The filter clamps the coefficient at 0.99 for stability;
+/// keeping every band strictly below that (Q027) guarantees the top bands stay
+/// distinct instead of collapsing onto the clamp. The corresponding maximum
+/// band center is `asin(coef/2)·sr/π`, which is sample-rate dependent.
+const VOCODER_MAX_SVF_COEF: f64 = 0.95;
 
 /// Spectral vocoder with configurable band count
 ///
@@ -490,10 +569,22 @@ impl Vocoder {
         vocoder
     }
 
-    /// Compute logarithmically spaced band frequencies
+    /// Compute logarithmically spaced band frequencies.
+    ///
+    /// Q027: the highest band center is capped relative to the sample rate so
+    /// that the Chamberlin SVF coefficient stays below its stability clamp
+    /// (0.99). Without this cap, at 44.1 kHz any band above ~7.3 kHz — and many
+    /// more at lower sample rates — clamp to the same coefficient and collapse
+    /// onto one another. The cap is `asin(VOCODER_MAX_SVF_COEF/2)·sr/π`.
     fn compute_band_freqs(&mut self) {
+        let coef_limit_freq = Libm::<f64>::asin(VOCODER_MAX_SVF_COEF / 2.0) * self.sample_rate
+            / core::f64::consts::PI;
+        let freq_max = VOCODER_FREQ_MAX
+            .min(coef_limit_freq)
+            .max(VOCODER_FREQ_MIN * 2.0);
+
         let log_min = Libm::<f64>::log2(VOCODER_FREQ_MIN);
-        let log_max = Libm::<f64>::log2(VOCODER_FREQ_MAX);
+        let log_max = Libm::<f64>::log2(freq_max);
 
         for i in 0..MAX_VOCODER_BANDS {
             let t = i as f64 / (MAX_VOCODER_BANDS - 1) as f64;
@@ -671,7 +762,9 @@ impl Default for Grain {
 /// - Input 1: Playback position (0-1 maps to buffer position)
 /// - Input 2: Grain size (0-1 maps to 10ms-500ms)
 /// - Input 3: Density (0-1 maps to 1-20 grains per second)
-/// - Input 4: Pitch shift in semitones (-24 to +24)
+/// - Input 4: Pitch shift (bipolar CV ±5V maps to ±24 semitones, i.e. playback
+///   speed 0.25×–4×). Grain size is bounded so a grain's read span can never
+///   exceed the buffer length at the chosen speed.
 /// - Input 5: Spray (position randomization, 0-1)
 /// - Input 6: Freeze (gate > 2.5V stops recording)
 /// - Output 10: Processed output
@@ -690,6 +783,11 @@ pub struct Granular {
     /// Random number generator for spray and density jitter
     rng: crate::rng::Rng,
 
+    /// Smoothed constant-power normalization divisor (Q028). Tracks the expected
+    /// steady-state grain overlap rather than the instantaneous active count,
+    /// removing the per-sample amplitude zipper.
+    norm_smooth: f64,
+
     sample_rate: f64,
     spec: PortSpec,
 }
@@ -703,6 +801,7 @@ impl Granular {
             grains: [Grain::default(); MAX_GRAINS],
             spawn_timer: 0,
             rng: crate::rng::Rng::from_seed(42),
+            norm_smooth: 1.0,
             sample_rate,
             spec: PortSpec {
                 inputs: vec![
@@ -784,16 +883,21 @@ impl GraphModule for Granular {
         let spray = inputs.get_or(5, 0.1).clamp(0.0, 1.0);
         let freeze = inputs.get_or(6, 0.0);
 
-        // Grain size: 10ms to 500ms
-        let size_samples = ((0.01 + size_cv * 0.49) * self.sample_rate) as usize;
-
         // Density: 1-20 grains per second
         let grains_per_sec = 1.0 + density_cv * 19.0;
         let spawn_interval = (self.sample_rate / grains_per_sec) as usize;
 
-        // Pitch shift: -5V to +5V maps to -60 to +60 semitones
-        let semitones = pitch_cv * 12.0;
+        // Q031: pitch shift ±5V maps to ±24 semitones (playback speed 0.25×–4×),
+        // matching the documented range instead of the previous ±60 semitones.
+        let semitones = (pitch_cv * 4.8).clamp(-24.0, 24.0);
         let speed = Libm::<f64>::exp2(semitones / 12.0);
+
+        // Grain size: 10ms to 500ms, bounded so a grain's read span
+        // (size × speed) can never exceed the buffer length (Q031). This keeps
+        // fast (pitched-up) grains from lapping the circular buffer and reading
+        // stale/aliased content.
+        let max_size = (GRANULAR_BUFFER_SIZE as f64 / speed) as usize;
+        let size_samples = (((0.01 + size_cv * 0.49) * self.sample_rate) as usize).min(max_size);
 
         // Record to buffer (unless frozen)
         if freeze <= GATE_THRESHOLD_V {
@@ -814,7 +918,6 @@ impl GraphModule for Granular {
 
         // Process all active grains
         let mut output = 0.0;
-        let mut active_count = 0;
 
         for i in 0..MAX_GRAINS {
             if self.grains[i].active {
@@ -836,7 +939,6 @@ impl GraphModule for Granular {
                 let sample = s0 + frac * (s1 - s0);
 
                 output += sample * envelope;
-                active_count += 1;
 
                 // Advance phase and check completion
                 let new_phase = self.grains[i].phase + 1.0 / self.grains[i].size as f64;
@@ -848,10 +950,19 @@ impl GraphModule for Granular {
             }
         }
 
-        // Normalize output
-        if active_count > 0 {
-            output /= Libm::<f64>::sqrt(active_count as f64);
-        }
+        // Q028: constant-power normalization by the *expected* steady-state
+        // overlap (density × grain length), one-pole smoothed. Grains fade in
+        // and out through the Hann window, so the summed output is already
+        // continuous; normalizing by the smoothed expected overlap — rather than
+        // the discretely-changing sqrt(active_count) that also over-counted
+        // near-silent grains — removes the per-sample amplitude zipper.
+        let grain_seconds = size_samples as f64 / self.sample_rate;
+        let expected_overlap = grains_per_sec * grain_seconds;
+        // Never amplify: only attenuate once grains routinely overlap.
+        let target_norm = Libm::<f64>::sqrt(expected_overlap).max(1.0);
+        let smooth = env_coef(0.05, self.sample_rate); // ~50ms smoothing
+        self.norm_smooth = smooth * self.norm_smooth + (1.0 - smooth) * target_norm;
+        output /= self.norm_smooth.max(1.0);
 
         outputs.set(10, output);
     }
@@ -862,6 +973,7 @@ impl GraphModule for Granular {
         self.grains = [Grain::default(); MAX_GRAINS];
         self.spawn_timer = 0;
         self.rng = crate::rng::Rng::from_seed(42);
+        self.norm_smooth = 1.0;
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
@@ -1436,5 +1548,355 @@ mod tests {
         assert!(!grain.active);
         assert_eq!(grain.phase, 0.0);
         assert_eq!(grain.speed, 1.0);
+    }
+
+    // ------------------------------------------------------------------
+    // Wave B remediation tests
+    // ------------------------------------------------------------------
+
+    /// Q025: the tone control is a real frequency-dependent low-pass, not a
+    /// static gain. At minimum it attenuates highs far more than lows; at
+    /// maximum it is essentially transparent.
+    #[test]
+    fn test_distortion_tone_is_real_filter() {
+        let sr = 44100.0;
+        // RMS of the output for a sine of `freq` Hz at the given tone setting,
+        // using near-linear settings (drive = 0) so the filter dominates.
+        let rms = |freq: f64, tone: f64| -> f64 {
+            let mut d = Distortion::new(sr);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            inputs.set(1, 0.0); // drive = 0 (near-linear)
+            inputs.set(2, tone); // tone CV
+            inputs.set(3, 0.0); // soft clip
+            inputs.set(4, 1.0); // full wet
+            let n = 8000usize;
+            let mut sumsq = 0.0;
+            for i in 0..n {
+                let x = Libm::<f64>::sin(2.0 * core::f64::consts::PI * freq * i as f64 / sr);
+                inputs.set(0, x); // ±1V sine
+                d.tick(&inputs, &mut outputs);
+                let out = outputs.get(10).unwrap();
+                if i >= n / 2 {
+                    sumsq += out * out;
+                }
+            }
+            Libm::<f64>::sqrt(sumsq / (n / 2) as f64)
+        };
+
+        let input_rms = 1.0 / Libm::<f64>::sqrt(2.0); // ±1V sine
+
+        // Tone at minimum: a 5 kHz sine is attenuated much more than 200 Hz.
+        let high_at_min = rms(5000.0, 0.0);
+        let low_at_min = rms(200.0, 0.0);
+        assert!(
+            high_at_min < 0.5 * low_at_min,
+            "tone min should attenuate highs more than lows: high={high_at_min} low={low_at_min}"
+        );
+
+        // Tone at maximum: the same 5 kHz sine passes ~transparently.
+        let high_at_max = rms(5000.0, 1.0);
+        assert!(
+            high_at_max > 0.8 * input_rms,
+            "tone max should be ~transparent: out_rms={high_at_max} in_rms={input_rms}"
+        );
+        assert!(
+            high_at_max > 3.0 * high_at_min,
+            "tone max should pass highs that tone min blocks: max={high_at_max} min={high_at_min}"
+        );
+    }
+
+    /// Q026: every algorithm keeps a ±5V input bounded to ≤5.05V at maximum
+    /// drive, and passes small signals through near unity at low drive.
+    #[test]
+    fn test_distortion_all_algorithms_bounded() {
+        // Direct shaper bound over a wide input sweep (well beyond ±5V).
+        for drive in [0.0, 0.5, 1.0] {
+            let mut x = -12.0;
+            while x <= 12.0 {
+                for out in [
+                    Distortion::soft_clip(x, drive),
+                    Distortion::hard_clip(x, drive),
+                    Distortion::foldback(x, drive),
+                    Distortion::asymmetric(x, drive),
+                ] {
+                    assert!(
+                        out.is_finite() && out.abs() <= 5.05,
+                        "shaper out {out} exceeds ±5.05 at x={x} drive={drive}"
+                    );
+                }
+                x += 0.05;
+            }
+        }
+
+        // Full-module bound: constant ±5V at max drive settles ≤5.05V for each mode.
+        for mode_cv in [0.0f64, 0.34, 0.67, 1.0] {
+            for &v in &[5.0f64, -5.0] {
+                let mut d = Distortion::new(44100.0);
+                let mut inputs = PortValues::new();
+                let mut outputs = PortValues::new();
+                inputs.set(1, 1.0); // max drive
+                inputs.set(2, 1.0); // tone transparent
+                inputs.set(3, mode_cv);
+                inputs.set(4, 1.0); // full wet
+                inputs.set(0, v);
+                let mut out = 0.0;
+                for _ in 0..500 {
+                    d.tick(&inputs, &mut outputs);
+                    out = outputs.get(10).unwrap();
+                }
+                assert!(
+                    out.abs() <= 5.05,
+                    "mode {mode_cv} at {v}V max drive should stay ≤5.05V, got {out}"
+                );
+            }
+        }
+    }
+
+    /// Q026: at low drive small signals pass through close to unity (no ±1V
+    /// level-drop and no unbounded gain).
+    #[test]
+    fn test_distortion_unity_at_low_drive() {
+        // hard_clip is exactly linear inside ±5V at drive 0.
+        assert!((Distortion::hard_clip(0.5, 0.0) - 0.5).abs() < 1e-9);
+        // soft_clip: 1V input -> 5*tanh(0.2) ≈ 0.986V (mild, near unity).
+        let out = Distortion::soft_clip(1.0, 0.0);
+        assert!((out - 1.0).abs() < 0.05, "soft_clip near unity, got {out}");
+    }
+
+    /// Q030: the closed-form triangle fold is identical to the original
+    /// data-dependent reflection loop across a value sweep including extremes.
+    #[test]
+    fn test_triangle_fold_matches_reference_loop() {
+        fn reference(gained: f64, threshold: f64) -> f64 {
+            let mut folded = gained;
+            while folded > threshold || folded < -threshold {
+                if folded > threshold {
+                    folded = 2.0 * threshold - folded;
+                } else if folded < -threshold {
+                    folded = -2.0 * threshold - folded;
+                }
+            }
+            folded
+        }
+        let threshold = 1.0;
+        let mut x = -1000.0;
+        while x <= 1000.0 {
+            let a = Distortion::triangle_fold(x, threshold);
+            let b = reference(x, threshold);
+            assert!((a - b).abs() < 1e-6, "fold mismatch at {x}: {a} vs {b}");
+            x += 0.05;
+        }
+        for &x in &[1000.0, -1000.0, 5.0, -5.0, 3.0, -3.0, 1.0, -1.0, 0.0] {
+            let a = Distortion::triangle_fold(x, threshold);
+            let b = reference(x, threshold);
+            assert!(
+                (a - b).abs() < 1e-6,
+                "fold mismatch at extreme {x}: {a} vs {b}"
+            );
+        }
+    }
+
+    /// Q027: all vocoder band SVF coefficients are strictly increasing (no two
+    /// bands collapse onto the 0.99 stability clamp), at 44.1k and lower rates.
+    #[test]
+    fn test_vocoder_band_coefficients_strictly_increasing() {
+        for &sr in &[44100.0, 22050.0, 32000.0] {
+            let v = Vocoder::new(sr);
+            let mut prev = -1.0;
+            for i in 0..MAX_VOCODER_BANDS {
+                let coef = (2.0 * Libm::<f64>::sin(core::f64::consts::PI * v.band_freqs[i] / sr))
+                    .min(0.99);
+                assert!(
+                    coef > prev + 1e-9,
+                    "band {i} coef {coef} not strictly greater than {prev} at sr {sr}"
+                );
+                prev = coef;
+            }
+        }
+    }
+
+    /// Q028: with grains continually spawning and dying, the output envelope has
+    /// no per-sample amplitude jumps (the old sqrt(active_count) zipper).
+    #[test]
+    fn test_granular_no_amplitude_zipper() {
+        let mut g = Granular::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 1.0); // constant DC so buffer reads are uniform
+        inputs.set(1, 0.5); // position
+        inputs.set(2, 0.3); // grain size
+        inputs.set(3, 1.0); // max density -> frequent spawn/die
+        inputs.set(5, 0.0); // no spray
+
+        // Fill the whole buffer with the DC value.
+        for _ in 0..(GRANULAR_BUFFER_SIZE + 20000) {
+            g.tick(&inputs, &mut outputs);
+        }
+
+        let mut prev = outputs.get(10).unwrap();
+        let mut max_delta = 0.0f64;
+        for _ in 0..30000 {
+            g.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            max_delta = max_delta.max((out - prev).abs());
+            prev = out;
+        }
+        assert!(
+            max_delta < 0.05,
+            "granular output should have no zipper jumps, max delta {max_delta}"
+        );
+    }
+
+    /// Q029: a fractional downsample factor of 1.5 yields an average hold period
+    /// of ~1.5 samples (the old truncating logic rounded it up to 2).
+    #[test]
+    fn test_bitcrusher_fractional_downsample_period() {
+        let mut bc = Bitcrusher::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        // downsample_factor = 1 + cv*63 = 1.5  ->  cv = 0.5/63
+        inputs.set(2, 0.5 / 63.0);
+        inputs.set(1, 1.0); // 16 bits -> fine quantization, distinct per update
+
+        let n = 3000usize;
+        let mut transitions = 0usize;
+        let mut prev = f64::NAN;
+        for i in 0..n {
+            inputs.set(0, i as f64 * 0.001); // monotonic ramp, 0..3V
+            bc.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            if i > 0 && (out - prev).abs() > 1e-9 {
+                transitions += 1;
+            }
+            prev = out;
+        }
+        let avg_period = n as f64 / transitions as f64;
+        assert!(
+            (avg_period - 1.5).abs() < 0.1,
+            "fractional downsample average period should be ~1.5, got {avg_period}"
+        );
+    }
+
+    /// Q032: the rounding quantizer is unbiased (a zero-mean sine quantizes with
+    /// ~0 DC, unlike the old flooring quantizer), and full-scale maps in range.
+    #[test]
+    fn test_bitcrusher_no_dc_bias() {
+        let mut bc = Bitcrusher::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 2.0 / 15.0); // bits = 3 (coarse)
+        inputs.set(2, 0.0); // no downsampling
+        let n = 20000usize;
+        let mut sum = 0.0;
+        for i in 0..n {
+            let v = Libm::<f64>::sin(i as f64 * 0.01) * 4.0; // zero-mean, within ±5V
+            inputs.set(0, v);
+            bc.tick(&inputs, &mut outputs);
+            sum += outputs.get(10).unwrap();
+        }
+        let mean = sum / n as f64;
+        assert!(
+            mean.abs() < 0.1,
+            "quantizer DC bias should be ~0, got {mean}"
+        );
+    }
+
+    #[test]
+    fn test_bitcrusher_full_scale_maps_in_range() {
+        let mut bc = Bitcrusher::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 0.3);
+        inputs.set(2, 0.0); // no downsampling -> hold updates every sample
+        for &(v, expected) in &[(5.0, 5.0), (-5.0, -5.0)] {
+            inputs.set(0, v);
+            bc.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            assert!(
+                out.abs() <= 5.0 + 1e-9 && (out - expected).abs() < 1e-9,
+                "full-scale {v}V should map to {expected}V in range, got {out}"
+            );
+        }
+    }
+
+    /// Q031: pitch CV ±5 maps to ±24 semitones (speed 0.25×–4×), and grain read
+    /// spans stay within the buffer so extreme pitch stays bounded and sane.
+    #[test]
+    fn test_granular_pitch_clamped_and_bounded() {
+        let mut g = Granular::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 0.1); // position
+        inputs.set(2, 1.0); // max grain size
+        inputs.set(4, 5.0); // pitch +5V -> +24 st
+        inputs.set(5, 0.0); // no spray
+        inputs.set(0, 1.0);
+        g.tick(&inputs, &mut outputs); // first tick spawns a grain
+
+        let grain = g
+            .grains
+            .iter()
+            .find(|gr| gr.active)
+            .expect("a grain should be active after the first tick");
+        assert!(
+            (grain.speed - 4.0).abs() < 1e-6,
+            "pitch +5V should be +24 st (speed 4), got speed {}",
+            grain.speed
+        );
+        assert!(
+            grain.size as f64 * grain.speed <= GRANULAR_BUFFER_SIZE as f64,
+            "grain read span {} must not exceed buffer {}",
+            grain.size as f64 * grain.speed,
+            GRANULAR_BUFFER_SIZE
+        );
+
+        // Run at both pitch extremes: output stays finite, bounded, non-silent.
+        for &pitch in &[5.0f64, -5.0] {
+            let mut g = Granular::new(44100.0);
+            inputs.set(4, pitch);
+            let mut total = 0.0;
+            let mut max_abs = 0.0f64;
+            for i in 0..20000 {
+                inputs.set(0, Libm::<f64>::sin(i as f64 * 0.05) * 5.0);
+                g.tick(&inputs, &mut outputs);
+                let out = outputs.get(10).unwrap();
+                assert!(out.is_finite(), "granular output must be finite");
+                max_abs = max_abs.max(out.abs());
+                total += out.abs();
+            }
+            assert!(max_abs < 50.0, "output should stay bounded, got {max_abs}");
+            assert!(total > 1.0, "output should be non-silent, got {total}");
+        }
+    }
+
+    /// Q033: maximum pitch-up (+24 st, rate 4) stays finite, bounded near ±5V,
+    /// and non-silent — the grain read pointer never overtakes the write pointer.
+    #[test]
+    fn test_pitch_shifter_max_pitch_up_bounded() {
+        let mut ps = PitchShifter::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 5.0); // +24 semitones (rate 4)
+        inputs.set(3, 1.0); // full wet
+
+        let mut total = 0.0;
+        let mut max_abs = 0.0f64;
+        for i in 0..10000 {
+            inputs.set(0, Libm::<f64>::sin(i as f64 * 0.1) * 5.0);
+            ps.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            assert!(out.is_finite(), "pitch-up output must be finite");
+            max_abs = max_abs.max(out.abs());
+            total += out.abs();
+        }
+        assert!(
+            max_abs <= 5.5,
+            "wet output should stay near ±5V (COLA), got {max_abs}"
+        );
+        assert!(
+            total > 10.0,
+            "pitch-up output should be non-silent, got {total}"
+        );
     }
 }
