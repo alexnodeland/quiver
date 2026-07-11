@@ -130,11 +130,55 @@ impl GraphModule for Offset {
     }
 }
 
+/// Hysteresis band (in semitones) applied by the pitch quantizers so a CV
+/// hovering on a note boundary does not chatter between two notes (Q041).
+const NOTE_HYSTERESIS_SEMITONES: f64 = 0.3;
+
+/// Apply per-note hysteresis to a quantizer.
+///
+/// A new candidate note is only committed once the input has moved
+/// `hysteresis_semitones` *past* the midpoint between the last committed note
+/// and the candidate; otherwise the previous note is held. All voltages are
+/// V/Oct (`1.0` == 12 semitones); `last` is the previously committed output,
+/// `None` on the first sample. This removes the boundary chatter described in
+/// Q041 while leaving clean, decisive note changes untouched.
+fn hysteretic_note(
+    last: Option<f64>,
+    input_v: f64,
+    candidate_v: f64,
+    hysteresis_semitones: f64,
+) -> f64 {
+    match last {
+        None => candidate_v,
+        Some(last_v) => {
+            if candidate_v == last_v {
+                return last_v;
+            }
+            let in_s = input_v * 12.0;
+            let last_s = last_v * 12.0;
+            let cand_s = candidate_v * 12.0;
+            let boundary = (last_s + cand_s) * 0.5;
+            let commit = if cand_s > last_s {
+                in_s >= boundary + hysteresis_semitones
+            } else {
+                in_s <= boundary - hysteresis_semitones
+            };
+            if commit {
+                candidate_v
+            } else {
+                last_v
+            }
+        }
+    }
+}
+
 /// Scale Quantizer
 ///
 /// Quantizes CV input to musical scale notes.
 /// Supports major, minor, pentatonic, and chromatic scales.
 pub struct ScaleQuantizer {
+    /// Last committed output voltage, for note-change triggers and hysteresis.
+    last_output: Option<f64>,
     spec: PortSpec,
 }
 
@@ -150,6 +194,7 @@ impl ScaleQuantizer {
 
     pub fn new(_sample_rate: f64) -> Self {
         Self {
+            last_output: None,
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::VoltPerOctave),
@@ -169,23 +214,27 @@ impl ScaleQuantizer {
     }
 
     fn quantize_to_scale(note: i32, scale: &[u8]) -> i32 {
-        let octave = if note >= 0 {
-            note / 12
-        } else {
-            (note - 11) / 12
-        };
+        let octave = note.div_euclid(12);
         let semitone = note.rem_euclid(12);
 
-        // Find closest note in scale
+        // Find the closest scale note, also considering the scale root wrapped
+        // into the NEXT octave (`s + 12`). Without carrying that +12 (Q034), a
+        // top-of-octave input whose nearest note is the next root drops ~an
+        // octave instead of snapping up. Mirrors `Quantizer::quantize`.
         let mut closest = scale[0] as i32;
         let mut min_dist = i32::MAX;
 
         for &s in scale {
-            let dist = (semitone - s as i32).abs();
-            let wrap_dist = (12 - dist).min(dist);
-            if wrap_dist < min_dist {
-                min_dist = wrap_dist;
-                closest = s as i32;
+            let s = s as i32;
+            let dist = (semitone - s).abs();
+            if dist < min_dist {
+                min_dist = dist;
+                closest = s;
+            }
+            let dist_wrap = (semitone - (s + 12)).abs();
+            if dist_wrap < min_dist {
+                min_dist = dist_wrap;
+                closest = s + 12;
             }
         }
 
@@ -231,20 +280,26 @@ impl GraphModule for ScaleQuantizer {
         };
 
         // Convert back to V/Oct with root offset
-        let output_voct = (quantized + root) as f64 / 12.0;
+        let candidate_voct = (quantized + root) as f64 / 12.0;
 
-        // Generate trigger on note change (simple comparison)
-        let trigger = if (output_voct - input).abs() > 0.001 {
-            5.0
-        } else {
-            0.0
+        // Commit the note through hysteresis so a CV parked on a boundary does
+        // not chatter (Q041), and fire the trigger only on an actual committed
+        // note change rather than continuously while quantization is active.
+        let prev = self.last_output;
+        let output_voct = hysteretic_note(prev, input, candidate_voct, NOTE_HYSTERESIS_SEMITONES);
+        let trigger = match prev {
+            Some(p) if (p - output_voct).abs() > 1e-9 => GATE_HIGH_V,
+            _ => 0.0,
         };
+        self.last_output = Some(output_voct);
 
         outputs.set(10, output_voct);
         outputs.set(11, trigger);
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.last_output = None;
+    }
 
     fn set_sample_rate(&mut self, _: f64) {}
 
@@ -260,7 +315,15 @@ impl GraphModule for ScaleQuantizer {
 pub struct Euclidean {
     step: usize,
     pattern: Vec<bool>,
-    last_clock: f64,
+    /// Pulse count baked into the current `pattern`, so the pulses control is
+    /// no longer inert when the step count is unchanged (Q037).
+    last_pulses: usize,
+    /// Rising-edge detector for the clock input (canonical 2.5V, Q129).
+    clock_edge: EdgeDetector,
+    /// Rising-edge detector for the reset input (canonical 2.5V, Q129).
+    reset_edge: EdgeDetector,
+    /// Whether the current pattern cycle has already fired its accent (Q042).
+    cycle_accented: bool,
     spec: PortSpec,
 }
 
@@ -269,7 +332,10 @@ impl Euclidean {
         Self {
             step: 0,
             pattern: vec![true; 16],
-            last_clock: 0.0,
+            last_pulses: 16,
+            clock_edge: EdgeDetector::new(),
+            reset_edge: EdgeDetector::new(),
+            cycle_accented: false,
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "clock", SignalKind::Trigger),
@@ -336,33 +402,46 @@ impl GraphModule for Euclidean {
         let steps = 2 + (steps_cv * 14.99) as usize;
         let pulses = (pulses_cv * steps as f64) as usize;
 
-        // Regenerate pattern if parameters changed
-        if self.pattern.len() != steps {
+        // Regenerate the pattern whenever the step count OR the pulse count
+        // changes, so the pulses (density) control is live (Q037).
+        if self.pattern.len() != steps || self.last_pulses != pulses {
             self.pattern = Self::generate_pattern(steps, pulses);
+            self.last_pulses = pulses;
         }
 
-        // Handle reset
-        if reset > 0.5 {
+        // Reset on a rising edge at the canonical gate threshold (Q129).
+        if self.reset_edge.rising(reset) {
             self.step = 0;
+            self.cycle_accented = false;
         }
 
-        // Detect clock rising edge
-        let trigger = clock > 0.5 && self.last_clock <= 0.5;
-        self.last_clock = clock;
+        // Detect a clock rising edge at the canonical gate threshold (Q129).
+        let trigger = self.clock_edge.rising(clock);
 
         let mut out = 0.0;
         let mut accent = 0.0;
 
         if trigger {
-            // Apply rotation
-            let rotation = (rotation_cv * (steps - 1) as f64) as usize;
+            // Rotation now spans the full 0..steps range (Q042); it shifts which
+            // pattern slot is read at this sequence position.
+            let rotation = ((rotation_cv * steps as f64) as usize).min(steps - 1);
+
+            // A new pattern cycle begins at step 0: re-arm the accent.
+            if self.step == 0 {
+                self.cycle_accented = false;
+            }
+
             let rotated_step = (self.step + rotation) % steps;
 
             if self.pattern[rotated_step] {
                 out = GATE_HIGH_V;
-                // Accent on downbeat (step 0)
-                if self.step == 0 {
+                // Accent the active downbeat of the (rotated) pattern: the first
+                // real pulse of the cycle, so the accent always coincides with a
+                // pulse instead of firing on a pre-rotation counter that may land
+                // on a rest (Q042).
+                if !self.cycle_accented {
                     accent = GATE_HIGH_V;
+                    self.cycle_accented = true;
                 }
             }
 
@@ -375,7 +454,9 @@ impl GraphModule for Euclidean {
 
     fn reset(&mut self) {
         self.step = 0;
-        self.last_clock = 0.0;
+        self.cycle_accented = false;
+        self.clock_edge.reset();
+        self.reset_edge.reset();
     }
 
     fn set_sample_rate(&mut self, _: f64) {}
@@ -885,6 +966,8 @@ impl GraphModule for SlewLimiter {
 /// Supports chromatic, major, minor, and pentatonic scales.
 pub struct Quantizer {
     pub(crate) scale: Scale,
+    /// Last committed output voltage, for boundary hysteresis (Q041).
+    last_output: Option<f64>,
     spec: PortSpec,
 }
 
@@ -921,6 +1004,7 @@ impl Quantizer {
     pub fn new(scale: Scale) -> Self {
         Self {
             scale,
+            last_output: None,
             spec: PortSpec {
                 inputs: vec![PortDef::new(0, "in", SignalKind::VoltPerOctave)],
                 outputs: vec![PortDef::new(10, "out", SignalKind::VoltPerOctave)],
@@ -990,11 +1074,22 @@ impl GraphModule for Quantizer {
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
         let input = inputs.get_or(0, 0.0);
-        let quantized = self.quantize(input);
-        outputs.set(10, quantized);
+        let candidate = self.quantize(input);
+        // Hold the note through hysteresis so a CV parked on a boundary does not
+        // chatter between adjacent scale degrees (Q041).
+        let committed = hysteretic_note(
+            self.last_output,
+            input,
+            candidate,
+            NOTE_HYSTERESIS_SEMITONES,
+        );
+        self.last_output = Some(committed);
+        outputs.set(10, committed);
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.last_output = None;
+    }
 
     fn set_sample_rate(&mut self, _: f64) {}
 
@@ -1008,19 +1103,30 @@ impl GraphModule for Quantizer {
 /// Generates clock pulses at a specified tempo (BPM).
 pub struct Clock {
     phase: f64,
+    /// Integer count of completed main cycles, used to derive the divided
+    /// outputs so they actually divide the tempo (Q035).
+    cycle: u64,
     sample_rate: f64,
     spec: PortSpec,
 }
 
 impl Clock {
+    /// Bpm-control CV that yields exactly 120 BPM through [`Clock::cv_to_bpm`].
+    ///
+    /// Since `cv_to_bpm(cv) = 20 * 15^(cv/10)`, solving `20 * 15^(cv/10) = 120`
+    /// gives `cv = 10 * ln(6) / ln(15) ≈ 6.6164` (Q038 — the old `1.2` default
+    /// produced only ~27.5 BPM).
+    const DEFAULT_BPM_CV: f64 = 6.616_418_958_920_283;
+
     pub fn new(sample_rate: f64) -> Self {
         Self {
             phase: 0.0,
+            cycle: 0,
             sample_rate,
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "bpm", SignalKind::CvUnipolar)
-                        .with_default(1.2) // 120 BPM when scaled
+                        .with_default(Self::DEFAULT_BPM_CV) // 120 BPM when scaled
                         .with_attenuverter(),
                     PortDef::new(1, "reset", SignalKind::Trigger),
                 ],
@@ -1051,7 +1157,7 @@ impl GraphModule for Clock {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let bpm_cv = inputs.get_or(0, 1.2); // Default ~120 BPM
+        let bpm_cv = inputs.get_or(0, Self::DEFAULT_BPM_CV); // Default 120 BPM
         let reset = inputs.get_or(1, 0.0);
 
         let bpm = Self::cv_to_bpm(bpm_cv);
@@ -1060,28 +1166,25 @@ impl GraphModule for Clock {
         // Reset on trigger
         if reset > GATE_THRESHOLD_V {
             self.phase = 0.0;
+            self.cycle = 0;
         }
 
         // Main clock output (short pulse at start of each cycle)
         let pulse_width = 0.1; // 10% duty cycle
-        let main_out = if self.phase < pulse_width {
-            GATE_HIGH_V
-        } else {
-            0.0
-        };
+        let in_pulse = self.phase < pulse_width;
+        let main_out = if in_pulse { GATE_HIGH_V } else { 0.0 };
 
-        // Divided outputs (using integer phase counting would be cleaner,
-        // but this works for demonstration)
-        let div2_raw = self.phase * 0.5;
-        let div4_raw = self.phase * 0.25;
-        let div2_phase = div2_raw - Libm::<f64>::floor(div2_raw);
-        let div4_phase = div4_raw - Libm::<f64>::floor(div4_raw);
-        let div2_out = if div2_phase < pulse_width {
+        // Divided outputs derived from the integer cycle counter so they
+        // genuinely divide the tempo (Q035): div2 fires on even cycles, div4 on
+        // every fourth cycle, both with the same pulse-width window as main.
+        // Bitwise masks (both divisors are powers of two) keep this MSRV-1.78
+        // safe, avoiding the newer `u64::is_multiple_of`.
+        let div2_out = if in_pulse && (self.cycle & 1) == 0 {
             GATE_HIGH_V
         } else {
             0.0
         };
-        let div4_out = if div4_phase < pulse_width {
+        let div4_out = if in_pulse && (self.cycle & 3) == 0 {
             GATE_HIGH_V
         } else {
             0.0
@@ -1091,13 +1194,18 @@ impl GraphModule for Clock {
         outputs.set(11, div2_out);
         outputs.set(12, div4_out);
 
-        // Advance phase
+        // Advance phase, incrementing the cycle counter on each wrap.
         let new_phase = self.phase + freq / self.sample_rate;
-        self.phase = new_phase - Libm::<f64>::floor(new_phase);
+        let wraps = Libm::<f64>::floor(new_phase);
+        if wraps > 0.0 {
+            self.cycle = self.cycle.wrapping_add(wraps as u64);
+        }
+        self.phase = new_phase - wraps;
     }
 
     fn reset(&mut self) {
         self.phase = 0.0;
+        self.cycle = 0;
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
@@ -1478,12 +1586,23 @@ impl GraphModule for LogicNot {
 /// Outputs high (+5V) when A > B, otherwise low (0V).
 /// Also provides inverted output (A <= B).
 pub struct Comparator {
+    /// Last committed comparison state: `1` = gt, `-1` = lt, `0` = eq. Used for
+    /// true stateful hysteresis so a signal dithering around B does not toggle
+    /// every sample (Q041).
+    state: i8,
     spec: PortSpec,
 }
 
 impl Comparator {
+    /// Deadband half-width defining the equality region (volts).
+    const DEADBAND_V: f64 = 0.01;
+    /// Extra margin, beyond the deadband edge, the input must cross to flip
+    /// state. A dither smaller than this can no longer cause chatter.
+    const HYSTERESIS_V: f64 = 0.02;
+
     pub fn new() -> Self {
         Self {
+            state: 0,
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "a", SignalKind::CvBipolar),
@@ -1513,20 +1632,52 @@ impl GraphModule for Comparator {
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
         let a = inputs.get_or(0, 0.0);
         let b = inputs.get_or(1, 0.0);
+        let d = a - b;
 
-        // Use a small threshold for equality comparison (hysteresis)
-        let threshold = 0.01;
+        let t = Self::DEADBAND_V;
+        let hy = Self::HYSTERESIS_V;
 
-        let gt = a > b + threshold;
-        let lt = a < b - threshold;
-        let eq = !gt && !lt;
+        // Stateful hysteresis: turning an output ON needs the input to cross the
+        // deadband edge plus the hysteresis margin; turning it OFF happens back
+        // at the deadband edge. Once committed, a dither smaller than `hy`
+        // cannot flip the state, eliminating boundary chatter (Q041).
+        let mut gt = self.state == 1;
+        let mut lt = self.state == -1;
+
+        if gt {
+            if d < t {
+                gt = false;
+            }
+        } else if d >= t + hy {
+            gt = true;
+        }
+
+        if lt {
+            if d > -t {
+                lt = false;
+            }
+        } else if d <= -t - hy {
+            lt = true;
+        }
+
+        // `gt` and `lt` are mutually exclusive: their ON conditions require
+        // |d| >= t + hy of opposite sign.
+        self.state = if gt {
+            1
+        } else if lt {
+            -1
+        } else {
+            0
+        };
 
         outputs.set(10, if gt { GATE_HIGH_V } else { 0.0 });
         outputs.set(11, if lt { GATE_HIGH_V } else { 0.0 });
-        outputs.set(12, if eq { GATE_HIGH_V } else { 0.0 });
+        outputs.set(12, if self.state == 0 { GATE_HIGH_V } else { 0.0 });
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.state = 0;
+    }
 
     fn set_sample_rate(&mut self, _: f64) {}
 
@@ -1726,6 +1877,11 @@ impl GraphModule for VcSwitch {
 /// Inspired by Mutable Instruments Branches.
 pub struct BernoulliGate {
     last_trigger: f64,
+    /// Latched gate A state, persisted in the struct because the engine hands
+    /// `tick` a fresh output buffer each sample (Q036).
+    gate_a: f64,
+    /// Latched gate B state (see `gate_a`).
+    gate_b: f64,
     spec: PortSpec,
 }
 
@@ -1733,6 +1889,8 @@ impl BernoulliGate {
     pub fn new() -> Self {
         Self {
             last_trigger: 0.0,
+            gate_a: 0.0,
+            gate_b: 0.0,
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "trig", SignalKind::Trigger),
@@ -1785,29 +1943,25 @@ impl GraphModule for BernoulliGate {
         outputs.set(10, trig_a);
         outputs.set(11, trig_b);
 
-        // Gate outputs track which side was last triggered
-        // These latch until the other side is triggered
-        let gate_a = if trig_a > 0.0 {
-            5.0
+        // Gate outputs track which side was last triggered and latch until the
+        // other side is triggered. State lives in struct fields (Q036) because
+        // the output buffer is not persisted across ticks by the engine.
+        if trig_a > 0.0 {
+            self.gate_a = GATE_HIGH_V;
+            self.gate_b = 0.0;
         } else if trig_b > 0.0 {
-            0.0
-        } else {
-            outputs.get_or(12, 0.0) // Keep previous state
-        };
-        let gate_b = if trig_b > 0.0 {
-            5.0
-        } else if trig_a > 0.0 {
-            0.0
-        } else {
-            outputs.get_or(13, 0.0) // Keep previous state
-        };
+            self.gate_a = 0.0;
+            self.gate_b = GATE_HIGH_V;
+        }
 
-        outputs.set(12, gate_a);
-        outputs.set(13, gate_b);
+        outputs.set(12, self.gate_a);
+        outputs.set(13, self.gate_b);
     }
 
     fn reset(&mut self) {
         self.last_trigger = 0.0;
+        self.gate_a = 0.0;
+        self.gate_b = 0.0;
     }
 
     fn set_sample_rate(&mut self, _: f64) {}
@@ -2124,6 +2278,9 @@ pub struct Arpeggiator {
     direction_up: bool,
     /// Previous gate state for edge detection
     prev_gate: f64,
+    /// Note captured on the current gate's rising edge, removed on its falling
+    /// edge so held notes are actually released (Q040).
+    captured_note: Option<f64>,
     /// Previous clock state for edge detection
     prev_clock: f64,
     /// Previous reset state for edge detection
@@ -2165,6 +2322,7 @@ impl Arpeggiator {
             current_step: 0,
             direction_up: true,
             prev_gate: 0.0,
+            captured_note: None,
             prev_clock: 0.0,
             prev_reset: 0.0,
             rng: crate::rng::Rng::from_seed(42),
@@ -2277,18 +2435,29 @@ impl GraphModule for Arpeggiator {
         let pattern = ArpPattern::from_cv(pattern_cv);
         let octaves = (1.0 + octaves_cv.clamp(0.0, 1.0) * 3.0) as usize; // 1-4 octaves
 
-        // Handle gate input (note capture)
-        // Notes are captured on gate rising edge and persist until reset
+        // Handle gate input (note capture/release).
+        // A note is added on the gate's rising edge and released on its falling
+        // edge (Q040), so the held set reflects the currently-held note rather
+        // than growing monotonically to the 8-note cap.
         if gate > GATE_THRESHOLD_V && self.prev_gate <= GATE_THRESHOLD_V {
-            // Rising edge - add note
+            // Rising edge - add note and remember it for the matching release.
             self.add_note(v_oct);
+            self.captured_note = Some(v_oct);
+        } else if gate <= GATE_THRESHOLD_V && self.prev_gate > GATE_THRESHOLD_V {
+            // Falling edge - remove the note captured on the rising edge.
+            if let Some(note) = self.captured_note.take() {
+                self.remove_note(note);
+            }
         }
         self.prev_gate = gate;
 
-        // Handle reset
+        // Handle reset - also clears the held-note buffer (Q040).
         if reset > GATE_THRESHOLD_V && self.prev_reset <= GATE_THRESHOLD_V {
             self.current_step = 0;
             self.direction_up = true;
+            self.held_notes = [0.0; 8];
+            self.num_notes = 0;
+            self.captured_note = None;
         }
         self.prev_reset = reset;
 
@@ -2343,6 +2512,7 @@ impl GraphModule for Arpeggiator {
     fn reset(&mut self) {
         self.held_notes = [0.0; 8];
         self.num_notes = 0;
+        self.captured_note = None;
         self.current_step = 0;
         self.direction_up = true;
         self.prev_gate = 0.0;
@@ -3347,22 +3517,13 @@ mod tests {
         let mut inputs = PortValues::new();
         let mut outputs = PortValues::new();
 
-        // Add three notes (need to cycle gate for each)
-        inputs.set(0, 0.0); // C4
-        inputs.set(1, 5.0); // Gate high
-        arp.tick(&inputs, &mut outputs);
-        inputs.set(1, 0.0); // Gate low
-        arp.tick(&inputs, &mut outputs);
-
-        inputs.set(0, 0.333); // E4
-        inputs.set(1, 5.0); // Gate high
-        arp.tick(&inputs, &mut outputs);
-        inputs.set(1, 0.0); // Gate low
-        arp.tick(&inputs, &mut outputs);
-
-        inputs.set(0, 0.583); // G4
-        inputs.set(1, 5.0); // Gate high
-        arp.tick(&inputs, &mut outputs);
+        // Populate the held chord directly. (A single gate+pitch input can only
+        // hold one note at a time now that releases remove notes — Q040 — so a
+        // three-note chord is set up via add_note.)
+        arp.add_note(0.0); // C4
+        arp.add_note(0.333); // E4
+        arp.add_note(0.583); // G4
+        inputs.set(1, 0.0); // Gate low throughout
 
         assert_eq!(arp.num_notes, 3);
 
@@ -3474,5 +3635,399 @@ mod tests {
             "Mixer output {} is very high - consider adding limiting",
             out
         );
+    }
+
+    // ---- Q034: ScaleQuantizer octave-wrap ----
+
+    #[test]
+    fn test_scale_quantizer_octave_wrap_minor_11() {
+        // Semitone 11 (B above the root) must snap UP to 12, not drop to 0.
+        assert_eq!(
+            ScaleQuantizer::quantize_to_scale(11, &ScaleQuantizer::MINOR),
+            12
+        );
+    }
+
+    #[test]
+    fn test_scale_quantizer_monotonic_sweep() {
+        // A chromatic sweep across two octaves must map to a monotonically
+        // nondecreasing sequence for every scale — the old code dropped
+        // top-of-octave notes ~an octave (non-monotonic).
+        for scale in [
+            &ScaleQuantizer::MINOR[..],
+            &ScaleQuantizer::PENT_MAJOR[..],
+            &ScaleQuantizer::BLUES[..],
+        ] {
+            let mut prev = i32::MIN;
+            for note in 0..=24 {
+                let q = ScaleQuantizer::quantize_to_scale(note, scale);
+                assert!(
+                    q >= prev,
+                    "non-monotonic: note {} -> {} after {}",
+                    note,
+                    q,
+                    prev
+                );
+                prev = q;
+            }
+        }
+    }
+
+    // ---- Q041: quantizer / comparator hysteresis ----
+
+    #[test]
+    fn test_quantizer_hysteresis_no_chatter() {
+        // A slow ramp across two semitone boundaries with a tiny dither must
+        // cross each boundary exactly once (two committed note changes), not
+        // chatter every sample.
+        let mut quant = Quantizer::new(Scale::Chromatic);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        let n = 4000;
+        let mut changes = 0;
+        let mut prev: Option<f64> = None;
+        for i in 0..=n {
+            let base = 2.0 * i as f64 / n as f64; // semitones, 0..2
+            let dither = if i % 2 == 0 { 0.1 } else { -0.1 };
+            inputs.set(0, (base + dither) / 12.0);
+            quant.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            if let Some(p) = prev {
+                if (out - p).abs() > 1e-9 {
+                    changes += 1;
+                }
+            }
+            prev = Some(out);
+        }
+        assert_eq!(changes, 2, "expected exactly two boundary crossings");
+    }
+
+    #[test]
+    fn test_scale_quantizer_trigger_once_per_boundary() {
+        // The change-trigger must fire once per committed note change, not
+        // continuously while quantization is active.
+        let mut sq = ScaleQuantizer::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(2, 0.0); // chromatic scale
+
+        let n = 4000;
+        let mut triggers = 0;
+        for i in 0..=n {
+            let base = 2.0 * i as f64 / n as f64;
+            let dither = if i % 2 == 0 { 0.1 } else { -0.1 };
+            inputs.set(0, (base + dither) / 12.0);
+            sq.tick(&inputs, &mut outputs);
+            if outputs.get(11).unwrap() > 2.5 {
+                triggers += 1;
+            }
+        }
+        assert_eq!(triggers, 2, "trigger should fire once per boundary");
+    }
+
+    #[test]
+    fn test_comparator_hysteresis_no_chatter() {
+        // A signal dithering around B (amplitude between the deadband and the
+        // hysteresis margin) must not toggle the outputs.
+        let mut cmp = Comparator::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 0.0); // B = 0
+
+        // Establish equality first.
+        inputs.set(0, 0.0);
+        cmp.tick(&inputs, &mut outputs);
+
+        let mut gt_high = 0;
+        let mut lt_high = 0;
+        for i in 0..200 {
+            let a = if i % 2 == 0 { 0.02 } else { -0.02 };
+            inputs.set(0, a);
+            cmp.tick(&inputs, &mut outputs);
+            if outputs.get(10).unwrap() > 2.5 {
+                gt_high += 1;
+            }
+            if outputs.get(11).unwrap() > 2.5 {
+                lt_high += 1;
+            }
+            assert!(outputs.get(12).unwrap() > 2.5, "should stay equal");
+        }
+        assert_eq!(gt_high, 0, "gt should never fire on sub-band dither");
+        assert_eq!(lt_high, 0, "lt should never fire on sub-band dither");
+    }
+
+    #[test]
+    fn test_comparator_still_compares() {
+        // Decisive inputs still resolve correctly through the hysteresis.
+        let mut cmp = Comparator::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 3.0);
+        inputs.set(1, 1.0);
+        cmp.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap() > 2.5);
+
+        inputs.set(0, 1.0);
+        inputs.set(1, 3.0);
+        cmp.tick(&inputs, &mut outputs);
+        assert!(outputs.get(11).unwrap() > 2.5);
+
+        inputs.set(0, 2.0);
+        inputs.set(1, 2.0);
+        cmp.tick(&inputs, &mut outputs);
+        assert!(outputs.get(12).unwrap() > 2.5);
+    }
+
+    // ---- Q035 / Q038: Clock divided outputs and default tempo ----
+
+    #[test]
+    fn test_clock_divided_outputs() {
+        // Over N main cycles, div2 pulses N/2 times and div4 pulses N/4 times.
+        let mut clock = Clock::new(1000.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 5.0); // medium tempo
+
+        let (mut main_c, mut div2_c, mut div4_c) = (0, 0, 0);
+        let (mut pm, mut p2, mut p4) = (0.0, 0.0, 0.0);
+        for _ in 0..100_000 {
+            clock.tick(&inputs, &mut outputs);
+            let m = outputs.get(10).unwrap();
+            let d2 = outputs.get(11).unwrap();
+            let d4 = outputs.get(12).unwrap();
+            let m_rise = m > 2.5 && pm <= 2.5;
+            if m_rise {
+                main_c += 1;
+            }
+            if d2 > 2.5 && p2 <= 2.5 {
+                div2_c += 1;
+            }
+            if d4 > 2.5 && p4 <= 2.5 {
+                div4_c += 1;
+            }
+            pm = m;
+            p2 = d2;
+            p4 = d4;
+            if m_rise && main_c == 8 {
+                break;
+            }
+        }
+        assert_eq!(main_c, 8, "main should pulse every cycle");
+        assert_eq!(div2_c, 4, "div2 should pulse at half rate");
+        assert_eq!(div4_c, 2, "div4 should pulse at quarter rate");
+    }
+
+    #[test]
+    fn test_clock_default_tempo_120_bpm() {
+        // With no bpm input, the port default must yield ~120 BPM.
+        let mut clock = Clock::default();
+        let inputs = PortValues::new(); // empty -> use port default
+        let mut outputs = PortValues::new();
+
+        let mut edges = Vec::new();
+        let mut prev = 0.0;
+        for i in 0..100_000 {
+            clock.tick(&inputs, &mut outputs);
+            let m = outputs.get(10).unwrap();
+            if m > 2.5 && prev <= 2.5 {
+                edges.push(i);
+            }
+            prev = m;
+            if edges.len() >= 2 {
+                break;
+            }
+        }
+        assert!(edges.len() >= 2, "expected at least two clock pulses");
+        let period = (edges[1] - edges[0]) as f64;
+        let bpm = 60.0 * 44100.0 / period;
+        assert!(
+            (bpm - 120.0).abs() < 1.0,
+            "default tempo {} BPM should be ~120",
+            bpm
+        );
+    }
+
+    // ---- Q036: BernoulliGate latched gates ----
+
+    #[test]
+    fn test_bernoulli_gate_latches() {
+        let mut bg = BernoulliGate::new();
+        let mut inputs = PortValues::new();
+
+        // Deterministic route to A: 100% probability.
+        inputs.set(1, 10.0);
+
+        // A fresh output buffer every tick (as the engine provides) — the latch
+        // must survive without reading back the output buffer.
+        let mut tick = |bg: &mut BernoulliGate, inputs: &PortValues| {
+            let mut o = PortValues::new();
+            bg.tick(inputs, &mut o);
+            o
+        };
+
+        inputs.set(0, 0.0);
+        tick(&mut bg, &inputs);
+        inputs.set(0, 5.0);
+        let o = tick(&mut bg, &inputs); // rising edge -> A
+        assert!(o.get(12).unwrap() > 2.5, "gate_a should latch high");
+        assert!(o.get(13).unwrap() < 2.5);
+
+        // Hold across many non-trigger ticks (gate low, no rising edge).
+        inputs.set(0, 0.0);
+        for _ in 0..20 {
+            let o = tick(&mut bg, &inputs);
+            assert!(o.get(12).unwrap() > 2.5, "gate_a must stay latched");
+            assert!(o.get(13).unwrap() < 2.5);
+        }
+
+        // Now route to B: 0% probability, new rising edge.
+        inputs.set(1, 0.0);
+        inputs.set(0, 0.0);
+        tick(&mut bg, &inputs);
+        inputs.set(0, 5.0);
+        let o = tick(&mut bg, &inputs); // rising edge -> B
+        assert!(o.get(12).unwrap() < 2.5, "gate_a should release");
+        assert!(o.get(13).unwrap() > 2.5, "gate_b should latch high");
+    }
+
+    // ---- Q037 / Q042 / Q129: Euclidean ----
+
+    #[test]
+    fn test_euclidean_pulses_control_live() {
+        // Changing pulses at a constant step count must change the pattern.
+        let mut euc = Euclidean::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 0.5); // steps -> 9
+
+        inputs.set(2, 0.25); // pulses -> 2
+        euc.tick(&inputs, &mut outputs);
+        let active_low = euc.pattern.iter().filter(|&&x| x).count();
+        assert_eq!(active_low, 2);
+
+        inputs.set(2, 0.75); // pulses -> 6
+        euc.tick(&inputs, &mut outputs);
+        let active_high = euc.pattern.iter().filter(|&&x| x).count();
+        assert_eq!(active_high, 6);
+        assert_ne!(active_low, active_high, "pulses control must be live");
+    }
+
+    #[test]
+    fn test_euclidean_accent_on_rotated_pulse() {
+        // With rotation, the accent must fire exactly once per cycle and always
+        // coincide with an actual pulse.
+        let mut euc = Euclidean::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 0.4003); // steps -> 8
+        inputs.set(2, 0.5); // pulses -> 4
+        inputs.set(3, 0.3); // rotation -> 2
+
+        let mut accents = 0;
+        for _ in 0..8 {
+            inputs.set(0, 5.0); // clock high (rising)
+            euc.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            let accent = outputs.get(11).unwrap();
+            if accent > 2.5 {
+                accents += 1;
+                assert!(out > 2.5, "accent must coincide with a pulse");
+            }
+            inputs.set(0, 0.0); // clock low
+            euc.tick(&inputs, &mut outputs);
+        }
+        assert_eq!(accents, 1, "exactly one accent per cycle");
+    }
+
+    #[test]
+    fn test_euclidean_gate_threshold() {
+        // Clock pulses below the canonical 2.5V threshold must be ignored;
+        // 5V pulses must produce output (Q129).
+        let mut euc = Euclidean::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 0.4003); // steps -> 8
+        inputs.set(2, 1.0); // all pulses active
+
+        // 1.0V clock: never crosses threshold -> no pulses.
+        let mut low_pulses = 0;
+        for _ in 0..8 {
+            inputs.set(0, 1.0);
+            euc.tick(&inputs, &mut outputs);
+            if outputs.get(10).unwrap() > 2.5 {
+                low_pulses += 1;
+            }
+            inputs.set(0, 0.0);
+            euc.tick(&inputs, &mut outputs);
+        }
+        assert_eq!(low_pulses, 0, "1.0V clock must not trigger");
+
+        // 5V clock: produces pulses.
+        let mut high_pulses = 0;
+        for _ in 0..8 {
+            inputs.set(0, 5.0);
+            euc.tick(&inputs, &mut outputs);
+            if outputs.get(10).unwrap() > 2.5 {
+                high_pulses += 1;
+            }
+            inputs.set(0, 0.0);
+            euc.tick(&inputs, &mut outputs);
+        }
+        assert!(high_pulses > 0, "5V clock must trigger");
+    }
+
+    // ---- Q040: Arpeggiator note release ----
+
+    #[test]
+    fn test_arpeggiator_releases_notes() {
+        let mut arp = Arpeggiator::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Press a note (rising edge).
+        inputs.set(0, 0.25);
+        inputs.set(1, 5.0);
+        arp.tick(&inputs, &mut outputs);
+        assert_eq!(arp.num_notes, 1);
+
+        // Hold: still one note.
+        for _ in 0..5 {
+            arp.tick(&inputs, &mut outputs);
+        }
+        assert_eq!(arp.num_notes, 1);
+
+        // Release (falling edge) removes the note.
+        inputs.set(1, 0.0);
+        arp.tick(&inputs, &mut outputs);
+        assert_eq!(arp.num_notes, 0, "release must remove the held note");
+
+        // Another press/release cycle keeps the count correct.
+        inputs.set(0, 0.5);
+        inputs.set(1, 5.0);
+        arp.tick(&inputs, &mut outputs);
+        assert_eq!(arp.num_notes, 1);
+        inputs.set(1, 0.0);
+        arp.tick(&inputs, &mut outputs);
+        assert_eq!(arp.num_notes, 0);
+    }
+
+    #[test]
+    fn test_arpeggiator_reset_clears_held_notes() {
+        let mut arp = Arpeggiator::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Hold a note (gate stays high).
+        inputs.set(0, 0.0);
+        inputs.set(1, 5.0);
+        arp.tick(&inputs, &mut outputs);
+        assert_eq!(arp.num_notes, 1);
+
+        // Reset input (rising edge) empties the held set.
+        inputs.set(5, 5.0);
+        arp.tick(&inputs, &mut outputs);
+        assert_eq!(arp.num_notes, 0, "reset must clear held notes");
     }
 }
