@@ -649,7 +649,7 @@ pub fn calculate_rms_db(samples: &[f32]) -> f64 {
     }
 
     let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
-    let rms = (sum_sq / samples.len() as f64).sqrt();
+    let rms = libm::Libm::<f64>::sqrt(sum_sq / samples.len() as f64);
 
     if rms > 0.0 {
         20.0 * libm::log10(rms)

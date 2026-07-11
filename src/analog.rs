@@ -675,56 +675,9 @@ impl GraphModule for Saturator {
     }
 }
 
-/// Wavefolder module
-pub struct Wavefolder {
-    pub(crate) threshold: f64,
-    spec: PortSpec,
-}
-
-impl Wavefolder {
-    pub fn new(threshold: f64) -> Self {
-        Self {
-            threshold: threshold.max(0.1),
-            spec: PortSpec {
-                inputs: vec![
-                    PortDef::new(0, "in", SignalKind::Audio),
-                    PortDef::new(1, "threshold", SignalKind::CvUnipolar)
-                        .with_default(threshold)
-                        .with_attenuverter(),
-                ],
-                outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
-            },
-        }
-    }
-}
-
-impl Default for Wavefolder {
-    fn default() -> Self {
-        Self::new(1.0)
-    }
-}
-
-impl GraphModule for Wavefolder {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
-        let threshold = inputs.get_or(1, self.threshold).max(0.1);
-
-        let folded = saturation::fold(input / 5.0, threshold) * 5.0;
-        outputs.set(10, folded);
-    }
-
-    fn reset(&mut self) {}
-
-    fn set_sample_rate(&mut self, _: f64) {}
-
-    fn type_id(&self) -> &'static str {
-        "wavefolder"
-    }
-}
+// `Wavefolder` now lives in `crate::modules::nonlinear`; re-exported here so
+// `crate::analog::Wavefolder` (registry, presets, introspection) keeps working.
+pub use crate::modules::Wavefolder;
 
 #[cfg(test)]
 mod tests {
