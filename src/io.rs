@@ -55,6 +55,71 @@ impl Clone for AtomicF64 {
     }
 }
 
+/// A note event (pitch + gate) published atomically in a single 64-bit word.
+///
+/// MIDI note-on must hand a *coherent* (pitch, gate) pair from the MIDI thread
+/// to the audio thread. Writing pitch and gate as two independent atomics with
+/// `Relaxed` ordering lets the audio thread observe a new gate paired with a
+/// stale pitch (a wrong-pitch transient on note changes). Packing both into one
+/// `AtomicU64` removes the tear entirely:
+///
+/// - the high 32 bits hold `pitch` (V/Oct) as `f32` bits,
+/// - the low 32 bits hold `gate` (volts) as `f32` bits.
+///
+/// Writers use [`publish`](Self::publish) (`Ordering::Release`); readers use
+/// [`snapshot`](Self::snapshot) (`Ordering::Acquire`). The release/acquire pair
+/// establishes a happens-before edge so a reader that observes a gate value also
+/// observes the matching pitch published in the same word.
+#[derive(Debug)]
+pub struct AtomicNote(AtomicU64);
+
+impl AtomicNote {
+    /// Create a new packed note event.
+    pub fn new(pitch: f64, gate: f64) -> Self {
+        Self(AtomicU64::new(Self::pack(pitch, gate)))
+    }
+
+    #[inline]
+    fn pack(pitch: f64, gate: f64) -> u64 {
+        (((pitch as f32).to_bits() as u64) << 32) | ((gate as f32).to_bits() as u64)
+    }
+
+    #[inline]
+    fn unpack(bits: u64) -> (f64, f64) {
+        let pitch = f32::from_bits((bits >> 32) as u32) as f64;
+        let gate = f32::from_bits(bits as u32) as f64;
+        (pitch, gate)
+    }
+
+    /// Publish a coherent `(pitch, gate)` pair with `Release` ordering.
+    #[inline]
+    pub fn publish(&self, pitch: f64, gate: f64) {
+        self.0.store(Self::pack(pitch, gate), Ordering::Release);
+    }
+
+    /// Load a coherent `(pitch, gate)` snapshot with `Acquire` ordering.
+    ///
+    /// The returned pair is never torn: pitch and gate always come from the same
+    /// [`publish`](Self::publish) call.
+    #[inline]
+    pub fn snapshot(&self) -> (f64, f64) {
+        Self::unpack(self.0.load(Ordering::Acquire))
+    }
+}
+
+impl Default for AtomicNote {
+    fn default() -> Self {
+        Self::new(0.0, 0.0)
+    }
+}
+
+impl Clone for AtomicNote {
+    fn clone(&self) -> Self {
+        let (pitch, gate) = self.snapshot();
+        Self::new(pitch, gate)
+    }
+}
+
 /// External input source - reads from an atomic value set by another thread
 ///
 /// This module allows values from external sources (MIDI, OSC, GUI, etc.)
@@ -160,6 +225,13 @@ pub struct MidiState {
     /// Expression pedal (0-10V)
     pub expression: Arc<AtomicF64>,
 
+    /// Coherent, torn-free (pitch, gate) note event.
+    ///
+    /// Published atomically on every note-on/off so the audio thread never sees
+    /// a new gate paired with a stale pitch. Prefer [`MidiState::note_snapshot`]
+    /// over reading `pitch`/`gate` separately when a coherent pair matters.
+    pub note: Arc<AtomicNote>,
+
     // Internal state for note handling
     held_notes: Vec<u8>,
 }
@@ -176,6 +248,7 @@ impl MidiState {
             aftertouch: Arc::new(AtomicF64::new(0.0)),
             sustain: Arc::new(AtomicF64::new(0.0)),
             expression: Arc::new(AtomicF64::new(10.0)),
+            note: Arc::new(AtomicNote::new(0.0, 0.0)),
             held_notes: Vec::new(),
         }
     }
@@ -196,11 +269,17 @@ impl MidiState {
             (0x90, 3) if msg[2] > 0 => {
                 let note = msg[1];
                 let vel = msg[2];
+                let voct = Self::note_to_voct(note);
 
                 self.held_notes.push(note);
-                self.pitch.set(Self::note_to_voct(note));
+                // Write pitch before gate. The individual `gate` store uses
+                // `Release` so a reader that `Acquire`-loads the gate also sees
+                // the pitch written before it.
+                self.pitch.set(voct);
                 self.velocity.set(vel as f64 / 127.0 * 10.0);
-                self.gate.set(5.0);
+                self.gate.store(5.0, Ordering::Release);
+                // Publish the coherent (pitch, gate) pair in a single word.
+                self.note.publish(voct, 5.0);
             }
 
             // Note Off (or Note On with velocity 0)
@@ -209,11 +288,15 @@ impl MidiState {
                 self.held_notes.retain(|&n| n != note);
 
                 if self.held_notes.is_empty() {
-                    self.gate.set(0.0);
+                    self.gate.store(0.0, Ordering::Release);
+                    // Gate closes; keep the last pitch in the coherent word.
+                    self.note.publish(self.pitch.get(), 0.0);
                 } else {
-                    // Legato: switch to last held note
+                    // Legato: switch to last held note (gate stays high).
                     let last = *self.held_notes.last().unwrap();
-                    self.pitch.set(Self::note_to_voct(last));
+                    let voct = Self::note_to_voct(last);
+                    self.pitch.set(voct);
+                    self.note.publish(voct, 5.0);
                 }
             }
 
@@ -264,6 +347,17 @@ impl MidiState {
         (note as f64 - 60.0) / 12.0
     }
 
+    /// Get a coherent, torn-free `(pitch_voct, gate)` snapshot of the last note
+    /// event.
+    ///
+    /// Reads the packed [`AtomicNote`] with `Acquire` ordering, so the pitch and
+    /// gate always originate from the same note-on/off — never a new gate paired
+    /// with a stale pitch. Prefer this over reading `pitch`/`gate` separately on
+    /// the audio thread.
+    pub fn note_snapshot(&self) -> (f64, f64) {
+        self.note.snapshot()
+    }
+
     /// Get all held notes
     pub fn held_notes(&self) -> &[u8] {
         &self.held_notes
@@ -284,13 +378,15 @@ impl MidiState {
         self.aftertouch.set(0.0);
         self.sustain.set(0.0);
         self.expression.set(10.0);
+        self.note.publish(0.0, 0.0);
         self.held_notes.clear();
     }
 
     /// All notes off
     pub fn all_notes_off(&mut self) {
         self.held_notes.clear();
-        self.gate.set(0.0);
+        self.gate.store(0.0, Ordering::Release);
+        self.note.publish(self.pitch.get(), 0.0);
     }
 }
 
@@ -311,6 +407,7 @@ impl Clone for MidiState {
             aftertouch: Arc::new(AtomicF64::new(self.aftertouch.get())),
             sustain: Arc::new(AtomicF64::new(self.sustain.get())),
             expression: Arc::new(AtomicF64::new(self.expression.get())),
+            note: Arc::new((*self.note).clone()),
             held_notes: self.held_notes.clone(),
         }
     }
@@ -616,5 +713,69 @@ mod tests {
         // Note on with velocity 0 = note off
         midi.handle_message(&[0x90, 60, 0]);
         assert!(midi.gate.get().abs() < 0.001);
+    }
+
+    // ---- Q102: coherent, torn-free note publication ----
+    #[test]
+    fn test_atomic_note_pack_roundtrip() {
+        let note = AtomicNote::new(0.0, 0.0);
+
+        note.publish(0.75, 5.0);
+        let (p, g) = note.snapshot();
+        assert!((p - 0.75).abs() < 1e-6);
+        assert!((g - 5.0).abs() < 1e-6);
+
+        note.publish(-1.25, 0.0);
+        let (p, g) = note.snapshot();
+        assert!((p + 1.25).abs() < 1e-6);
+        assert_eq!(g, 0.0);
+
+        // Default and Clone preserve the packed pair.
+        assert_eq!(AtomicNote::default().snapshot(), (0.0, 0.0));
+        assert_eq!(note.clone().snapshot(), note.snapshot());
+    }
+
+    #[test]
+    fn test_midi_state_note_snapshot_coherent() {
+        let mut midi = MidiState::new();
+
+        // Note on: C5 (note 72) -> 1V, gate 5V, published together.
+        midi.handle_message(&[0x90, 72, 100]);
+        let (pitch, gate) = midi.note_snapshot();
+        assert!((pitch - 1.0).abs() < 1e-6);
+        assert!((gate - 5.0).abs() < 1e-6);
+
+        // Note off -> gate closes, pitch retained coherently.
+        midi.handle_message(&[0x80, 72, 0]);
+        let (_pitch, gate) = midi.note_snapshot();
+        assert!(gate.abs() < 1e-6);
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_atomic_note_no_tearing_across_threads() {
+        let note = Arc::new(AtomicNote::new(0.0, 0.0));
+        let writer_note = Arc::clone(&note);
+
+        // Writer alternates between two coherent (pitch, gate) states.
+        let writer = std::thread::spawn(move || {
+            for i in 0..200_000u32 {
+                if i % 2 == 0 {
+                    writer_note.publish(1.0, 5.0);
+                } else {
+                    writer_note.publish(0.0, 0.0);
+                }
+            }
+        });
+
+        // A single AtomicU64 can never expose a mixed pair.
+        for _ in 0..200_000 {
+            let (p, g) = note.snapshot();
+            let coherent = ((p - 1.0).abs() < 1e-6 && (g - 5.0).abs() < 1e-6)
+                || (p.abs() < 1e-6 && g.abs() < 1e-6);
+            assert!(coherent, "torn note snapshot observed: ({p}, {g})");
+        }
+
+        writer.join().unwrap();
     }
 }
