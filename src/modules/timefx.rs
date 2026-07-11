@@ -1,6 +1,6 @@
 //! Delay-based and time-domain effect modules.
 
-use super::common::read_interpolated;
+use super::common::{env_coef, read_interpolated};
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -69,6 +69,13 @@ pub struct DelayLine {
     buffer: Vec<f64>,
     write_pos: usize,
     sample_rate: f64,
+    /// Slew-smoothed read distance, tracking the delay setpoint gradually to
+    /// avoid zipper/pitch glitches when the `time` CV jumps.
+    smoothed_delay: f64,
+    /// One-pole retain coefficient for `smoothed_delay` (sample-rate aware).
+    delay_smooth_coef: f64,
+    /// Whether `smoothed_delay` has been snapped to its first setpoint yet.
+    delay_primed: bool,
     spec: PortSpec,
 }
 
@@ -76,12 +83,19 @@ impl DelayLine {
     /// Maximum delay time in seconds
     const MAX_DELAY_SECS: f64 = 2.0;
 
+    /// Time constant for delay-time smoothing (a few ms de-zippers modulation
+    /// without audibly lagging deliberate delay-time changes).
+    const DELAY_SMOOTH_SECS: f64 = 0.005;
+
     pub fn new(sample_rate: f64) -> Self {
         let buffer_size = (sample_rate * Self::MAX_DELAY_SECS) as usize + 1;
         Self {
             buffer: vec![0.0; buffer_size],
             write_pos: 0,
             sample_rate,
+            smoothed_delay: 0.0,
+            delay_smooth_coef: env_coef(Self::DELAY_SMOOTH_SECS, sample_rate),
+            delay_primed: false,
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -122,8 +136,20 @@ impl GraphModule for DelayLine {
         let min_delay_ms = 1.0;
         let max_delay_ms = Self::MAX_DELAY_SECS * 1000.0;
         let delay_ms = min_delay_ms * Libm::<f64>::pow(max_delay_ms / min_delay_ms, time_cv);
-        let delay_samples =
+        let target_delay =
             (delay_ms * self.sample_rate / 1000.0).clamp(1.0, (self.buffer.len() - 1) as f64);
+
+        // Slew-limit the read distance toward its setpoint with a one-pole
+        // smoother so a step in `time` glides instead of jumping (no clicks).
+        // Snap on the first tick so startup does not sweep up from zero.
+        if self.delay_primed {
+            self.smoothed_delay =
+                target_delay + (self.smoothed_delay - target_delay) * self.delay_smooth_coef;
+        } else {
+            self.smoothed_delay = target_delay;
+            self.delay_primed = true;
+        }
+        let delay_samples = self.smoothed_delay;
 
         // Read from delay line
         let delayed = read_interpolated(&self.buffer, self.write_pos, delay_samples);
@@ -142,6 +168,8 @@ impl GraphModule for DelayLine {
     fn reset(&mut self) {
         self.buffer.fill(0.0);
         self.write_pos = 0;
+        self.smoothed_delay = 0.0;
+        self.delay_primed = false;
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
@@ -149,6 +177,9 @@ impl GraphModule for DelayLine {
         let buffer_size = (sample_rate * Self::MAX_DELAY_SECS) as usize + 1;
         self.buffer = vec![0.0; buffer_size];
         self.write_pos = 0;
+        self.smoothed_delay = 0.0;
+        self.delay_smooth_coef = env_coef(Self::DELAY_SMOOTH_SECS, sample_rate);
+        self.delay_primed = false;
     }
 
     fn breaks_feedback_cycle(&self) -> bool {
@@ -180,6 +211,19 @@ impl Chorus {
     const MAX_MOD_DELAY_MS: f64 = 25.0;
     /// Base delay in milliseconds
     const BASE_DELAY_MS: f64 = 7.0;
+
+    /// Modulated delay (in samples) for one chorus voice.
+    ///
+    /// The LFO term is made **unipolar** (`sin*0.5 + 0.5`, range `0..=1`) so the
+    /// delay stays within `[base, base + mod_depth]` and is always positive.
+    /// A bipolar sweep (`base + sin*mod_depth`) goes negative whenever
+    /// `mod_depth > base` — which is true at the stock `depth_cv = 0.5`
+    /// (`base = 7 ms`, `mod_depth = 12.5 ms`), where it clamps the trough of the
+    /// sweep to 1 sample and one-sidedly distorts the chorus.
+    #[inline]
+    fn voice_delay_samples(base_delay_samples: f64, mod_depth_samples: f64, lfo_val: f64) -> f64 {
+        base_delay_samples + (lfo_val * 0.5 + 0.5) * mod_depth_samples
+    }
 
     pub fn new(sample_rate: f64) -> Self {
         let buffer_size =
@@ -250,8 +294,9 @@ impl GraphModule for Chorus {
         for i in 0..3 {
             // Calculate modulated delay for this voice
             let lfo_val = Libm::<f64>::sin(self.lfo_phases[i] * core::f64::consts::TAU);
-            let delay_samples = base_delay_samples + lfo_val * mod_depth_samples;
-            let delay_samples = delay_samples.clamp(1.0, (self.delay_buffers[i].len() - 1) as f64);
+            let delay_samples =
+                Self::voice_delay_samples(base_delay_samples, mod_depth_samples, lfo_val)
+                    .clamp(1.0, (self.delay_buffers[i].len() - 1) as f64);
 
             // Read from this voice's delay line
             let delayed = read_interpolated(&self.delay_buffers[i], self.write_pos, delay_samples);
@@ -426,7 +471,10 @@ impl GraphModule for Flanger {
 ///
 /// Classic phaser effect using cascaded all-pass filters.
 pub struct Phaser {
-    allpass_states: [f64; 6],
+    /// Previous input per allpass stage (`x[n-1]`).
+    allpass_x1: [f64; 6],
+    /// Previous output per allpass stage (`y[n-1]`).
+    allpass_y1: [f64; 6],
     lfo_phase: f64,
     sample_rate: f64,
     spec: PortSpec,
@@ -435,7 +483,8 @@ pub struct Phaser {
 impl Phaser {
     pub fn new(sample_rate: f64) -> Self {
         Self {
-            allpass_states: [0.0; 6],
+            allpass_x1: [0.0; 6],
+            allpass_y1: [0.0; 6],
             lfo_phase: 0.0,
             sample_rate,
             spec: PortSpec {
@@ -460,9 +509,18 @@ impl Phaser {
         }
     }
 
-    fn allpass(input: f64, state: &mut f64, coef: f64) -> f64 {
-        let output = *state + coef * (input - *state);
-        *state = input + coef * (output - input);
+    /// First-order allpass section with a truly flat magnitude response.
+    ///
+    /// Implements `H(z) = (coef + z^-1) / (1 + coef z^-1)`, i.e.
+    /// `y[n] = coef*x[n] + x[n-1] - coef*y[n-1]`. Unit magnitude holds at every
+    /// frequency (DC gain `+1`, Nyquist gain `-1`) for all `|coef| < 1`, so
+    /// cascading these produces the phase-only notches a phaser needs rather
+    /// than the moving-lowpass coloration of the previous (non-allpass)
+    /// topology.
+    fn allpass(input: f64, x1: &mut f64, y1: &mut f64, coef: f64) -> f64 {
+        let output = coef * input + *x1 - coef * *y1;
+        *x1 = input;
+        *y1 = output;
         output
     }
 }
@@ -509,17 +567,23 @@ impl GraphModule for Phaser {
         let tan_w = Libm::<f64>::tan(w * 0.5);
         let coef = (1.0 - tan_w) / (1.0 + tan_w);
 
-        let mut signal = input + self.allpass_states[num_stages - 1] * feedback;
+        let mut signal = input + self.allpass_y1[num_stages - 1] * feedback;
 
         for i in 0..num_stages {
-            signal = Self::allpass(signal, &mut self.allpass_states[i], coef);
+            signal = Self::allpass(
+                signal,
+                &mut self.allpass_x1[i],
+                &mut self.allpass_y1[i],
+                coef,
+            );
         }
 
         outputs.set(10, input * (1.0 - mix) + signal * mix);
     }
 
     fn reset(&mut self) {
-        self.allpass_states = [0.0; 6];
+        self.allpass_x1 = [0.0; 6];
+        self.allpass_y1 = [0.0; 6];
         self.lfo_phase = 0.0;
     }
 
@@ -693,16 +757,19 @@ impl GraphModule for Vibrato {
             self.lfo_phase -= 1.0;
         }
 
-        // Write to buffer
-        self.buffer[self.write_pos] = input;
-        self.write_pos = (self.write_pos + 1) % self.buffer.len();
-
         // Calculate modulated delay
         let delay_ms = base_delay_ms + lfo * mod_depth_ms;
         let delay_samples =
             (delay_ms * self.sample_rate / 1000.0).clamp(1.0, (self.buffer.len() - 1) as f64);
 
+        // Read before writing (matching DelayLine/Flanger/Chorus) so the
+        // minimum effective delay is `delay_samples`, not one sample shorter.
         let delayed = read_interpolated(&self.buffer, self.write_pos, delay_samples);
+
+        // Write to buffer and advance
+        self.buffer[self.write_pos] = input;
+        self.write_pos = (self.write_pos + 1) % self.buffer.len();
+
         outputs.set(10, input * (1.0 - mix) + delayed * mix);
     }
 
@@ -776,6 +843,8 @@ pub struct Reverb {
     // Current tunings (scaled for sample rate)
     comb_lengths: [usize; 8],
     allpass_lengths: [usize; 4],
+    /// Right-channel decorrelation offset, scaled with sample rate.
+    stereo_spread: usize,
 
     sample_rate: f64,
     spec: PortSpec,
@@ -802,6 +871,7 @@ impl Reverb {
 
             comb_lengths: [0; 8],
             allpass_lengths: [0; 4],
+            stereo_spread: STEREO_SPREAD,
 
             sample_rate,
             spec: PortSpec {
@@ -833,6 +903,11 @@ impl Reverb {
         for (i, &base) in ALLPASS_TUNINGS_44100.iter().enumerate() {
             self.allpass_lengths[i] = ((base as f64 * ratio) as usize).min(MAX_ALLPASS_SIZE - 1);
         }
+
+        // Scale the stereo decorrelation offset with sample rate too, so the
+        // right channel stays as decorrelated at 96 kHz as it is at 44.1 kHz
+        // (a raw 23-sample offset would shrink relative to the tunings).
+        self.stereo_spread = (Libm::<f64>::round(STEREO_SPREAD as f64 * ratio) as usize).max(1);
     }
 
     /// Process a single comb filter with damping
@@ -939,7 +1014,7 @@ impl GraphModule for Reverb {
             );
 
             // Right channel (with stereo spread offset for decorrelation)
-            let length_r = (self.comb_lengths[i] + STEREO_SPREAD).min(MAX_COMB_SIZE - 1);
+            let length_r = (self.comb_lengths[i] + self.stereo_spread).min(MAX_COMB_SIZE - 1);
             comb_out_r += Self::process_comb(
                 &mut self.comb_buffers_r[i],
                 &mut self.comb_pos_r[i],
@@ -968,7 +1043,7 @@ impl GraphModule for Reverb {
                 length_l,
             );
 
-            let length_r = (self.allpass_lengths[i] + STEREO_SPREAD).min(MAX_ALLPASS_SIZE - 1);
+            let length_r = (self.allpass_lengths[i] + self.stereo_spread).min(MAX_ALLPASS_SIZE - 1);
             allpass_out_r = Self::process_allpass(
                 &mut self.allpass_buffers_r[i],
                 &mut self.allpass_pos_r[i],
@@ -1496,6 +1571,188 @@ mod tests {
             assert!(
                 (reverb_48.comb_lengths[i] as i64 - expected as i64).abs() < 2,
                 "Comb filter {} should scale with sample rate",
+                i
+            );
+        }
+    }
+
+    /// Drive a sinusoid through a single allpass stage and return the
+    /// steady-state RMS gain (input RMS / output RMS).
+    #[cfg(test)]
+    fn allpass_rms_gain(coef: f64, freq_norm: f64) -> f64 {
+        let mut x1 = 0.0;
+        let mut y1 = 0.0;
+        let n = 40_000;
+        let warmup = 8_000;
+        let mut sum_in = 0.0;
+        let mut sum_out = 0.0;
+        for i in 0..n {
+            let x = Libm::<f64>::sin(TAU * freq_norm * i as f64);
+            let y = Phaser::allpass(x, &mut x1, &mut y1, coef);
+            if i >= warmup {
+                sum_in += x * x;
+                sum_out += y * y;
+            }
+        }
+        Libm::<f64>::sqrt(sum_out / sum_in)
+    }
+
+    #[test]
+    fn test_phaser_allpass_unit_magnitude() {
+        // Q020: a genuine first-order allpass must have unit magnitude at every
+        // frequency. Check near DC and near Nyquist for several coefficients.
+        // The previous (non-allpass) topology gave ~0.2 gain at Nyquist for
+        // coef = 0.5 — this test would have failed there.
+        for &coef in &[-0.6, -0.2, 0.2, 0.5, 0.8] {
+            let dc_gain = allpass_rms_gain(coef, 0.001);
+            let nyq_gain = allpass_rms_gain(coef, 0.499);
+            assert!(
+                (dc_gain - 1.0).abs() < 0.01,
+                "DC gain {} not ~1.0 for coef {}",
+                dc_gain,
+                coef
+            );
+            assert!(
+                (nyq_gain - 1.0).abs() < 0.01,
+                "Nyquist gain {} not ~1.0 for coef {}",
+                nyq_gain,
+                coef
+            );
+        }
+    }
+
+    #[test]
+    fn test_chorus_delay_stays_positive() {
+        // Q021: across the full LFO cycle at maximum depth the per-voice delay
+        // must stay strictly above the 1-sample clamp floor, so the sweep is
+        // never one-sidedly flattened.
+        let sample_rate = 44100.0;
+        let base = Chorus::BASE_DELAY_MS * sample_rate / 1000.0;
+        let mod_depth = Chorus::MAX_MOD_DELAY_MS * sample_rate / 1000.0;
+
+        let steps = 2000;
+        let mut min_delay = f64::INFINITY;
+        for k in 0..steps {
+            let lfo = Libm::<f64>::sin((k as f64 / steps as f64) * TAU);
+            let delay = Chorus::voice_delay_samples(base, mod_depth, lfo);
+            min_delay = min_delay.min(delay);
+        }
+        assert!(
+            min_delay > 1.0,
+            "minimum chorus delay {} hit the clamp floor",
+            min_delay
+        );
+        // The trough of a unipolar sweep sits exactly at the base delay.
+        let trough = Chorus::voice_delay_samples(base, mod_depth, -1.0);
+        assert!(
+            (trough - base).abs() < 1e-9,
+            "trough {} != base {}",
+            trough,
+            base
+        );
+    }
+
+    #[test]
+    fn test_delay_line_time_smoothing() {
+        // Q022: a step in the time CV must not move the read distance
+        // discontinuously; the one-pole smoother eases it over many samples.
+        let mut delay = DelayLine::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 0.0);
+        inputs.set(1, 0.0); // minimum delay time
+        inputs.set(2, 0.0);
+        inputs.set(3, 0.5);
+        delay.tick(&inputs, &mut outputs); // prime (snaps to min)
+        let start = delay.smoothed_delay;
+
+        // Step the time CV to maximum.
+        inputs.set(1, 1.0);
+        delay.tick(&inputs, &mut outputs);
+        let after_one = delay.smoothed_delay;
+
+        let full_jump = (delay.buffer.len() - 1) as f64 - start;
+        let moved = after_one - start;
+        assert!(moved > 0.0, "smoother did not move toward setpoint");
+        assert!(
+            moved < full_jump * 0.05,
+            "smoother jumped {} of a {}-sample step in one tick",
+            moved,
+            full_jump
+        );
+
+        // It should take many samples to traverse most of the step.
+        let mut ticks = 1;
+        while delay.smoothed_delay < start + full_jump * 0.9 && ticks < 100_000 {
+            delay.tick(&inputs, &mut outputs);
+            ticks += 1;
+        }
+        assert!(
+            ticks > 100,
+            "smoother converged too fast in {} ticks",
+            ticks
+        );
+    }
+
+    #[test]
+    fn test_vibrato_exact_delay() {
+        // Q023: with modulation depth 0 the delay is constant, so an impulse
+        // must emerge after exactly round(delay_ms * fs / 1000) samples. The
+        // pre-fix write-before-read order produced this one sample early.
+        let sample_rate = 44100.0;
+        let mut vib = Vibrato::new(sample_rate);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(1, 0.3); // rate (irrelevant at zero depth)
+        inputs.set(2, 0.0); // depth = 0 -> constant delay
+        inputs.set(3, 1.0); // 100% wet
+
+        let expected = (Vibrato::MAX_DELAY_MS * 0.5 * sample_rate / 1000.0).round() as usize;
+
+        inputs.set(0, 1.0); // impulse at tick 0
+        vib.tick(&inputs, &mut outputs);
+        let mut peak_idx = if outputs.get(10).unwrap().abs() > 0.5 {
+            Some(0usize)
+        } else {
+            None
+        };
+
+        inputs.set(0, 0.0);
+        for i in 1..(expected + 50) {
+            vib.tick(&inputs, &mut outputs);
+            if peak_idx.is_none() && outputs.get(10).unwrap().abs() > 0.5 {
+                peak_idx = Some(i);
+            }
+        }
+        assert_eq!(
+            peak_idx,
+            Some(expected),
+            "impulse emerged at {:?}, expected {}",
+            peak_idx,
+            expected
+        );
+    }
+
+    #[test]
+    fn test_reverb_stereo_spread_scales_with_sample_rate() {
+        // Q024: the right-channel decorrelation offset must scale with sample
+        // rate, not stay a fixed 23 samples.
+        let reverb_44 = Reverb::new(44100.0);
+        assert_eq!(reverb_44.stereo_spread, STEREO_SPREAD);
+
+        let reverb_88 = Reverb::new(88200.0);
+        // 88.2 kHz is exactly 2x -> spread ~46, not 23.
+        assert_eq!(reverb_88.stereo_spread, 46);
+
+        for i in 0..8 {
+            let length_l = reverb_88.comb_lengths[i];
+            let length_r = (length_l + reverb_88.stereo_spread).min(MAX_COMB_SIZE - 1);
+            assert_eq!(
+                length_r - length_l,
+                46,
+                "right comb {} should lead left by the scaled spread",
                 i
             );
         }
