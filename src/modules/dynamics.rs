@@ -1,6 +1,8 @@
 //! Envelope, amplifier, and dynamics modules.
 
-use super::common::{db_to_gain, env_coef, gain_to_db, GATE_HIGH_V, GATE_THRESHOLD_V};
+use super::common::{
+    db_to_gain, env_coef, flush_denorm, gain_to_db, GATE_HIGH_V, GATE_THRESHOLD_V,
+};
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use alloc::vec;
 use libm::Libm;
@@ -19,12 +21,40 @@ enum AdsrStage {
 ///
 /// A classic Attack-Decay-Sustain-Release envelope with gate and retrigger inputs.
 /// Outputs normal and inverted envelope signals, plus end-of-cycle trigger.
+///
+/// # Segment timing
+///
+/// The `decay` and `release` parameters denote the true duration of their
+/// respective segments (peak→sustain and current-level→zero), not the time to
+/// traverse the full 0..1 span. Per-sample rates are therefore scaled by the
+/// span actually traversed: `decay_rate = (1 - sustain) / (decay_time · fs)` and
+/// `release_rate = release_start_level / (release_time · fs)`, where
+/// `release_start_level` is captured at the instant the gate falls.
+///
+/// # Curve shape
+///
+/// The `shape` input selects the segment curve: `0V` (default) gives classic
+/// linear ramps; a high level (`> GATE_THRESHOLD_V`, e.g. `5V`) selects an
+/// exponential one-pole approach toward each stage's target (attack→1, decay→
+/// sustain, release→0) using [`env_coef`] with the stage time as the time
+/// constant.
+///
+/// # Retrigger semantics
+///
+/// A retrigger (or a fresh gate) restarts the contour at the **Attack** stage
+/// but **continues from the current level** — it does not reset the level to
+/// zero. Retriggering during Sustain therefore ramps back up from the sustain
+/// level rather than restarting from silence.
 pub struct Adsr {
     stage: AdsrStage,
     level: f64,
     sample_rate: f64,
     last_gate: f64,
     last_retrig: f64,
+    /// Level captured when the gate falls, used to scale the release rate so the
+    /// release duration equals the labeled release time regardless of the level
+    /// the envelope was at when the gate was released.
+    release_start_level: f64,
     spec: PortSpec,
 }
 
@@ -36,6 +66,7 @@ impl Adsr {
             sample_rate,
             last_gate: 0.0,
             last_retrig: 0.0,
+            release_start_level: 0.0,
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "gate", SignalKind::Gate),
@@ -52,6 +83,10 @@ impl Adsr {
                     PortDef::new(5, "release", SignalKind::CvUnipolar)
                         .with_default(0.4)
                         .with_attenuverter(),
+                    // Curve shape: 0V = linear (default), high = exponential.
+                    // Appended as a new port id (6) so existing port numbering
+                    // is preserved.
+                    PortDef::new(6, "shape", SignalKind::Gate).with_default(0.0),
                 ],
                 outputs: vec![
                     PortDef::new(10, "env", SignalKind::CvUnipolar),
@@ -86,23 +121,37 @@ impl GraphModule for Adsr {
         let decay_time = self.cv_to_time(inputs.get_or(3, 0.3));
         let sustain_level = inputs.get_or(4, 0.7).clamp(0.0, 1.0);
         let release_time = self.cv_to_time(inputs.get_or(5, 0.4));
+        let exp_mode = inputs.get_or(6, 0.0) > GATE_THRESHOLD_V;
 
         let gate_high = gate > GATE_THRESHOLD_V;
         let gate_rising = gate_high && self.last_gate <= GATE_THRESHOLD_V;
         let gate_falling = !gate_high && self.last_gate > GATE_THRESHOLD_V;
         let retrig_rising = retrig > GATE_THRESHOLD_V && self.last_retrig <= GATE_THRESHOLD_V;
 
-        // State transitions
+        // State transitions. A retrigger/gate continues from the current level
+        // (see the struct docs); it never resets `level` to zero.
         if gate_rising || (retrig_rising && gate_high) {
             self.stage = AdsrStage::Attack;
         } else if gate_falling && self.stage != AdsrStage::Idle {
+            // Capture the level at gate-fall so the release rate can be scaled to
+            // make the actual release duration equal the labeled release time.
+            self.release_start_level = self.level;
             self.stage = AdsrStage::Release;
         }
 
-        // Calculate rates
+        // Linear per-sample rates, scaled by the span each segment traverses so
+        // the labeled decay/release times equal the real segment durations.
         let attack_rate = 1.0 / (attack_time * self.sample_rate);
-        let decay_rate = 1.0 / (decay_time * self.sample_rate);
-        let release_rate = 1.0 / (release_time * self.sample_rate);
+        let decay_rate = (1.0 - sustain_level) / (decay_time * self.sample_rate);
+        let release_rate = self.release_start_level / (release_time * self.sample_rate);
+
+        // Exponential one-pole coefficients (each stage time is a time constant).
+        let attack_coef = env_coef(attack_time, self.sample_rate);
+        let decay_coef = env_coef(decay_time, self.sample_rate);
+        let release_coef = env_coef(release_time, self.sample_rate);
+
+        // Distance from a one-pole target at which a segment is considered done.
+        const EXP_DONE: f64 = 1e-3;
 
         // Process current stage
         let mut eoc = 0.0;
@@ -111,28 +160,53 @@ impl GraphModule for Adsr {
                 self.level = 0.0;
             }
             AdsrStage::Attack => {
-                self.level += attack_rate;
-                if self.level >= 1.0 {
-                    self.level = 1.0;
-                    self.stage = AdsrStage::Decay;
+                if exp_mode {
+                    self.level += (1.0 - self.level) * (1.0 - attack_coef);
+                    if self.level >= 1.0 - EXP_DONE {
+                        self.level = 1.0;
+                        self.stage = AdsrStage::Decay;
+                    }
+                } else {
+                    self.level += attack_rate;
+                    if self.level >= 1.0 {
+                        self.level = 1.0;
+                        self.stage = AdsrStage::Decay;
+                    }
                 }
             }
             AdsrStage::Decay => {
-                self.level -= decay_rate;
-                if self.level <= sustain_level {
-                    self.level = sustain_level;
-                    self.stage = AdsrStage::Sustain;
+                if exp_mode {
+                    self.level += (sustain_level - self.level) * (1.0 - decay_coef);
+                    if self.level - sustain_level <= EXP_DONE {
+                        self.level = sustain_level;
+                        self.stage = AdsrStage::Sustain;
+                    }
+                } else {
+                    self.level -= decay_rate;
+                    if self.level <= sustain_level {
+                        self.level = sustain_level;
+                        self.stage = AdsrStage::Sustain;
+                    }
                 }
             }
             AdsrStage::Sustain => {
                 self.level = sustain_level;
             }
             AdsrStage::Release => {
-                self.level -= release_rate;
-                if self.level <= 0.0 {
-                    self.level = 0.0;
-                    self.stage = AdsrStage::Idle;
-                    eoc = GATE_HIGH_V; // End-of-cycle trigger
+                if exp_mode {
+                    self.level += (0.0 - self.level) * (1.0 - release_coef);
+                    if self.level <= EXP_DONE {
+                        self.level = 0.0;
+                        self.stage = AdsrStage::Idle;
+                        eoc = GATE_HIGH_V; // End-of-cycle trigger
+                    }
+                } else {
+                    self.level -= release_rate;
+                    if self.level <= 0.0 {
+                        self.level = 0.0;
+                        self.stage = AdsrStage::Idle;
+                        eoc = GATE_HIGH_V; // End-of-cycle trigger
+                    }
                 }
             }
         }
@@ -151,6 +225,7 @@ impl GraphModule for Adsr {
         self.level = 0.0;
         self.last_gate = 0.0;
         self.last_retrig = 0.0;
+        self.release_start_level = 0.0;
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
@@ -164,7 +239,27 @@ impl GraphModule for Adsr {
 
 /// Voltage-Controlled Amplifier (VCA)
 ///
-/// A simple amplifier with CV control. Useful for amplitude modulation.
+/// An amplifier with CV control, useful for amplitude modulation.
+///
+/// # Control voltage
+///
+/// `cv` in `[0, 10]V` maps to a base control amount in `[0, 1]` (values outside
+/// the range are clamped). With the default `cv` of `10V` the base amount is
+/// unity.
+///
+/// # Response curve
+///
+/// The `response` input selects how the control amount maps to gain: `0V`
+/// (default) is linear (`gain = cv/10`); a high level (`> GATE_THRESHOLD_V`,
+/// e.g. `5V`) selects an exponential (square-law) taper `gain = (cv/10)²`. The
+/// exponential curve is monotonic with matched endpoints (`0→0`, `1→1`) and a
+/// documented midpoint of `0.25` at `cv = 5V`.
+///
+/// # Boost
+///
+/// The `gain` input is a post-response scale in `[0, 2]` (default `1.0`),
+/// allowing up to `+6 dB` of boost/overdrive headroom. With all inputs at their
+/// defaults the VCA is bit-for-bit identical to a plain `out = in · cv/10`.
 pub struct Vca {
     spec: PortSpec,
 }
@@ -178,6 +273,10 @@ impl Vca {
                     PortDef::new(1, "cv", SignalKind::CvUnipolar)
                         .with_default(10.0)
                         .with_attenuverter(),
+                    // Response curve: 0V = linear (default), high = exponential.
+                    PortDef::new(2, "response", SignalKind::Gate).with_default(0.0),
+                    // Post-response gain scale in [0, 2] for boost headroom.
+                    PortDef::new(3, "gain", SignalKind::CvUnipolar).with_default(1.0),
                 ],
                 outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
             },
@@ -199,7 +298,15 @@ impl GraphModule for Vca {
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
         let input = inputs.get_or(0, 0.0);
         let cv = inputs.get_or(1, 10.0).clamp(0.0, 10.0) / 10.0;
-        outputs.set(10, input * cv);
+        let exp_response = inputs.get_or(2, 0.0) > GATE_THRESHOLD_V;
+        let gain_scale = inputs.get_or(3, 1.0).clamp(0.0, 2.0);
+
+        // Exponential (square-law) taper: monotonic, endpoints 0->0 and 1->1,
+        // midpoint 0.25 at cv=5V. Linear is the default and preserves the
+        // original `out = in * cv/10` behavior bit-for-bit.
+        let base_gain = if exp_response { cv * cv } else { cv };
+
+        outputs.set(10, input * base_gain * gain_scale);
     }
 
     fn reset(&mut self) {}
@@ -273,11 +380,17 @@ impl GraphModule for Limiter {
         } else {
             self.envelope = release_coef * self.envelope + (1.0 - release_coef) * abs_input;
         }
+        // Q017: flush the detector one-pole so it settles to exactly 0 at
+        // silence instead of leaving a denormal tail.
+        self.envelope = flush_denorm(self.envelope);
 
         let gain = if self.envelope > threshold {
             if soft_mode {
-                let over = self.envelope / threshold;
-                threshold / self.envelope * Libm::<f64>::tanh(over - 1.0) + 1.0 / over
+                // Renormalized soft knee: the target output level is
+                // `threshold * tanh(env / threshold)`, which asymptotes to
+                // `threshold` from below (never the old 2*threshold overshoot).
+                // Dividing by the envelope turns that target into a gain.
+                threshold * Libm::<f64>::tanh(self.envelope / threshold) / self.envelope
             } else {
                 threshold / self.envelope
             }
@@ -285,7 +398,10 @@ impl GraphModule for Limiter {
             1.0
         };
 
-        outputs.set(10, input * gain);
+        // Final hard clamp at +/-threshold so the "brick-wall" guarantee is
+        // literally enforced regardless of the knee shape.
+        let out = (input * gain).clamp(-threshold, threshold);
+        outputs.set(10, out);
         outputs.set(11, (1.0 - gain) * 10.0);
     }
 
@@ -305,19 +421,44 @@ impl GraphModule for Limiter {
 /// Noise Gate
 ///
 /// A dynamics processor that attenuates signals below a threshold.
+///
+/// # Gate ballistics
+///
+/// The open/close decision uses hysteresis (a close threshold at `0.7×` the
+/// open threshold) plus a **hold time** ([`NoiseGate::HOLD_MS`], default 10 ms):
+/// the gate stays open for the hold time after the last supra-threshold sample,
+/// so a signal dithering around the threshold does not chatter. The gate's
+/// anti-click fade uses an **independent** fade time ([`NoiseGate::FADE_MS`],
+/// default 5 ms) rather than the level-detector's attack/release coefficients,
+/// so the fade rate does not change with the detector ballistics. The fade
+/// state is flushed to zero (Q017) so it settles to exactly 0 rather than
+/// lingering in the denormal range.
 pub struct NoiseGate {
     sample_rate: f64,
     envelope: f64,
     gate_state: f64,
+    /// Latched open/closed decision (drives hysteresis in the threshold band).
+    gate_open: bool,
+    /// Samples remaining in the hold window after the last supra-threshold
+    /// sample; while non-zero the gate is kept open.
+    hold_counter: u32,
     spec: PortSpec,
 }
 
 impl NoiseGate {
+    /// Anti-click gate fade time (ms), independent of the detector ballistics.
+    const FADE_MS: f64 = 5.0;
+    /// Hold time (ms): the gate stays open this long after the last
+    /// supra-threshold sample to prevent chatter near the threshold.
+    const HOLD_MS: f64 = 10.0;
+
     pub fn new(sample_rate: f64) -> Self {
         Self {
             sample_rate,
             envelope: 0.0,
             gate_state: 0.0,
+            gate_open: false,
+            hold_counter: 0,
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -372,15 +513,33 @@ impl GraphModule for NoiseGate {
         } else {
             self.envelope = release_coef * self.envelope + (1.0 - release_coef) * abs_input;
         }
+        // Q017: flush the detector so it reaches exactly 0 at silence.
+        self.envelope = flush_denorm(self.envelope);
 
         let open_threshold = threshold;
         let close_threshold = threshold * 0.7;
 
+        // Hysteresis + hold: opening (re)arms the hold window; the gate only
+        // closes once the hold has expired AND the envelope has fallen back
+        // below the (lower) close threshold. In the band between the two
+        // thresholds the previous decision latches.
+        let hold_samples = (Self::HOLD_MS * self.sample_rate / 1000.0) as u32;
         if self.envelope > open_threshold {
-            self.gate_state = attack_coef * self.gate_state + (1.0 - attack_coef) * 1.0;
+            self.gate_open = true;
+            self.hold_counter = hold_samples;
+        } else if self.hold_counter > 0 {
+            self.hold_counter -= 1;
         } else if self.envelope < close_threshold {
-            self.gate_state *= release_coef;
+            self.gate_open = false;
         }
+
+        // Independent anti-click fade toward the target, unrelated to the
+        // detector's attack/release coefficients (Q016).
+        let fade_coef = env_coef(Self::FADE_MS / 1000.0, self.sample_rate);
+        let target = if self.gate_open { 1.0 } else { 0.0 };
+        self.gate_state = fade_coef * self.gate_state + (1.0 - fade_coef) * target;
+        // Q016/Q017: flush the fade state so a closed gate reaches exactly 0.
+        self.gate_state = flush_denorm(self.gate_state);
 
         let gain = (1.0 - range) + range * self.gate_state;
         outputs.set(10, input * gain);
@@ -397,6 +556,8 @@ impl GraphModule for NoiseGate {
     fn reset(&mut self) {
         self.envelope = 0.0;
         self.gate_state = 0.0;
+        self.gate_open = false;
+        self.hold_counter = 0;
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
@@ -486,6 +647,8 @@ impl GraphModule for Compressor {
         } else {
             self.envelope = release_coef * self.envelope + (1.0 - release_coef) * abs_sidechain;
         }
+        // Q017: flush the detector so it settles to exactly 0 at silence.
+        self.envelope = flush_denorm(self.envelope);
 
         let gain = if self.envelope > threshold && threshold > 0.0 {
             let over_db = gain_to_db(self.envelope / threshold);
@@ -577,6 +740,8 @@ impl GraphModule for EnvelopeFollower {
         } else {
             self.envelope = release_coef * self.envelope + (1.0 - release_coef) * abs_input;
         }
+        // Q017: flush the detector so it settles to exactly 0 at silence.
+        self.envelope = flush_denorm(self.envelope);
 
         let out = (self.envelope * gain).clamp(0.0, 10.0);
         outputs.set(10, out);
@@ -866,5 +1031,427 @@ mod tests {
             "Saturator failed to limit input, got {}",
             out
         );
+    }
+
+    // ---- Q014: Limiter is a true brick-wall in soft (default) mode ----
+
+    #[test]
+    fn test_limiter_brickwall_never_exceeds_threshold() {
+        let fs = 44100.0;
+        for &thr_cv in &[0.2_f64, 0.5, 0.8, 1.0] {
+            let mut lim = Limiter::new(fs);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            inputs.set(1, thr_cv); // soft mode is on by default (port 3 default 5V)
+            let threshold = thr_cv.clamp(0.01, 1.0) * 5.0;
+            let mut max_out = 0.0f64;
+            for i in 0..4000 {
+                // Sweep amplitude up to +/-25V, far past any threshold.
+                let x = 25.0 * (i as f64 * 0.05).sin();
+                inputs.set(0, x);
+                lim.tick(&inputs, &mut outputs);
+                max_out = max_out.max(outputs.get(10).unwrap().abs());
+            }
+            assert!(
+                max_out <= threshold + 1e-9,
+                "soft limiter exceeded threshold {}: peak {}",
+                threshold,
+                max_out
+            );
+        }
+    }
+
+    #[test]
+    fn test_limiter_passes_gentle_signals() {
+        let mut lim = Limiter::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 0.8); // threshold 4V
+        for i in 0..1000 {
+            let x = (i as f64 * 0.05).sin(); // +/-1V, well below threshold
+            inputs.set(0, x);
+            lim.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            assert!(
+                (out - x).abs() < 1e-9,
+                "gentle signal altered: in={} out={}",
+                x,
+                out
+            );
+        }
+    }
+
+    // ---- Q015: ADSR decay/release times equal actual segment durations ----
+
+    #[test]
+    fn test_adsr_decay_release_durations() {
+        let fs = 1000.0;
+        let mut adsr = Adsr::new(fs);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(2, 0.0); // attack 1ms (rate 1.0 -> completes in 1 sample)
+        inputs.set(3, 0.5); // decay cv 0.5 -> 0.1s -> 100 samples
+        inputs.set(4, 0.5); // sustain 0.5
+        inputs.set(5, 0.5); // release cv 0.5 -> 0.1s -> 100 samples
+        inputs.set(0, 5.0); // gate on
+
+        // Advance to the decay stage.
+        loop {
+            adsr.tick(&inputs, &mut outputs);
+            if adsr.stage == AdsrStage::Decay {
+                break;
+            }
+        }
+        // Count decay samples until sustain is reached.
+        let mut decay_samples = 0u32;
+        while adsr.stage == AdsrStage::Decay {
+            adsr.tick(&inputs, &mut outputs);
+            decay_samples += 1;
+        }
+        assert!(
+            (decay_samples as f64 - 100.0).abs() <= 5.0,
+            "decay lasted {} samples, expected ~100",
+            decay_samples
+        );
+
+        // Drop the gate and count release samples until idle.
+        inputs.set(0, 0.0);
+        let mut release_samples = 0u32;
+        loop {
+            adsr.tick(&inputs, &mut outputs);
+            match adsr.stage {
+                AdsrStage::Release => release_samples += 1,
+                AdsrStage::Idle => {
+                    release_samples += 1;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            (release_samples as f64 - 100.0).abs() <= 5.0,
+            "release lasted {} samples, expected ~100",
+            release_samples
+        );
+    }
+
+    // ---- Q016: NoiseGate hold + independent fade prevent chatter ----
+
+    #[test]
+    fn test_noise_gate_no_chatter_near_threshold() {
+        let fs = 44100.0;
+        let mut gate = NoiseGate::new(fs);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 0.2); // open threshold 1.0V, close 0.7V
+        let mut transitions = 0;
+        let mut last_hi = false;
+        for i in 0..(fs as usize) {
+            // Dither straddling the open threshold; troughs stay above close.
+            let amp = if i % 2 == 0 { 1.3 } else { 0.9 };
+            inputs.set(0, amp);
+            gate.tick(&inputs, &mut outputs);
+            let hi = outputs.get(11).unwrap() > GATE_THRESHOLD_V;
+            if hi != last_hi {
+                transitions += 1;
+                last_hi = hi;
+            }
+        }
+        assert!(
+            transitions <= 2,
+            "gate chattered near threshold: {} transitions",
+            transitions
+        );
+    }
+
+    #[test]
+    fn test_noise_gate_fade_rate_independent_of_detector() {
+        // Count the gate-open fade (0 -> one time constant) from the moment the
+        // gate opens, for a fast and a slow detector attack. The fade must take
+        // the same time because it uses an independent fade coefficient.
+        fn measure_open_fade(attack_cv: f64) -> usize {
+            let fs = 44100.0;
+            let mut gate = NoiseGate::new(fs);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            inputs.set(1, 0.2); // open threshold 1.0V
+            inputs.set(2, attack_cv); // detector attack
+            inputs.set(0, 5.0); // strong constant signal
+            let mut started = false;
+            let mut count = 0usize;
+            for _ in 0..200_000 {
+                gate.tick(&inputs, &mut outputs);
+                if started {
+                    count += 1;
+                    if gate.gate_state >= 0.632 {
+                        return count;
+                    }
+                } else if gate.gate_state > 0.0 {
+                    started = true;
+                    count = 1;
+                    if gate.gate_state >= 0.632 {
+                        return count;
+                    }
+                }
+            }
+            count
+        }
+        let fast = measure_open_fade(0.0); // detector attack ~0.1ms
+        let slow = measure_open_fade(1.0); // detector attack 50ms
+        assert!(
+            (fast as i64 - slow as i64).abs() <= 2,
+            "fade rate varied with detector attack: fast={} slow={}",
+            fast,
+            slow
+        );
+        // The fade time constant tracks FADE_MS (5ms -> ~220 samples at 44.1k).
+        let expected = (NoiseGate::FADE_MS * 44100.0 / 1000.0) as i64;
+        assert!(
+            (fast as i64 - expected).abs() <= 3,
+            "fade tc {} samples != expected {}",
+            fast,
+            expected
+        );
+    }
+
+    // ---- Q017: detector one-poles flush to exactly 0 at silence ----
+
+    #[test]
+    fn test_dynamics_detectors_flush_to_zero() {
+        let fs = 44100.0;
+        const BUDGET: usize = 500_000;
+
+        // EnvelopeFollower (release on port 2).
+        {
+            let mut m = EnvelopeFollower::new(fs);
+            let mut i = PortValues::new();
+            let mut o = PortValues::new();
+            i.set(2, 0.0); // fast release
+            i.set(0, 5.0);
+            for _ in 0..2000 {
+                m.tick(&i, &mut o);
+            }
+            i.set(0, 0.0);
+            let mut n = 0;
+            while m.envelope != 0.0 && n < BUDGET {
+                m.tick(&i, &mut o);
+                n += 1;
+            }
+            assert!(
+                m.envelope == 0.0,
+                "EnvelopeFollower left tail {}",
+                m.envelope
+            );
+        }
+
+        // Limiter (release on port 2).
+        {
+            let mut m = Limiter::new(fs);
+            let mut i = PortValues::new();
+            let mut o = PortValues::new();
+            i.set(2, 0.0);
+            i.set(0, 5.0);
+            for _ in 0..2000 {
+                m.tick(&i, &mut o);
+            }
+            i.set(0, 0.0);
+            let mut n = 0;
+            while m.envelope != 0.0 && n < BUDGET {
+                m.tick(&i, &mut o);
+                n += 1;
+            }
+            assert!(m.envelope == 0.0, "Limiter left tail {}", m.envelope);
+        }
+
+        // Compressor (release on port 4). Sidechain defaults to the silent in.
+        {
+            let mut m = Compressor::new(fs);
+            let mut i = PortValues::new();
+            let mut o = PortValues::new();
+            i.set(4, 0.0);
+            i.set(0, 5.0);
+            for _ in 0..2000 {
+                m.tick(&i, &mut o);
+            }
+            i.set(0, 0.0);
+            let mut n = 0;
+            while m.envelope != 0.0 && n < BUDGET {
+                m.tick(&i, &mut o);
+                n += 1;
+            }
+            assert!(m.envelope == 0.0, "Compressor left tail {}", m.envelope);
+        }
+
+        // NoiseGate: both the detector envelope and the gate fade must flush.
+        {
+            let mut m = NoiseGate::new(fs);
+            let mut i = PortValues::new();
+            let mut o = PortValues::new();
+            i.set(3, 0.0); // fast release
+            i.set(0, 5.0);
+            for _ in 0..2000 {
+                m.tick(&i, &mut o);
+            }
+            i.set(0, 0.0);
+            let mut n = 0;
+            while (m.envelope != 0.0 || m.gate_state != 0.0) && n < BUDGET {
+                m.tick(&i, &mut o);
+                n += 1;
+            }
+            assert!(
+                m.envelope == 0.0 && m.gate_state == 0.0,
+                "NoiseGate left tail: env {} gate {}",
+                m.envelope,
+                m.gate_state
+            );
+        }
+    }
+
+    // ---- Q018: ADSR exponential mode + linear stays unchanged ----
+
+    #[test]
+    fn test_adsr_exp_mode_reaches_sustain() {
+        let fs = 1000.0;
+        let mut adsr = Adsr::new(fs);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(2, 0.3); // attack ~15.8ms
+        inputs.set(3, 0.5); // decay 0.1s
+        inputs.set(4, 0.6); // sustain 0.6
+        inputs.set(5, 0.5); // release 0.1s
+        inputs.set(6, 5.0); // shape = exponential
+        inputs.set(0, 5.0); // gate on
+
+        let mut reached = None;
+        for i in 0..5000 {
+            adsr.tick(&inputs, &mut outputs);
+            if adsr.stage == AdsrStage::Sustain {
+                reached = Some(i);
+                break;
+            }
+        }
+        let reached = reached.expect("exponential envelope should reach sustain");
+        assert!(
+            (adsr.level - 0.6).abs() < 1e-6,
+            "exp sustain level {} != 0.6",
+            adsr.level
+        );
+        // Attack + decay complete within a handful of time constants.
+        assert!(
+            reached < 2000,
+            "exp env took {} samples to reach sustain",
+            reached
+        );
+    }
+
+    #[test]
+    fn test_adsr_linear_mode_is_linear() {
+        let fs = 1000.0;
+        let mut adsr = Adsr::new(fs);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(2, 0.5); // attack 0.1s -> linear rate 0.01/sample
+        inputs.set(0, 5.0); // gate on
+                            // shape defaults to 0 (linear) -- do not touch port 6.
+        let mut levels = [0.0f64; 10];
+        for l in levels.iter_mut() {
+            adsr.tick(&inputs, &mut outputs);
+            *l = adsr.level;
+        }
+        for (i, &lvl) in levels.iter().enumerate() {
+            let expected = 0.01 * (i as f64 + 1.0);
+            assert!(
+                (lvl - expected).abs() < 1e-9,
+                "linear attack sample {} = {}, expected {}",
+                i,
+                lvl,
+                expected
+            );
+        }
+    }
+
+    // ---- Q019: VCA response curve, boost, and default parity ----
+
+    #[test]
+    fn test_vca_default_golden() {
+        let mut vca = Vca::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        // (input, cv, expected) at default response (linear) and gain scale 1.0.
+        let cases = [
+            (1.0_f64, 10.0_f64, 1.0_f64),
+            (2.0, 5.0, 1.0),
+            (-4.0, 2.0, -0.8),
+            (3.0, 7.0, 2.1),
+            (5.0, 0.0, 0.0),
+            (0.5, 10.0, 0.5),
+        ];
+        for (inp, cv, expected) in cases {
+            inputs.set(0, inp);
+            inputs.set(1, cv);
+            vca.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            assert!(
+                (out - expected).abs() < 1e-12,
+                "in={} cv={} => {} (want {})",
+                inp,
+                cv,
+                out,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_vca_exponential_response() {
+        let mut vca = Vca::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(2, 5.0); // exponential response
+        inputs.set(0, 1.0); // unit input -> out == gain
+
+        // Documented midpoint: cv=5V -> gain 0.25.
+        inputs.set(1, 5.0);
+        vca.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 0.25).abs() < 1e-9);
+
+        // Monotonic across the cv range.
+        let mut prev = -1.0;
+        for k in 0..=20 {
+            let cv = k as f64 * 0.5;
+            inputs.set(1, cv);
+            vca.tick(&inputs, &mut outputs);
+            let g = outputs.get(10).unwrap();
+            assert!(g >= prev - 1e-12, "not monotonic at cv={}", cv);
+            prev = g;
+        }
+
+        // Matched endpoints: cv=10V -> 1.0, cv=0V -> 0.0.
+        inputs.set(1, 10.0);
+        vca.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 1.0).abs() < 1e-9);
+        inputs.set(1, 0.0);
+        vca.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap().abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_vca_boost() {
+        let mut vca = Vca::new();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 1.0);
+        inputs.set(1, 10.0); // linear gain 1.0
+        inputs.set(3, 2.0); // 2x boost
+        vca.tick(&inputs, &mut outputs);
+        assert!(
+            (outputs.get(10).unwrap() - 2.0).abs() < 1e-9,
+            "boost failed: {}",
+            outputs.get(10).unwrap()
+        );
+        // Gain scale is clamped to <= 2.0.
+        inputs.set(3, 5.0);
+        vca.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - 2.0).abs() < 1e-9);
     }
 }
