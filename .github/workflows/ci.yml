@@ -122,8 +122,26 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run benchmarks
-        run: cargo bench --no-run && cargo bench -- --test
+      # Compile the benches both ways so the scalar and SIMD (wide-backed) code
+      # paths are guaranteed to build.
+      - name: Compile benchmarks (scalar + SIMD)
+        run: |
+          cargo bench --no-run
+          cargo bench --no-run --features simd
+      # Actually gate the real-time deadline (Q114). Must run in release: the
+      # test's wall-clock assertion is only active in optimized builds.
+      - name: Real-time compliance gate (release)
+        run: cargo test --release --test realtime_compliance -- --nocapture
+      # Produce criterion measurement data with short warm-up/measurement times
+      # so the run stays bounded, then persist it as a downloadable baseline.
+      - name: Run benchmarks (generate criterion baselines)
+        run: cargo bench -- --warm-up-time 1 --measurement-time 3
+      - name: Upload criterion baselines
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-baselines
+          path: target/criterion
+          if-no-files-found: warn
 
   # Coverage - expensive, main only
   coverage:

@@ -1,7 +1,7 @@
 # Quiver Makefile
 # Common development commands
 
-.PHONY: all build test check fmt lint lint-fix clippy doc bench coverage clean setup help
+.PHONY: all build test check fmt lint lint-fix clippy doc bench bench-simd bench-rt coverage clean setup help
 .PHONY: install-hooks changelog examples wasm wasm-dev wasm-check ts-check
 .PHONY: test-browser browser-synth
 
@@ -67,9 +67,26 @@ doc-book:
 doc-serve:
 	mdbook serve docs/
 
-# Run benchmarks
+# Run benchmarks (scalar build, then SIMD build) so both code paths are
+# exercised. For a direct scalar-vs-SIMD comparison of the block ops, use
+# `make bench-simd` (it saves and compares criterion baselines).
 bench:
 	cargo bench
+	cargo bench --features simd
+
+# Scalar-vs-SIMD A/B for the block operations (Q116). Saves the scalar build as
+# the `scalar` baseline, then re-runs the SAME bench names against the SIMD
+# build so criterion prints the per-op delta. Scoped to the `simd` bench group
+# so it stays fast.
+bench-simd:
+	cargo bench -- simd --save-baseline scalar
+	cargo bench --features simd -- simd --baseline scalar
+
+# Real-time compliance gate: measure the worst-case chain and populated
+# polyphony against the real-time budget. MUST run in release — debug builds
+# skip the wall-clock assertion (see tests/realtime_compliance.rs).
+bench-rt:
+	cargo test --release --test realtime_compliance -- --nocapture
 
 # Run benchmark tests only (no actual benchmarking)
 bench-test:
@@ -141,7 +158,15 @@ watch:
 watch-check:
 	cargo watch -x "check --all-features"
 
-# Build WASM package (release)
+# Build WASM package (release).
+#
+# The `release` profile is now speed-optimized (opt-level = 3) and `.cargo/
+# config.toml` enables `+simd128`, so this ships fast, SIMD-capable wasm — the
+# right default for real-time DSP. This produces a LARGER `.wasm` than the old
+# size-optimized default. If you need the smallest binary instead, build the
+# library with the size profile: `cargo build --profile wasm-size
+# --no-default-features --features wasm --target wasm32-unknown-unknown`
+# (wasm-pack always uses the `release` profile).
 wasm:
 	wasm-pack build --target web --no-default-features --features wasm
 	cp pkg/quiver.js pkg/quiver.d.ts pkg/quiver_bg.wasm pkg/quiver_bg.wasm.d.ts packages/@quiver/wasm/
@@ -200,7 +225,9 @@ help:
 	@echo "  make test-doc     - Run documentation tests"
 	@echo "  make coverage     - Run tests with coverage (80% line threshold)"
 	@echo "  make coverage-html- Generate HTML coverage report"
-	@echo "  make bench        - Run benchmarks"
+	@echo "  make bench        - Run benchmarks (scalar + SIMD builds)"
+	@echo "  make bench-simd   - Scalar-vs-SIMD A/B (criterion baselines)"
+	@echo "  make bench-rt     - Real-time compliance gate (release)"
 	@echo ""
 	@echo "Code Quality:"
 	@echo "  make check        - Run all checks (fmt, lint, test)"

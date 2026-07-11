@@ -58,7 +58,22 @@ wasm = [
 name = "simple_patch"
 path = "examples/simple_patch.rs"
 
-# Optimize for WASM size in release builds
+# Speed-optimized release profile (Q117/Q118).
+#
+# `opt-level = 3` optimizes for execution speed — the right default for a
+# real-time DSP library. This is the profile the benchmarks and the
+# `realtime_compliance` test measure, so the numbers reflect what a real host
+# actually ships. Trade-off: larger binaries (including a larger `.wasm`) than
+# `opt-level = "z"`. If you specifically need the smallest binary (e.g.
+# bandwidth-constrained WASM delivery), build with the size-optimized profile
+# below (`cargo build --profile wasm-size`).
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
+
+# Size-optimized variant of `release` for callers who need the smallest binary
+# rather than the fastest one. Inherits everything from `release` and only
+# overrides the optimization level.
+[profile.wasm-size]
+inherits = "release"
+opt-level = "z"
