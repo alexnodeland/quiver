@@ -383,15 +383,35 @@ impl BlockPortValues {
 
     pub fn frame(&self, index: usize) -> PortValues {
         let mut values = PortValues::new();
-        for (&port, buffer) in &self.buffers {
-            if index < buffer.len() {
-                values.set(port, buffer[index]);
-            }
-        }
+        self.frame_into(index, &mut values);
         values
     }
 
+    /// Read frame `index` into an existing [`PortValues`], reusing its allocation.
+    ///
+    /// Clears `dst` and refills it from each port buffer at `index`. Unlike [`frame`], this
+    /// performs no allocation once `dst` has been warmed with the same key set, which lets
+    /// block loops (e.g. the default [`GraphModule::process_block`]) avoid a fresh
+    /// [`PortValues`] per frame.
+    pub fn frame_into(&self, index: usize, dst: &mut PortValues) {
+        dst.clear();
+        for (&port, buffer) in &self.buffers {
+            if index < buffer.len() {
+                dst.set(port, buffer[index]);
+            }
+        }
+    }
+
     pub fn set_frame(&mut self, index: usize, values: PortValues) {
+        self.set_frame_ref(index, &values);
+    }
+
+    /// Write a borrowed [`PortValues`] into frame `index`, without taking ownership.
+    ///
+    /// The by-reference companion to [`set_frame`], so a caller can reuse a single output
+    /// [`PortValues`] across every frame of a block instead of moving (and reallocating) one
+    /// per frame.
+    pub fn set_frame_ref(&mut self, index: usize, values: &PortValues) {
         for (&port, &value) in &values.values {
             let buffer = self.get_buffer_mut(port);
             if index < buffer.len() {
@@ -523,18 +543,28 @@ pub trait GraphModule: Send + Sync {
     /// Process one sample given port values
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues);
 
-    /// Process a block of samples (optional optimization)
+    /// Process a block of samples (optional optimization).
+    ///
+    /// The default drives [`tick`](Self::tick) frame-by-frame. It reuses a single input and
+    /// output [`PortValues`] across the whole block (via
+    /// [`BlockPortValues::frame_into`]/[`set_frame_ref`](BlockPortValues::set_frame_ref)), so
+    /// it does **not** allocate per frame — only once per call to warm the reused buffers.
+    ///
+    /// For the graph engine, prefer [`Patch::tick_block`](crate::graph::Patch::tick_block),
+    /// which is fully allocation-free after compile.
     fn process_block(
         &mut self,
         inputs: &BlockPortValues,
         outputs: &mut BlockPortValues,
         frames: usize,
     ) {
+        let mut in_frame = PortValues::new();
+        let mut out_frame = PortValues::new();
         for i in 0..frames {
-            let in_frame = inputs.frame(i);
-            let mut out_frame = PortValues::new();
+            inputs.frame_into(i, &mut in_frame);
+            out_frame.clear();
             self.tick(&in_frame, &mut out_frame);
-            outputs.set_frame(i, out_frame);
+            outputs.set_frame_ref(i, &out_frame);
         }
     }
 
