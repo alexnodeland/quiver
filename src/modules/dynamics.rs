@@ -3,7 +3,9 @@
 use super::common::{
     db_to_gain, env_coef, flush_denorm, gain_to_db, GATE_HIGH_V, GATE_THRESHOLD_V,
 };
-use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
+use crate::port::{
+    GraphModule, ModulatedParam, ParamRange, PortDef, PortSpec, PortValues, SignalKind,
+};
 use alloc::vec;
 use libm::Libm;
 
@@ -343,6 +345,10 @@ impl Limiter {
                         .with_default(0.3)
                         .with_attenuverter(),
                     PortDef::new(3, "soft", SignalKind::Gate).with_default(5.0),
+                    // Q148: external sidechain/key. Following the Compressor
+                    // convention, an unpatched sidechain reads back the main input
+                    // (`get_or(4, input)`), so behavior is unchanged unless keyed.
+                    PortDef::new(4, "sidechain", SignalKind::Audio),
                 ],
                 outputs: vec![
                     PortDef::new(10, "out", SignalKind::Audio),
@@ -369,11 +375,13 @@ impl GraphModule for Limiter {
         let threshold = inputs.get_or(1, 0.8).clamp(0.01, 1.0) * 5.0;
         let release_cv = inputs.get_or(2, 0.3).clamp(0.0, 1.0);
         let soft_mode = inputs.get_or(3, 5.0) > GATE_THRESHOLD_V;
+        // Q148: detect on the sidechain; unpatched it mirrors the main input.
+        let sidechain = inputs.get_or(4, input);
 
         let release_ms = 10.0 + release_cv * 990.0;
         let release_coef = env_coef(release_ms / 1000.0, self.sample_rate);
 
-        let abs_input = Libm::<f64>::fabs(input);
+        let abs_input = Libm::<f64>::fabs(sidechain);
 
         if abs_input > self.envelope {
             self.envelope = abs_input;
@@ -474,6 +482,10 @@ impl NoiseGate {
                     PortDef::new(4, "range", SignalKind::CvUnipolar)
                         .with_default(1.0)
                         .with_attenuverter(),
+                    // Q148: external sidechain/key. Unpatched it mirrors the main
+                    // input (`get_or(5, input)`), matching the Compressor
+                    // convention, so behavior is unchanged unless keyed.
+                    PortDef::new(5, "sidechain", SignalKind::Audio),
                 ],
                 outputs: vec![
                     PortDef::new(10, "out", SignalKind::Audio),
@@ -501,13 +513,15 @@ impl GraphModule for NoiseGate {
         let attack_cv = inputs.get_or(2, 0.1).clamp(0.0, 1.0);
         let release_cv = inputs.get_or(3, 0.3).clamp(0.0, 1.0);
         let range = inputs.get_or(4, 1.0).clamp(0.0, 1.0);
+        // Q148: detect on the sidechain; unpatched it mirrors the main input.
+        let sidechain = inputs.get_or(5, input);
 
         let attack_ms = 0.1 + attack_cv * 49.9;
         let release_ms = 10.0 + release_cv * 490.0;
         let attack_coef = env_coef(attack_ms / 1000.0, self.sample_rate);
         let release_coef = env_coef(release_ms / 1000.0, self.sample_rate);
 
-        let abs_input = Libm::<f64>::fabs(input);
+        let abs_input = Libm::<f64>::fabs(sidechain);
         if abs_input > self.envelope {
             self.envelope = attack_coef * self.envelope + (1.0 - attack_coef) * abs_input;
         } else {
@@ -673,6 +687,161 @@ impl GraphModule for Compressor {
 
     fn type_id(&self) -> &'static str {
         "compressor"
+    }
+}
+
+/// Ducker (Q148)
+///
+/// A dedicated sidechain ducking processor: a `key` (sidechain) input drives gain
+/// reduction on the main signal. When the key envelope is at or above the
+/// threshold, the main signal is attenuated by up to `amount`; the reduction
+/// tracks the key level with independent attack/release ballistics and recovers
+/// when the key falls silent.
+///
+/// # Parameter reads via [`ModulatedParam`] (Q147)
+///
+/// `amount` and `threshold` are read through [`ModulatedParam`]: the panel knob is
+/// the `base`, and the corresponding bipolar CV input is summed in through the
+/// attenuverter on the `ModulatedParam` ±5 V scale. This makes `ModulatedParam` a
+/// live knob+CV read path rather than an unused export.
+pub struct Ducker {
+    sample_rate: f64,
+    /// Smoothed |key| envelope.
+    envelope: f64,
+    /// Duck depth (0..1), knob + CV.
+    amount: ModulatedParam,
+    /// Key level (volts) at which full ducking is reached, knob + CV.
+    threshold: ModulatedParam,
+    spec: PortSpec,
+}
+
+impl Ducker {
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            sample_rate: if sample_rate > 0.0 {
+                sample_rate
+            } else {
+                44100.0
+            },
+            envelope: 0.0,
+            // Full ducking depth by default (base knob = 1.0 -> up to unity reduction).
+            amount: ModulatedParam::new(ParamRange::Linear { min: 0.0, max: 1.0 }).with_base(1.0),
+            // Threshold spans 0..5 V; default knob ~0.2 -> ~1 V key level for full duck.
+            threshold: ModulatedParam::new(ParamRange::Linear { min: 0.0, max: 5.0 })
+                .with_base(0.2),
+            spec: PortSpec {
+                inputs: vec![
+                    PortDef::new(0, "in", SignalKind::Audio),
+                    PortDef::new(1, "key", SignalKind::Audio),
+                    PortDef::new(2, "amount", SignalKind::CvBipolar).with_attenuverter(),
+                    PortDef::new(3, "threshold", SignalKind::CvBipolar).with_attenuverter(),
+                    PortDef::new(4, "attack", SignalKind::CvUnipolar)
+                        .with_default(0.1)
+                        .with_attenuverter(),
+                    PortDef::new(5, "release", SignalKind::CvUnipolar)
+                        .with_default(0.3)
+                        .with_attenuverter(),
+                ],
+                outputs: vec![
+                    PortDef::new(10, "out", SignalKind::Audio),
+                    PortDef::new(11, "gr", SignalKind::CvUnipolar),
+                ],
+            },
+        }
+    }
+
+    /// Set the duck-depth knob (0..1), the `base` of the amount [`ModulatedParam`].
+    pub fn set_amount(&mut self, amount: f64) {
+        self.amount.base = amount.clamp(0.0, 1.0);
+    }
+
+    /// Current duck-depth knob (0..1).
+    pub fn amount(&self) -> f64 {
+        self.amount.base
+    }
+
+    /// Set the threshold knob (0..1), the `base` of the threshold
+    /// [`ModulatedParam`] (mapped to a `0..5 V` key level).
+    pub fn set_threshold(&mut self, threshold: f64) {
+        self.threshold.base = threshold.clamp(0.0, 1.0);
+    }
+
+    /// Current threshold knob (0..1).
+    pub fn threshold(&self) -> f64 {
+        self.threshold.base
+    }
+}
+
+impl Default for Ducker {
+    fn default() -> Self {
+        Self::new(44100.0)
+    }
+}
+
+impl GraphModule for Ducker {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let input = inputs.get_or(0, 0.0);
+        let key = inputs.get_or(1, 0.0);
+        let amount_cv = inputs.get_or(2, 0.0);
+        let threshold_cv = inputs.get_or(3, 0.0);
+        let attack_cv = inputs.get_or(4, 0.1).clamp(0.0, 1.0);
+        let release_cv = inputs.get_or(5, 0.3).clamp(0.0, 1.0);
+
+        // Resolve knob+CV parameters via ModulatedParam.
+        self.amount.set_cv(amount_cv);
+        self.threshold.set_cv(threshold_cv);
+        let amount = self.amount.value().clamp(0.0, 1.0);
+        let threshold = self.threshold.value().max(0.0);
+
+        let attack_ms = 0.1 + attack_cv * 99.9;
+        let release_ms = 10.0 + release_cv * 990.0;
+        let attack_coef = env_coef(attack_ms / 1000.0, self.sample_rate);
+        let release_coef = env_coef(release_ms / 1000.0, self.sample_rate);
+
+        // Follow the key envelope with attack/release ballistics.
+        let abs_key = Libm::<f64>::fabs(key);
+        if abs_key > self.envelope {
+            self.envelope = attack_coef * self.envelope + (1.0 - attack_coef) * abs_key;
+        } else {
+            self.envelope = release_coef * self.envelope + (1.0 - release_coef) * abs_key;
+        }
+        self.envelope = flush_denorm(self.envelope);
+
+        // Gain reduction grows from 0 (key silent) to `amount` (key at/above
+        // threshold), proportional in between.
+        let ratio = if threshold > 1e-9 {
+            (self.envelope / threshold).clamp(0.0, 1.0)
+        } else {
+            // A zero threshold means "duck on any key activity".
+            if self.envelope > 1e-9 {
+                1.0
+            } else {
+                0.0
+            }
+        };
+        let gr = amount * ratio;
+        let gain = 1.0 - gr;
+
+        outputs.set(10, input * gain);
+        outputs.set(11, gr * 10.0);
+    }
+
+    fn reset(&mut self) {
+        self.envelope = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        if sample_rate > 0.0 {
+            self.sample_rate = sample_rate;
+        }
+    }
+
+    fn type_id(&self) -> &'static str {
+        "ducker"
     }
 }
 
@@ -1453,5 +1622,124 @@ mod tests {
         inputs.set(3, 5.0);
         vca.tick(&inputs, &mut outputs);
         assert!((outputs.get(10).unwrap() - 2.0).abs() < 1e-9);
+    }
+
+    // ================================================================
+    // Q148: sidechain keys + Ducker
+    // ================================================================
+
+    #[test]
+    fn test_noise_gate_opens_from_sidechain() {
+        // Main input is quiet (would keep the gate shut), but a loud sidechain key
+        // opens the gate.
+        let mut gate = NoiseGate::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 0.01); // quiet main
+        inputs.set(1, 0.3); // threshold
+        inputs.set(5, 5.0); // loud sidechain key
+
+        for _ in 0..2000 {
+            gate.tick(&inputs, &mut outputs);
+        }
+        // Gate output (port 11) should be open (high).
+        assert!(
+            outputs.get(11).unwrap() > GATE_THRESHOLD_V,
+            "sidechain key should open the gate"
+        );
+    }
+
+    #[test]
+    fn test_noise_gate_sidechain_unpatched_matches_input() {
+        // With no sidechain patched, the detector mirrors the main input, so a
+        // quiet input keeps the gate closed (unchanged legacy behavior).
+        let mut gate = NoiseGate::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.01);
+        inputs.set(1, 0.5);
+        for _ in 0..2000 {
+            gate.tick(&inputs, &mut outputs);
+        }
+        assert!(outputs.get(11).unwrap() < GATE_THRESHOLD_V);
+    }
+
+    #[test]
+    fn test_limiter_sidechain_drives_gain_reduction() {
+        // Quiet main input, loud sidechain -> gain reduction driven by the key.
+        let mut limiter = Limiter::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.5); // quiet main (below threshold on its own)
+        inputs.set(1, 0.5); // threshold 2.5V
+        inputs.set(4, 10.0); // loud sidechain key
+        for _ in 0..200 {
+            limiter.tick(&inputs, &mut outputs);
+        }
+        // gain reduction output should be positive (limiting active from key).
+        assert!(
+            outputs.get(11).unwrap() > 0.0,
+            "sidechain key should drive limiting"
+        );
+    }
+
+    #[test]
+    fn test_ducker_attenuates_on_key_and_recovers() {
+        let sr = 44100.0;
+        let mut ducker = Ducker::new(sr);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(0, 4.0); // steady main signal
+        inputs.set(4, 0.0); // fast attack
+        inputs.set(5, 0.0); // fast release
+
+        // Key present (loud) -> output ducked below the main level.
+        inputs.set(1, 5.0);
+        for _ in 0..2000 {
+            ducker.tick(&inputs, &mut outputs);
+        }
+        let ducked = outputs.get(10).unwrap();
+        assert!(
+            ducked.abs() < 3.5,
+            "output should be attenuated while key active, got {ducked}"
+        );
+        assert!(
+            outputs.get(11).unwrap() > 0.0,
+            "gain-reduction CV should be positive while ducking"
+        );
+
+        // Key removed -> output recovers toward the full main level.
+        inputs.set(1, 0.0);
+        for _ in 0..4000 {
+            ducker.tick(&inputs, &mut outputs);
+        }
+        let recovered = outputs.get(10).unwrap();
+        assert!(
+            (recovered - 4.0).abs() < 0.2,
+            "output should recover after key release, got {recovered}"
+        );
+    }
+
+    #[test]
+    fn test_ducker_default_type_id() {
+        let ducker = Ducker::default();
+        assert_eq!(ducker.type_id(), "ducker");
+    }
+
+    #[test]
+    fn test_ducker_no_key_passes_through() {
+        // Silent key -> no ducking, signal passes through unchanged.
+        let mut ducker = Ducker::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 3.0);
+        inputs.set(1, 0.0);
+        for _ in 0..500 {
+            ducker.tick(&inputs, &mut outputs);
+        }
+        assert!((outputs.get(10).unwrap() - 3.0).abs() < 1e-9);
+        assert!(outputs.get(11).unwrap().abs() < 1e-9);
     }
 }

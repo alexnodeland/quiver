@@ -1,6 +1,7 @@
 //! Nonlinear and spectral processing modules.
 
 use super::common::{env_coef, GATE_THRESHOLD_V};
+use super::oversample::{Oversample, Oversampler};
 use crate::analog::saturation;
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use alloc::vec;
@@ -122,6 +123,9 @@ pub struct Distortion {
     /// One-pole low-pass state for the tone control (Q025).
     tone_lp: f64,
     sample_rate: f64,
+    /// Opt-in oversampler for the waveshaping stage (Q143). Default `Off` keeps
+    /// the base-rate behavior (and thus every existing test) bit-for-bit.
+    oversampler: Oversampler,
     spec: PortSpec,
 }
 
@@ -135,6 +139,7 @@ impl Distortion {
         Self {
             tone_lp: 0.0,
             sample_rate,
+            oversampler: Oversampler::new(Oversample::Off),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -197,6 +202,17 @@ impl Distortion {
         };
         shaped * 5.0
     }
+
+    /// Select the oversampling factor for the waveshaping stage (Q143).
+    ///
+    /// Defaults to [`Oversample::Off`]. Enabling 2x/4x runs the (aliasing-prone)
+    /// waveshaper at a higher internal rate and band-limits before decimation,
+    /// materially reducing the inharmonic aliasing of hard/foldback modes at high
+    /// input frequencies. The tone low-pass runs at the base rate, after
+    /// decimation.
+    pub fn set_oversample(&mut self, mode: Oversample) {
+        self.oversampler = Oversampler::new(mode);
+    }
 }
 
 impl Default for Distortion {
@@ -219,12 +235,15 @@ impl GraphModule for Distortion {
 
         // Select distortion mode (quantized to 4 modes)
         let mode_idx = (mode * 3.99) as u8;
-        let distorted = match mode_idx {
-            0 => Self::soft_clip(input, drive),
-            1 => Self::hard_clip(input, drive),
-            2 => Self::foldback(input, drive),
-            _ => Self::asymmetric(input, drive),
-        };
+        // Run the waveshaper through the (opt-in) oversampler so its generated
+        // harmonics are band-limited before folding back below Nyquist (Q143).
+        // With `Oversample::Off` this is exactly the base-rate shaping call.
+        let distorted = self.oversampler.process(input, |x| match mode_idx {
+            0 => Self::soft_clip(x, drive),
+            1 => Self::hard_clip(x, drive),
+            2 => Self::foldback(x, drive),
+            _ => Self::asymmetric(x, drive),
+        });
 
         // Q025: real one-pole low-pass tone control with retained state. The
         // cutoff is swept logarithmically by the tone CV from
@@ -242,6 +261,7 @@ impl GraphModule for Distortion {
 
     fn reset(&mut self) {
         self.tone_lp = 0.0;
+        self.oversampler.reset();
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
@@ -249,6 +269,7 @@ impl GraphModule for Distortion {
             self.sample_rate = sample_rate;
         }
         self.tone_lp = 0.0;
+        self.oversampler.reset();
     }
 
     fn type_id(&self) -> &'static str {
@@ -986,9 +1007,18 @@ impl GraphModule for Granular {
     }
 }
 
-/// Wavefolder module
+/// Wavefolder module.
+///
+/// This is the canonical home of `Wavefolder` (Q149): it lives here in
+/// `modules::nonlinear` alongside [`Distortion`] and the other waveshapers, and is
+/// re-exported from [`crate::analog`] for backward compatibility. Like
+/// [`Distortion`], it supports opt-in oversampling via
+/// [`Wavefolder::set_oversample`].
 pub struct Wavefolder {
     pub(crate) threshold: f64,
+    /// Opt-in oversampler for the folding stage (Q143). Default `Off` preserves
+    /// the base-rate behavior.
+    oversampler: Oversampler,
     spec: PortSpec,
 }
 
@@ -996,6 +1026,7 @@ impl Wavefolder {
     pub fn new(threshold: f64) -> Self {
         Self {
             threshold: threshold.max(0.1),
+            oversampler: Oversampler::new(Oversample::Off),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -1006,6 +1037,15 @@ impl Wavefolder {
                 outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
             },
         }
+    }
+
+    /// Select the oversampling factor for the folding stage (Q143).
+    ///
+    /// Defaults to [`Oversample::Off`]. Wavefolding is one of the most
+    /// alias-prone nonlinearities; 2x/4x oversampling substantially reduces the
+    /// inharmonic aliasing it produces at high input frequencies.
+    pub fn set_oversample(&mut self, mode: Oversample) {
+        self.oversampler = Oversampler::new(mode);
     }
 }
 
@@ -1024,11 +1064,17 @@ impl GraphModule for Wavefolder {
         let input = inputs.get_or(0, 0.0);
         let threshold = inputs.get_or(1, self.threshold).max(0.1);
 
-        let folded = saturation::fold(input / 5.0, threshold) * 5.0;
+        // Fold through the opt-in oversampler; `Oversample::Off` is exactly the
+        // base-rate fold call (Q143).
+        let folded = self
+            .oversampler
+            .process(input, |x| saturation::fold(x / 5.0, threshold) * 5.0);
         outputs.set(10, folded);
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.oversampler.reset();
+    }
 
     fn set_sample_rate(&mut self, _: f64) {}
 
@@ -1897,6 +1943,134 @@ mod tests {
         assert!(
             total > 10.0,
             "pitch-up output should be non-silent, got {total}"
+        );
+    }
+
+    // ================================================================
+    // Q143: oversampling / anti-aliasing for nonlinear stages
+    // ================================================================
+
+    /// Naive DFT magnitude at integer bin `k` over `sig`.
+    fn dft_mag(sig: &[f64], k: usize) -> f64 {
+        let n = sig.len();
+        let mut re = 0.0;
+        let mut im = 0.0;
+        for (i, &s) in sig.iter().enumerate() {
+            let ang = -core::f64::consts::TAU * (k as f64) * (i as f64) / (n as f64);
+            re += s * Libm::<f64>::cos(ang);
+            im += s * Libm::<f64>::sin(ang);
+        }
+        Libm::<f64>::sqrt(re * re + im * im) / (n as f64)
+    }
+
+    /// Sum of DFT magnitude over the non-harmonic bins (aliased energy). `fund`
+    /// is the fundamental bin; harmonics are its integer multiples.
+    fn alias_energy(sig: &[f64], fund: usize) -> f64 {
+        let n = sig.len();
+        let mut total = 0.0;
+        for k in 1..(n / 2) {
+            if k % fund != 0 {
+                total += dft_mag(sig, k);
+            }
+        }
+        total
+    }
+
+    /// Drive a hard-clipping [`Distortion`] with a high-frequency sine and return
+    /// the captured output (steady state, after warm-up).
+    fn distortion_hardclip_capture(mode: Oversample, n: usize) -> Vec<f64> {
+        let sr = 44100.0;
+        let mut d = Distortion::new(sr);
+        d.set_oversample(mode);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 1.0); // full drive
+        inputs.set(2, 1.0); // tone fully open (minimize the post low-pass masking)
+        inputs.set(3, 0.4); // mode 1 = hard clip (0.4 * 3.99 = 1.59 -> 1)
+        inputs.set(4, 1.0); // fully wet
+
+        // 4200 Hz lands exactly on DFT bin 42 for N=441 at 44.1k.
+        let freq = 4200.0;
+        let mut out = Vec::with_capacity(n);
+        // Warm-up to fill the oversampler / tone-filter state.
+        for i in 0..(n * 3) {
+            let t = i as f64 / sr;
+            let x = Libm::<f64>::sin(core::f64::consts::TAU * freq * t) * 5.0;
+            inputs.set(0, x);
+            d.tick(&inputs, &mut outputs);
+            if i >= n * 2 {
+                out.push(outputs.get(10).unwrap());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_distortion_oversampling_reduces_aliasing() {
+        let n = 441;
+        let fund = 42;
+        let off = distortion_hardclip_capture(Oversample::Off, n);
+        let x4 = distortion_hardclip_capture(Oversample::X4, n);
+
+        let a_off = alias_energy(&off, fund);
+        let a_x4 = alias_energy(&x4, fund);
+
+        assert!(
+            a_x4 < 0.7 * a_off,
+            "4x oversampling should materially reduce alias energy: off={a_off} x4={a_x4}"
+        );
+    }
+
+    #[test]
+    fn test_distortion_oversample_off_is_default_and_transparent() {
+        // Two Distortions, one explicitly Off, must produce identical output.
+        let sr = 44100.0;
+        let mut a = Distortion::new(sr);
+        let mut b = Distortion::new(sr);
+        b.set_oversample(Oversample::Off);
+        let mut ia = PortValues::new();
+        let mut oa = PortValues::new();
+        let mut ib = PortValues::new();
+        let mut ob = PortValues::new();
+        for i in 0..500 {
+            let x = Libm::<f64>::sin(i as f64 * 0.3) * 5.0;
+            ia.set(0, x);
+            ib.set(0, x);
+            a.tick(&ia, &mut oa);
+            b.tick(&ib, &mut ob);
+            assert!((oa.get(10).unwrap() - ob.get(10).unwrap()).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_wavefolder_oversampling_reduces_aliasing() {
+        let sr = 44100.0;
+        let n = 441;
+        let fund = 42;
+        let freq = 4200.0;
+
+        let capture = |mode: Oversample| -> Vec<f64> {
+            let mut wf = Wavefolder::new(0.3);
+            wf.set_oversample(mode);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            let mut out = Vec::with_capacity(n);
+            for i in 0..(n * 3) {
+                let t = i as f64 / sr;
+                inputs.set(0, Libm::<f64>::sin(core::f64::consts::TAU * freq * t) * 5.0);
+                wf.tick(&inputs, &mut outputs);
+                if i >= n * 2 {
+                    out.push(outputs.get(10).unwrap());
+                }
+            }
+            out
+        };
+
+        let a_off = alias_energy(&capture(Oversample::Off), fund);
+        let a_x4 = alias_energy(&capture(Oversample::X4), fund);
+        assert!(
+            a_x4 < 0.7 * a_off,
+            "wavefolder 4x oversampling should reduce alias energy: off={a_off} x4={a_x4}"
         );
     }
 }

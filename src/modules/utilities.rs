@@ -179,6 +179,12 @@ fn hysteretic_note(
 pub struct ScaleQuantizer {
     /// Last committed output voltage, for note-change triggers and hysteresis.
     last_output: Option<f64>,
+    /// Optional microtuning override (Q146): scale degrees in cents within one
+    /// octave `[0, 1200)`, sorted. When non-empty it replaces the built-in 12-TET
+    /// enum tables. Always present (heap-backed `Vec`), but only populated via the
+    /// alloc-gated [`set_custom_scale`](Self::set_custom_scale) /
+    /// [`load_scala`](Self::load_scala) setters.
+    custom_cents: Vec<f64>,
     spec: PortSpec,
 }
 
@@ -195,6 +201,7 @@ impl ScaleQuantizer {
     pub fn new(_sample_rate: f64) -> Self {
         Self {
             last_output: None,
+            custom_cents: Vec::new(),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::VoltPerOctave),
@@ -240,6 +247,85 @@ impl ScaleQuantizer {
 
         octave * 12 + closest
     }
+
+    /// Whether a microtuning custom scale is currently active (Q146).
+    pub fn has_custom_scale(&self) -> bool {
+        !self.custom_cents.is_empty()
+    }
+
+    /// Install a custom microtuning scale (Q146): `cents` are scale degrees within
+    /// one octave, in cents (`0.0` is the root). The list is sorted and reduced
+    /// into `[0, 1200)` internally, so callers need not pre-sort. Passing an empty
+    /// slice clears the override and restores the built-in 12-TET scales.
+    ///
+    /// Non-real-time: allocates. Alloc-tier only.
+    #[cfg(feature = "alloc")]
+    pub fn set_custom_scale(&mut self, cents: &[f64]) {
+        let mut degrees: Vec<f64> = cents
+            .iter()
+            .map(|&c| {
+                let mut r = Libm::<f64>::fmod(c, 1200.0);
+                if r < 0.0 {
+                    r += 1200.0;
+                }
+                r
+            })
+            .collect();
+        degrees.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+        degrees.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        self.custom_cents = degrees;
+    }
+
+    /// Clear any custom microtuning scale, restoring the built-in 12-TET scales.
+    #[cfg(feature = "alloc")]
+    pub fn clear_custom_scale(&mut self) {
+        self.custom_cents.clear();
+    }
+
+    /// Load a Scala (`.scl`) file body as the custom microtuning scale (Q146).
+    ///
+    /// On success the parsed scale's octave-reduced degrees become the active
+    /// scale (see [`set_custom_scale`](Self::set_custom_scale)). On a malformed
+    /// file the current scale is left unchanged and the parse error is returned.
+    ///
+    /// Non-real-time: allocates. Alloc-tier only.
+    #[cfg(feature = "alloc")]
+    pub fn load_scala(&mut self, source: &str) -> Result<(), crate::scala::ScalaError> {
+        let scale = crate::scala::ScalaScale::parse(source)?;
+        self.set_custom_scale(&scale.degrees_within_octave());
+        Ok(())
+    }
+
+    /// Quantize a cents value to the nearest degree of a custom scale (Q146).
+    ///
+    /// `degrees` are sorted degrees within `[0, 1200)`; the search also considers
+    /// each degree wrapped into the next octave so a pitch near the top of the
+    /// octave snaps up to the next root rather than dropping an octave (mirrors
+    /// [`quantize_to_scale`](Self::quantize_to_scale)).
+    fn quantize_custom_cents(input_cents: f64, degrees: &[f64]) -> f64 {
+        if degrees.is_empty() {
+            return input_cents;
+        }
+        let octave = Libm::<f64>::floor(input_cents / 1200.0);
+        let within = input_cents - octave * 1200.0;
+
+        let mut closest = degrees[0];
+        let mut min_dist = f64::MAX;
+        for &d in degrees {
+            let dist = Libm::<f64>::fabs(within - d);
+            if dist < min_dist {
+                min_dist = dist;
+                closest = d;
+            }
+            let dist_wrap = Libm::<f64>::fabs(within - (d + 1200.0));
+            if dist_wrap < min_dist {
+                min_dist = dist_wrap;
+                closest = d + 1200.0;
+            }
+        }
+
+        octave * 1200.0 + closest
+    }
 }
 
 impl Default for ScaleQuantizer {
@@ -261,26 +347,35 @@ impl GraphModule for ScaleQuantizer {
         // Root note (0-11 semitones)
         let root = (root_cv * 11.99) as i32;
 
-        // Convert V/Oct to semitones from C4
-        let semitones_from_c4 = Libm::<f64>::round(input * 12.0) as i32;
+        // A custom microtuning scale (Q146) overrides the built-in 12-TET enum
+        // tables and quantizes in cents rather than integer semitones.
+        let candidate_voct = if !self.custom_cents.is_empty() {
+            let root_cents = root as f64 * 100.0;
+            let input_cents = input * 1200.0 - root_cents;
+            let q_cents = Self::quantize_custom_cents(input_cents, &self.custom_cents);
+            (q_cents + root_cents) / 1200.0
+        } else {
+            // Convert V/Oct to semitones from C4
+            let semitones_from_c4 = Libm::<f64>::round(input * 12.0) as i32;
 
-        // Adjust for root
-        let relative_note = semitones_from_c4 - root;
+            // Adjust for root
+            let relative_note = semitones_from_c4 - root;
 
-        // Select scale
-        let scale_idx = (scale_cv * 6.99) as u8;
-        let quantized = match scale_idx {
-            0 => Self::quantize_to_scale(relative_note, &Self::CHROMATIC),
-            1 => Self::quantize_to_scale(relative_note, &Self::MAJOR),
-            2 => Self::quantize_to_scale(relative_note, &Self::MINOR),
-            3 => Self::quantize_to_scale(relative_note, &Self::PENT_MAJOR),
-            4 => Self::quantize_to_scale(relative_note, &Self::PENT_MINOR),
-            5 => Self::quantize_to_scale(relative_note, &Self::DORIAN),
-            _ => Self::quantize_to_scale(relative_note, &Self::BLUES),
+            // Select scale
+            let scale_idx = (scale_cv * 6.99) as u8;
+            let quantized = match scale_idx {
+                0 => Self::quantize_to_scale(relative_note, &Self::CHROMATIC),
+                1 => Self::quantize_to_scale(relative_note, &Self::MAJOR),
+                2 => Self::quantize_to_scale(relative_note, &Self::MINOR),
+                3 => Self::quantize_to_scale(relative_note, &Self::PENT_MAJOR),
+                4 => Self::quantize_to_scale(relative_note, &Self::PENT_MINOR),
+                5 => Self::quantize_to_scale(relative_note, &Self::DORIAN),
+                _ => Self::quantize_to_scale(relative_note, &Self::BLUES),
+            };
+
+            // Convert back to V/Oct with root offset
+            (quantized + root) as f64 / 12.0
         };
-
-        // Convert back to V/Oct with root offset
-        let candidate_voct = (quantized + root) as f64 / 12.0;
 
         // Commit the note through hysteresis so a CV parked on a boundary does
         // not chatter (Q041), and fire the trigger only on an actual committed
@@ -4029,5 +4124,92 @@ mod tests {
         inputs.set(5, 5.0);
         arp.tick(&inputs, &mut outputs);
         assert_eq!(arp.num_notes, 0, "reset must clear held notes");
+    }
+
+    // ================================================================
+    // Q146: microtuning / custom scales on ScaleQuantizer
+    // ================================================================
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn test_custom_scale_snaps_to_degrees() {
+        // Whole-tone scale: degrees every 200 cents.
+        let mut sq = ScaleQuantizer::new(44100.0);
+        assert!(!sq.has_custom_scale());
+        sq.set_custom_scale(&[0.0, 200.0, 400.0, 600.0, 800.0, 1000.0]);
+        assert!(sq.has_custom_scale());
+
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Input just above the 200-cent degree (200 cents = 1/6 V) should snap to
+        // it, not to a chromatic semitone.
+        // 210 cents = 0.175 V.
+        inputs.set(0, 0.175);
+        // Run a few ticks so hysteresis commits.
+        for _ in 0..4 {
+            sq.tick(&inputs, &mut outputs);
+        }
+        let out_v = outputs.get(10).unwrap();
+        // Expect ~200 cents = 0.16667 V.
+        assert!(
+            (out_v - 200.0 / 1200.0).abs() < 1e-6,
+            "custom scale should snap to 200 cents, got {} cents",
+            out_v * 1200.0
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn test_load_scala_and_quantize() {
+        let scl = "\
+whole tone
+6
+200.0
+400.0
+600.0
+800.0
+1000.0
+1200.0
+";
+        let mut sq = ScaleQuantizer::new(44100.0);
+        sq.load_scala(scl).unwrap();
+        assert!(sq.has_custom_scale());
+
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        // 390 cents -> nearest whole-tone degree is 400 cents.
+        inputs.set(0, 390.0 / 1200.0);
+        for _ in 0..4 {
+            sq.tick(&inputs, &mut outputs);
+        }
+        let out_v = outputs.get(10).unwrap();
+        assert!(
+            (out_v - 400.0 / 1200.0).abs() < 1e-6,
+            "expected 400 cents, got {} cents",
+            out_v * 1200.0
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn test_clear_custom_scale_restores_enum() {
+        let mut sq = ScaleQuantizer::new(44100.0);
+        sq.set_custom_scale(&[0.0, 200.0, 400.0]);
+        assert!(sq.has_custom_scale());
+        sq.clear_custom_scale();
+        assert!(!sq.has_custom_scale());
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn test_load_scala_malformed_leaves_scale_unchanged() {
+        let mut sq = ScaleQuantizer::new(44100.0);
+        sq.set_custom_scale(&[0.0, 500.0]);
+        // Malformed: declares 3 pitches but supplies one.
+        let err = sq.load_scala("bad\n3\n100.0\n");
+        assert!(err.is_err());
+        // Previous custom scale is retained.
+        assert!(sq.has_custom_scale());
     }
 }

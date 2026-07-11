@@ -14,11 +14,11 @@ use crate::introspection::{ControlType, ModuleIntrospection, ParamCurve, ParamIn
 use crate::analog::{AnalogVco, Saturator, Wavefolder};
 use crate::modules::{
     Adsr, Arpeggiator, Attenuverter, BernoulliGate, ChordMemory, Clock, Comparator, Crossfader,
-    Crosstalk, DiodeLadderFilter, FormantOsc, Granular, GroundLoop, Lfo, LogicAnd, LogicNot,
-    LogicOr, LogicXor, Max, Min, Mixer, Multiple, NoiseGenerator, Offset, ParametricEq,
-    PitchShifter, PrecisionAdder, Quantizer, Rectifier, Reverb, RingModulator, SampleAndHold,
-    Scale, SlewLimiter, StepSequencer, StereoOutput, Svf, UnitDelay, VcSwitch, Vca, Vco, Vocoder,
-    Wavetable,
+    Crosstalk, DiodeLadderFilter, Ducker, FormantOsc, Granular, GroundLoop, Lfo, LogicAnd,
+    LogicNot, LogicOr, LogicXor, Max, MidSideDecode, MidSideEncode, Min, Mixer, Multiple,
+    NoiseGenerator, Offset, ParametricEq, PitchShifter, PrecisionAdder, Quantizer, Rectifier,
+    Reverb, RingModulator, SampleAndHold, SamplePlayer, Scale, SlewLimiter, StepSequencer,
+    StereoOutput, Svf, UnitDelay, VcSwitch, Vca, Vco, Vocoder, Wavetable,
 };
 
 // =============================================================================
@@ -50,6 +50,8 @@ impl ModuleIntrospection for VcSwitch {}
 impl ModuleIntrospection for Min {}
 impl ModuleIntrospection for Max {}
 impl ModuleIntrospection for Crossfader {}
+impl ModuleIntrospection for MidSideEncode {}
+impl ModuleIntrospection for MidSideDecode {}
 
 // Effects (CV-controlled)
 impl ModuleIntrospection for RingModulator {}
@@ -287,6 +289,51 @@ impl ModuleIntrospection for Wavefolder {
     }
 }
 
+impl ModuleIntrospection for SamplePlayer {
+    fn param_infos(&self) -> Vec<ParamInfo> {
+        vec![ParamInfo::percent("start", "Start Position")
+            .with_default(0.0)
+            .with_value(self.start_position())]
+    }
+
+    fn set_param_by_id(&mut self, id: &str, value: f64) -> bool {
+        match id {
+            "start" => {
+                self.set_start(value);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl ModuleIntrospection for Ducker {
+    fn param_infos(&self) -> Vec<ParamInfo> {
+        vec![
+            ParamInfo::percent("amount", "Duck Amount")
+                .with_default(1.0)
+                .with_value(self.amount()),
+            ParamInfo::percent("threshold", "Threshold")
+                .with_default(0.2)
+                .with_value(self.threshold()),
+        ]
+    }
+
+    fn set_param_by_id(&mut self, id: &str, value: f64) -> bool {
+        match id {
+            "amount" => {
+                self.set_amount(value);
+                true
+            }
+            "threshold" => {
+                self.set_threshold(value);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -381,5 +428,36 @@ mod tests {
         assert!(Vca::default().param_infos().is_empty());
         assert!(Clock::default().param_infos().is_empty());
         assert!(LogicAnd::default().param_infos().is_empty());
+        // Mid/side utilities are fully port/CV-controlled.
+        assert!(MidSideEncode::default().param_infos().is_empty());
+        assert!(MidSideDecode::default().param_infos().is_empty());
+    }
+
+    #[test]
+    fn test_sample_player_introspection() {
+        let mut player = SamplePlayer::default();
+        let params = player.param_infos();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].id, "start");
+
+        assert!(player.set_param_by_id("start", 0.5));
+        assert!((player.param_infos()[0].value - 0.5).abs() < 1e-9);
+        assert!(!player.set_param_by_id("invalid", 0.0));
+    }
+
+    #[test]
+    fn test_ducker_introspection() {
+        let mut ducker = Ducker::default();
+        let params = ducker.param_infos();
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].id, "amount");
+        assert_eq!(params[1].id, "threshold");
+
+        assert!(ducker.set_param_by_id("amount", 0.25));
+        assert!(ducker.set_param_by_id("threshold", 0.6));
+        let p = ducker.param_infos();
+        assert!((p[0].value - 0.25).abs() < 1e-9);
+        assert!((p[1].value - 0.6).abs() < 1e-9);
+        assert!(!ducker.set_param_by_id("invalid", 0.0));
     }
 }
