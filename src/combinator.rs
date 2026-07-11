@@ -1,31 +1,63 @@
 //! # Layer 1: Typed Module Combinators
 //!
 //! This module provides **Arrow-style combinators** for composing signal processing
-//! modules with compile-time type checking. These combinators enable functional
-//! composition of DSP chains that compile down to tight, inlinable loops with
-//! zero runtime overhead.
+//! modules with *structural* (arity/shape) compile-time type checking. These
+//! combinators enable functional composition of DSP chains that compile down to tight,
+//! inlinable loops with zero runtime overhead.
+//!
+//! ## What "type-safe" means here (and what it does not)
+//!
+//! The combinators give **structural** type safety: the compiler guarantees that the
+//! *shape* of a signal matches — a mono `f64` connects to a mono `f64`, a stereo
+//! `(f64, f64)` to a stereo `(f64, f64)`, and tuple arities line up. This is real and
+//! useful: `.then`, `.parallel`, and `.fanout` cannot be mis-wired shape-wise.
+//!
+//! It is **not** *semantic* signal-kind safety. [`Module::In`] / [`Module::Out`] are bare
+//! Rust types (in practice `f64`), so an `Audio` output and a `VoltPerOctave` pitch input
+//! are the *same* type and will chain silently. Semantic [`SignalKind`] checking (Audio vs
+//! CV vs V/Oct vs Gate) is enforced by the **graph layer** (Layer 2 / Layer 3, see
+//! [`crate::port`] and [`crate::graph`]), not by these combinators.
+//!
+//! [`SignalKind`]: crate::port::SignalKind
 //!
 //! ## Category Theory Background
 //!
-//! In category theory, an **Arrow** is a generalization of functions that allows
-//! for composition while carrying additional structure (like state). The combinators
-//! here implement the Arrow interface:
+//! In category theory, an **Arrow** is a generalization of functions that allows for
+//! composition while carrying additional structure (like state). The combinators here
+//! implement the Arrow interface. The left column below is the **conceptual
+//! Haskell/`Control.Arrow` notation** used throughout the functional-programming
+//! literature — it is **not** Rust syntax. `>>>`, `***`, and `&&&` are *not* Rust
+//! operators, and this crate deliberately ships **no operator overloads** for them.
+//! Use the method in the right column instead:
+//!
+//! | Conceptual (Haskell) | Real Quiver API      | Meaning                         |
+//! |----------------------|----------------------|---------------------------------|
+//! | `arr f`              | `arr(f)`             | Lift a pure `Fn` into a module  |
+//! | `f >>> g`            | `f.then(g)`          | Sequential composition          |
+//! | `first f`            | `f.first()`          | Apply to first tuple element    |
+//! | `f *** g`            | `f.parallel(g)`      | Independent parallel processing |
+//! | `f &&& g`            | `f.fanout(g)`        | Split one input to two          |
 //!
 //! ```text
-//! arr:     (a -> b) -> Arrow a b           // Lift pure function
-//! (>>>):   Arrow a b -> Arrow b c -> Arrow a c   // Sequential composition
-//! first:   Arrow a b -> Arrow (a,c) (b,c)  // Apply to first element
-//! (***):   Arrow a b -> Arrow c d -> Arrow (a,c) (b,d)  // Parallel
+//! arr:     (a -> b) -> Arrow a b                         // Lift pure function
+//! (>>>):   Arrow a b -> Arrow b c -> Arrow a c           // Sequential composition
+//! first:   Arrow a b -> Arrow (a,c) (b,c)                // Apply to first element
+//! (***):   Arrow a b -> Arrow c d -> Arrow (a,c) (b,d)   // Parallel
 //! (&&&):   Arrow a b -> Arrow a c -> Arrow a (b,c)       // Fanout
 //! ```
 //!
+//! The real methods live on [`ModuleExt`]; the `arr` primitive is the free function
+//! [`arr`].
+//!
 //! ## Arrow Laws
 //!
-//! These combinators satisfy the Arrow laws, ensuring predictable behavior:
+//! These combinators satisfy the Arrow laws, ensuring predictable behavior. They are
+//! checked by the `arrow_law_*` tests in this module (using the real `.then`/`.first`
+//! API over deterministic input sequences against stateful test modules):
 //!
-//! - **Identity**: `id >>> f = f = f >>> id`
-//! - **Associativity**: `(f >>> g) >>> h = f >>> (g >>> h)`
-//! - **First distributes**: `first (f >>> g) = first f >>> first g`
+//! - **Identity**: `id.then(f)` behaves as `f` (and `f.then(id)` as `f`)
+//! - **Associativity**: `(f.then(g)).then(h)` behaves as `f.then(g.then(h))`
+//! - **First distributes**: `f.then(g).first()` behaves as `f.first().then(g.first())`
 //!
 //! ## Zero-Cost Abstraction
 //!
@@ -42,30 +74,74 @@
 //! }
 //! ```
 //!
-//! ## Example: Building a Synth Voice
+//! ## Example: Composing with the real API
 //!
-//! ```rust,ignore
-//! use quiver::combinator::*;
+//! ```rust
+//! use quiver::combinator::{arr, Module, ModuleExt};
 //!
-//! // Compose modules sequentially
-//! let voice = vco
-//!     .then(filter)
-//!     .then(amplifier);
+//! // `.then` is sequential composition (conceptually `>>>`).
+//! let mut chain = arr(|x: f64| x + 1.0).then(arr(|x: f64| x * 2.0));
+//! assert_eq!(chain.tick(3.0), 8.0); // (3 + 1) * 2
 //!
-//! // Process in parallel
-//! let stereo = left_processor.parallel(right_processor);
+//! // `.parallel` (conceptually `***`) processes two independent signals.
+//! let mut stereo = arr(|l: f64| l * 0.5).parallel(arr(|r: f64| r * 0.25));
+//! assert_eq!(stereo.tick((2.0, 4.0)), (1.0, 1.0));
 //!
-//! // Split signal to multiple processors
-//! let effects = signal.fanout(reverb, delay);
+//! // `.fanout` (conceptually `&&&`) sends one input to two processors.
+//! let mut split = arr(|x: f64| x + 1.0).fanout(arr(|x: f64| x - 1.0));
+//! assert_eq!(split.tick(5.0), (6.0, 4.0));
 //! ```
+//!
+//! ## Bridging to the Patch Graph (Layer 3)
+//!
+//! The combinator [`Module`] trait and the engine's [`GraphModule`] trait are distinct
+//! worlds: shipped DSP modules (`Vco`, `Svf`, `Vca`, …) implement [`GraphModule`], so they
+//! cannot be dropped into `.then(...)` directly. Two adapters bridge them:
+//!
+//! - [`GraphModuleAdapter`] wraps any [`GraphModule`] (choosing one input and one output
+//!   port) and exposes it as a `Module<In = f64, Out = f64>`, so real modules *can* be
+//!   composed with `.then`/`.parallel`/`.fanout`.
+//! - [`ModuleGraphAdapter`] wraps any `Module<In = f64, Out = f64>` as a one-in/one-out
+//!   [`GraphModule`], so a combinator chain can be `patch.add(...)`-ed into a [`Patch`].
+//!
+//! ```rust
+//! use quiver::combinator::{GraphModuleAdapter, Module, ModuleExt};
+//! use quiver::modules::{Svf, Vco};
+//!
+//! // Drive the Vco's `voct` input (port 0) and take its `saw` output (port 12).
+//! let vco = GraphModuleAdapter::new(Vco::new(44_100.0), 0, 12);
+//! // Svf: pick its first audio in/out automatically (`in` -> `lp`).
+//! let svf = GraphModuleAdapter::from_audio_ports(Svf::new(44_100.0)).unwrap();
+//!
+//! let mut voice = vco.then(svf);
+//! let mut peak = 0.0_f64;
+//! for _ in 0..256 {
+//!     peak = peak.max(voice.tick(0.0).abs()); // 0 V/oct = middle C
+//! }
+//! assert!(peak > 0.0, "a real Vco -> Svf combinator chain should make sound");
+//! ```
+//!
+//! [`Module`]: crate::combinator::Module
+//! [`GraphModule`]: crate::port::GraphModule
+//! [`GraphModuleAdapter`]: crate::combinator::GraphModuleAdapter
+//! [`ModuleGraphAdapter`]: crate::combinator::ModuleGraphAdapter
+//! [`Patch`]: crate::graph::Patch
 
+use crate::port::{GraphModule, PortDef, PortId, PortSpec, PortValues, SignalKind};
+use alloc::string::String;
+use alloc::vec;
 use core::marker::PhantomData;
 
 /// A signal processing module with typed input and output.
 ///
 /// This is the fundamental abstraction for DSP processing in Quiver. Modules are
 /// **stateful processors** that transform input samples to output samples. The
-/// associated types `In` and `Out` enable compile-time verification of signal flow.
+/// associated types `In` and `Out` enable compile-time verification of signal *shape*
+/// (arity): a `Module<Out = f64>` only chains into a `Module<In = f64>`, a stereo
+/// `(f64, f64)` only into a `(f64, f64)`, and so on. This is *structural* type safety;
+/// it does **not** check semantic [`SignalKind`](crate::port::SignalKind) (Audio vs CV
+/// vs V/Oct) — both are `f64` here. Signal-kind compatibility is validated by the graph
+/// layer ([`crate::port`] / [`crate::graph`]).
 ///
 /// # Mathematical Model
 ///
@@ -188,7 +264,34 @@ pub trait ModuleExt: Module + Sized {
         }
     }
 
-    /// Create a feedback loop with unit delay
+    /// Create a feedback loop with a single-sample unit delay.
+    ///
+    /// The `combine` closure is called as `combine(external_input, previous_output)`:
+    ///
+    /// - the **first** argument is this tick's external input,
+    /// - the **second** argument is the module's output from the *previous* tick,
+    ///   delayed by exactly one sample for causality.
+    ///
+    /// On the very first tick (and after [`reset`](Module::reset)), the previous-output
+    /// argument is `Self::Out::default()` (i.e. `0.0` for `f64`). The combined value is
+    /// fed to the wrapped module, and its output is both returned and stored as the next
+    /// tick's feedback signal.
+    ///
+    /// # Example: a one-pole low-pass via feedback
+    ///
+    /// ```
+    /// use quiver::combinator::{Identity, Module, ModuleExt};
+    ///
+    /// let coeff = 0.5;
+    /// // y[n] = input * (1 - coeff) + previous_output * coeff
+    /// let mut one_pole = Identity::<f64>::new()
+    ///     .feedback(move |input, previous| input * (1.0 - coeff) + previous * coeff);
+    ///
+    /// // First tick: previous_output defaults to 0.0.
+    /// assert!((one_pole.tick(1.0) - 0.5).abs() < 1e-12); // 1*0.5 + 0*0.5
+    /// // Second tick: previous_output is now 0.5.
+    /// assert!((one_pole.tick(1.0) - 0.75).abs() < 1e-12); // 1*0.5 + 0.5*0.5
+    /// ```
     fn feedback<F>(self, combine: F) -> Feedback<Self, F>
     where
         Self::Out: Default + Clone,
@@ -311,10 +414,17 @@ where
     }
 }
 
-/// Feedback loop with mandatory single-sample delay for causality
+/// Feedback loop with a mandatory single-sample delay for causality.
+///
+/// Each tick computes `combine(external_input, previous_output)` and feeds the result to
+/// the wrapped module. `previous_output` is the module's output from the previous tick
+/// (the `delay_buffer`), which starts at `M::Out::default()` on the first tick and after
+/// [`reset`](Module::reset). See [`ModuleExt::feedback`] for the argument-order contract
+/// and a runnable example.
 pub struct Feedback<M: Module, F> {
     pub module: M,
     pub combine: F,
+    /// The previous tick's output, delayed one sample. `Default` on the first tick.
     pub delay_buffer: M::Out,
 }
 
@@ -608,9 +718,210 @@ impl<T: Clone + Send> Module for Constant<T> {
     fn reset(&mut self) {}
 }
 
+/// A stateless module that lifts a pure function into the [`Module`] world.
+///
+/// This is the Arrow `arr` primitive: `arr : (a -> b) -> Arrow a b`. Unlike
+/// [`ModuleExt::map`] (which post-composes a function onto an *existing* module), `arr`
+/// builds a standalone module directly from a function, carrying no state. Construct it
+/// with the free function [`arr`].
+pub struct Arr<F, A> {
+    f: F,
+    _phantom: PhantomData<A>,
+}
+
+/// Lift a pure function into a [`Module`] (the Arrow `arr` primitive).
+///
+/// `arr(f)` produces a stateless module whose `tick` is exactly `f`. This is the missing
+/// Arrow primitive that lets combinator laws be expressed and tested against plain
+/// functions.
+///
+/// # Examples
+///
+/// ```
+/// use quiver::combinator::{arr, Module};
+///
+/// let mut double = arr(|x: f64| x * 2.0);
+/// assert_eq!(double.tick(21.0), 42.0);
+/// ```
+pub fn arr<F, A, B>(f: F) -> Arr<F, A>
+where
+    F: Fn(A) -> B,
+{
+    Arr {
+        f,
+        _phantom: PhantomData,
+    }
+}
+
+impl<F, A, B> Module for Arr<F, A>
+where
+    F: Fn(A) -> B + Send,
+    A: Send,
+{
+    type In = A;
+    type Out = B;
+
+    #[inline]
+    fn tick(&mut self, input: Self::In) -> Self::Out {
+        (self.f)(input)
+    }
+
+    fn reset(&mut self) {}
+}
+
+/// Adapts a [`GraphModule`] (the engine's multi-port, type-erased module trait) into a
+/// single-in / single-out combinator [`Module`], so real DSP modules such as
+/// [`Vco`](crate::modules::Vco) or [`Svf`](crate::modules::Svf) can be composed with
+/// `.then`, `.parallel`, and `.fanout`.
+///
+/// One input port and one output port of the wrapped module are chosen at construction
+/// (by id, via [`new`](GraphModuleAdapter::new), or automatically from the first audio
+/// ports, via [`from_audio_ports`](GraphModuleAdapter::from_audio_ports)). Every other
+/// input port keeps its [`PortDef`] default; the wrapped module still reads those on each
+/// `tick`, so pulse-width, cutoff, etc. behave as if unpatched in a graph.
+pub struct GraphModuleAdapter<G: GraphModule> {
+    module: G,
+    input_port: PortId,
+    output_port: PortId,
+    inputs: PortValues,
+    outputs: PortValues,
+}
+
+impl<G: GraphModule> GraphModuleAdapter<G> {
+    /// Wrap `module`, driving input port `input_port` and reading output port
+    /// `output_port` on every `tick`.
+    pub fn new(module: G, input_port: PortId, output_port: PortId) -> Self {
+        let mut inputs = PortValues::new();
+        for port in &module.port_spec().inputs {
+            inputs.set(port.id, port.default);
+        }
+        Self {
+            module,
+            input_port,
+            output_port,
+            inputs,
+            outputs: PortValues::new(),
+        }
+    }
+
+    /// Wrap `module`, automatically choosing its first [`SignalKind::Audio`] input and
+    /// first [`SignalKind::Audio`] output port.
+    ///
+    /// Returns `None` if the module exposes no audio input or no audio output (e.g. a
+    /// `Vco`, whose only inputs are CV/pitch — use [`new`](GraphModuleAdapter::new) with
+    /// an explicit port id for those).
+    pub fn from_audio_ports(module: G) -> Option<Self> {
+        let (input_port, output_port) = {
+            let spec = module.port_spec();
+            let input_port = spec.inputs.iter().find(|p| p.kind == SignalKind::Audio)?.id;
+            let output_port = spec
+                .outputs
+                .iter()
+                .find(|p| p.kind == SignalKind::Audio)?
+                .id;
+            (input_port, output_port)
+        };
+        Some(Self::new(module, input_port, output_port))
+    }
+
+    /// Borrow the wrapped [`GraphModule`].
+    pub fn inner(&self) -> &G {
+        &self.module
+    }
+
+    /// Consume the adapter, returning the wrapped [`GraphModule`].
+    pub fn into_inner(self) -> G {
+        self.module
+    }
+}
+
+impl<G: GraphModule> Module for GraphModuleAdapter<G> {
+    type In = f64;
+    type Out = f64;
+
+    #[inline]
+    fn tick(&mut self, input: Self::In) -> Self::Out {
+        self.inputs.set(self.input_port, input);
+        self.module.tick(&self.inputs, &mut self.outputs);
+        self.outputs.get_or(self.output_port, 0.0)
+    }
+
+    fn reset(&mut self) {
+        self.module.reset();
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.module.set_sample_rate(sample_rate);
+    }
+}
+
+/// Adapts a single-in / single-out combinator [`Module`] into a [`GraphModule`], so a
+/// combinator chain (e.g. `a.then(b).then(c)`) can be added to a
+/// [`Patch`](crate::graph::Patch) via `patch.add(...)`.
+///
+/// The generated [`PortSpec`] has exactly one input port (id `0`) and one output port
+/// (id `10`), both [`SignalKind::Audio`], following the crate's input-ids-from-0 /
+/// output-ids-from-10 convention.
+pub struct ModuleGraphAdapter<M> {
+    module: M,
+    spec: PortSpec,
+}
+
+impl<M> ModuleGraphAdapter<M>
+where
+    M: Module<In = f64, Out = f64>,
+{
+    /// Wrap `module` with a one-in (`"in"`, id `0`) / one-out (`"out"`, id `10`) audio
+    /// port spec.
+    pub fn new(module: M) -> Self {
+        Self::with_ports(module, "in", "out")
+    }
+
+    /// Wrap `module`, naming its single input (id `0`) and output (id `10`) ports.
+    pub fn with_ports(
+        module: M,
+        input_name: impl Into<String>,
+        output_name: impl Into<String>,
+    ) -> Self {
+        let spec = PortSpec {
+            inputs: vec![PortDef::new(0, input_name, SignalKind::Audio)],
+            outputs: vec![PortDef::new(10, output_name, SignalKind::Audio)],
+        };
+        Self { module, spec }
+    }
+}
+
+impl<M> GraphModule for ModuleGraphAdapter<M>
+where
+    M: Module<In = f64, Out = f64> + Sync,
+{
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        let x = inputs.get_or(0, 0.0);
+        let y = self.module.tick(x);
+        outputs.set(10, y);
+    }
+
+    fn reset(&mut self) {
+        self.module.reset();
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.module.set_sample_rate(sample_rate);
+    }
+
+    fn type_id(&self) -> &'static str {
+        "combinator_chain"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 
     // Simple test module that multiplies by a constant
     struct Gain {
@@ -918,5 +1229,228 @@ mod tests {
         let mut output = vec![0.0; 4];
         gain.process(&input, &mut output);
         assert_eq!(output, vec![2.0, 4.0, 6.0, 8.0]);
+    }
+
+    // =========================================================================
+    // Q052: `arr` primitive and Arrow-law tests
+    // =========================================================================
+
+    // Stateful test module: running sum. Makes law tests non-trivial (an
+    // associativity/identity check on a stateless module would be vacuous).
+    struct Accum {
+        sum: f64,
+    }
+
+    impl Accum {
+        fn new() -> Self {
+            Self { sum: 0.0 }
+        }
+    }
+
+    impl Module for Accum {
+        type In = f64;
+        type Out = f64;
+
+        fn tick(&mut self, input: Self::In) -> Self::Out {
+            self.sum += input;
+            self.sum
+        }
+
+        fn reset(&mut self) {
+            self.sum = 0.0;
+        }
+    }
+
+    // Deterministic input sequence used by all law checks.
+    const SEQ: [f64; 8] = [0.5, -0.3, 1.0, 2.0, -1.5, 0.25, 3.0, -0.7];
+
+    fn run_mono<M: Module<In = f64, Out = f64>>(mut m: M) -> Vec<f64> {
+        SEQ.iter().map(|&x| m.tick(x)).collect()
+    }
+
+    // Feeds SEQ as the processed element and the sample index as the pass-through
+    // element, so `first`/`second` pass-through behavior is also exercised.
+    fn run_pair<M: Module<In = (f64, f64), Out = (f64, f64)>>(mut m: M) -> Vec<(f64, f64)> {
+        SEQ.iter()
+            .enumerate()
+            .map(|(i, &x)| m.tick((x, i as f64)))
+            .collect()
+    }
+
+    fn assert_seq_close(a: &[f64], b: &[f64]) {
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b) {
+            assert!((x - y).abs() < 1e-12, "sequence mismatch: {x} != {y}");
+        }
+    }
+
+    #[test]
+    fn test_arr_basic() {
+        let mut m = arr(|x: f64| x * 2.0 + 1.0);
+        assert!((m.tick(3.0) - 7.0).abs() < 1e-12);
+        // Stateless: reset / set_sample_rate are no-ops but must not panic.
+        m.reset();
+        m.set_sample_rate(48_000.0);
+        assert!((m.tick(0.0) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn arrow_law_identity() {
+        // id.then(f) == f  and  f.then(id) == f
+        let reference = run_mono(Accum::new());
+        let left_id = run_mono(Identity::<f64>::new().then(Accum::new()));
+        let right_id = run_mono(Accum::new().then(Identity::<f64>::new()));
+        assert_seq_close(&left_id, &reference);
+        assert_seq_close(&right_id, &reference);
+    }
+
+    #[test]
+    fn arrow_law_associativity() {
+        // (f.then(g)).then(h) == f.then(g.then(h))
+        // f, h are stateful (Accum); g is a scaling module.
+        let lhs = run_mono((Accum::new().then(Gain { factor: 2.0 })).then(Accum::new()));
+        let rhs = run_mono(Accum::new().then(Gain { factor: 2.0 }.then(Accum::new())));
+        assert_seq_close(&lhs, &rhs);
+    }
+
+    #[test]
+    fn arrow_law_first_distributes() {
+        // first(f.then(g)) == first(f).then(first(g))
+        let lhs = run_pair(Accum::new().then(Gain { factor: 3.0 }).first::<f64>());
+        let rhs = run_pair(
+            Accum::new()
+                .first::<f64>()
+                .then(Gain { factor: 3.0 }.first::<f64>()),
+        );
+        assert_eq!(lhs.len(), rhs.len());
+        for (a, b) in lhs.iter().zip(&rhs) {
+            assert!((a.0 - b.0).abs() < 1e-12, "processed element differs");
+            assert!((a.1 - b.1).abs() < 1e-12, "pass-through element differs");
+        }
+        // Sanity: the pass-through element is carried unchanged (equals the index).
+        for (i, pair) in lhs.iter().enumerate() {
+            assert!((pair.1 - i as f64).abs() < 1e-12);
+        }
+    }
+
+    // =========================================================================
+    // Q050: GraphModule <-> Module bridge adapters
+    // =========================================================================
+
+    // A minimal GraphModule for precise port-selection checks: out(10) = 2 * in(0).
+    struct DoublerGm {
+        spec: PortSpec,
+    }
+
+    impl DoublerGm {
+        fn new() -> Self {
+            Self {
+                spec: PortSpec {
+                    inputs: vec![PortDef::new(0, "in", SignalKind::Audio)],
+                    outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+                },
+            }
+        }
+    }
+
+    impl GraphModule for DoublerGm {
+        fn port_spec(&self) -> &PortSpec {
+            &self.spec
+        }
+        fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+            outputs.set(10, inputs.get_or(0, 0.0) * 2.0);
+        }
+        fn reset(&mut self) {}
+        fn set_sample_rate(&mut self, _sample_rate: f64) {}
+    }
+
+    #[test]
+    fn test_graph_module_adapter_drives_selected_ports() {
+        // GraphModule -> Module: chosen input (0) is driven, chosen output (10) is read.
+        let mut adapter = GraphModuleAdapter::new(DoublerGm::new(), 0, 10);
+        assert!((adapter.tick(3.0) - 6.0).abs() < 1e-12);
+        assert!((adapter.tick(-2.5) - (-5.0)).abs() < 1e-12);
+        // inner() exposes the wrapped module.
+        assert_eq!(adapter.inner().port_spec().outputs[0].id, 10);
+        // reset / set_sample_rate forward without panic.
+        adapter.reset();
+        adapter.set_sample_rate(48_000.0);
+    }
+
+    #[test]
+    fn test_graph_module_adapter_from_audio_ports() {
+        use crate::modules::{Svf, Vco};
+        // Svf has an audio input ("in") and audio outputs -> Some.
+        let svf = GraphModuleAdapter::from_audio_ports(Svf::new(44_100.0));
+        assert!(svf.is_some());
+        // Vco's inputs are all CV/pitch/gate (no Audio input) -> None.
+        assert!(GraphModuleAdapter::from_audio_ports(Vco::new(44_100.0)).is_none());
+    }
+
+    #[test]
+    fn test_graph_module_adapter_vco_svf_chain_produces_audio() {
+        use crate::modules::{Svf, Vco};
+        // Flagship Q050 check: a REAL Vco adapted and chained into a REAL Svf,
+        // via the combinator `.then`, produces nonzero audio.
+        let vco = GraphModuleAdapter::new(Vco::new(44_100.0), 0, 12); // voct in, saw out
+        let svf = GraphModuleAdapter::from_audio_ports(Svf::new(44_100.0)).unwrap();
+        let mut chain = vco.then(svf);
+
+        let mut peak = 0.0_f64;
+        for _ in 0..512 {
+            peak = peak.max(chain.tick(0.0).abs()); // 0 V/oct = middle C
+        }
+        assert!(
+            peak > 1e-6,
+            "expected nonzero audio from Vco -> Svf combinator chain, got {peak}"
+        );
+    }
+
+    #[test]
+    fn test_module_graph_adapter_direct() {
+        // Module -> GraphModule: one-in/one-out spec, tick maps in(0) -> out(10).
+        let mut node = ModuleGraphAdapter::new(arr(|x: f64| x * 3.0));
+        assert_eq!(node.port_spec().inputs.len(), 1);
+        assert_eq!(node.port_spec().outputs.len(), 1);
+        assert_eq!(node.port_spec().inputs[0].id, 0);
+        assert_eq!(node.port_spec().outputs[0].id, 10);
+        assert_eq!(node.type_id(), "combinator_chain");
+
+        let mut inputs = PortValues::new();
+        inputs.set(0, 2.0);
+        let mut outputs = PortValues::new();
+        node.tick(&inputs, &mut outputs);
+        assert!((outputs.get_or(10, 0.0) - 6.0).abs() < 1e-12);
+
+        node.reset();
+        node.set_sample_rate(48_000.0);
+    }
+
+    #[test]
+    fn test_module_graph_adapter_in_patch() {
+        use crate::graph::Patch;
+        use crate::modules::{StereoOutput, Vco};
+
+        // A combinator chain wrapped as a GraphModule node, added to a Patch.
+        let mut patch = Patch::new(44_100.0);
+        let chain = arr(|x: f64| x * 0.5).then(arr(|x: f64| x + 0.1));
+        let node = patch.add("chain", ModuleGraphAdapter::new(chain));
+        let vco = patch.add("vco", Vco::new(44_100.0));
+        let out = patch.add("out", StereoOutput::new());
+
+        patch.connect(vco.out("saw"), node.in_("in")).unwrap();
+        patch.connect(node.out("out"), out.in_("left")).unwrap();
+        patch.set_output(out.id());
+        patch.compile().unwrap();
+
+        let mut peak = 0.0_f64;
+        for _ in 0..512 {
+            let (left, _right) = patch.tick();
+            peak = peak.max(left.abs());
+        }
+        assert!(
+            peak > 1e-6,
+            "combinator chain wrapped as a GraphModule should tick inside a Patch, got {peak}"
+        );
     }
 }
