@@ -4,6 +4,7 @@
 //! arbitrary signal routing between modules. It handles topological sorting,
 //! execution ordering, and signal propagation.
 
+use crate::modules::common::flush_denorm;
 use crate::port::{GraphModule, ParamId, PortId, PortSpec, PortValues, SignalKind};
 use crate::StdMap;
 use alloc::boxed::Box;
@@ -360,6 +361,133 @@ impl NodeHandle {
     }
 }
 
+/// One precomputed incoming edge feeding an input port.
+///
+/// Built at [`Patch::compile`] from a [`Cable`]. `src_slot` is a dense index into
+/// [`Routing::out_buf`] identifying the source output value, so gathering an input is a
+/// direct array read rather than a scan of every cable in the patch.
+struct InEdge {
+    /// Dense index of the source output value in [`Routing::out_buf`].
+    src_slot: usize,
+    /// Optional attenuation/gain applied to the source value (see [`Cable::attenuation`]).
+    attenuation: Option<f64>,
+    /// Optional DC offset applied after attenuation (see [`Cable::offset`]).
+    offset: Option<f64>,
+}
+
+/// Compiled routing plan for a single input port (in [`PortSpec`] input order).
+struct InputPlan {
+    /// The input port's id (used as the [`PortValues`] key the module reads).
+    port_id: PortId,
+    /// Value used when the input is unpatched and not normalled.
+    default: f64,
+    /// Sibling input port this normals to when unpatched (see two-pass gather).
+    normalled_to: Option<PortId>,
+    /// Whether at least one cable targets this input. Mirrors the pre-compiled engine's
+    /// `has_connection`: when true the input is the sum of its `edges` (even if that sum is
+    /// 0.0), taking precedence over the default and any normalled fallback.
+    has_connection: bool,
+    /// Cables feeding this input, summed at runtime (hardware-style input mixing).
+    edges: Vec<InEdge>,
+}
+
+/// Compiled per-node execution record (parallel to [`Patch::execution_order`]).
+struct NodeExec {
+    /// Identity of the node in the [`SlotMap`].
+    node_id: NodeId,
+    /// Base index of this node's output values in [`Routing::out_buf`]; output port `k`
+    /// (in [`PortSpec`] order) lives at `out_base + k`.
+    out_base: usize,
+    /// Output port ids in [`PortSpec`] order (slot of `out_ids[k]` is `out_base + k`).
+    out_ids: Vec<PortId>,
+    /// Input plans in [`PortSpec`] input order.
+    inputs: Vec<InputPlan>,
+}
+
+impl NodeExec {
+    /// Resolve this node's input values into `dst` using the two-pass normalled rule,
+    /// reading source outputs from the dense `out_buf`. Semantically identical to the
+    /// previous cable-scanning `gather_inputs`, but does a single pass over exactly the
+    /// cables feeding each input.
+    fn gather(&self, out_buf: &[f64], dst: &mut PortValues) {
+        dst.clear();
+        // Pass 1: patched inputs (summed) and plain (non-normalled) defaults.
+        for plan in &self.inputs {
+            if plan.has_connection {
+                let mut sum = 0.0;
+                for e in &plan.edges {
+                    let value = out_buf[e.src_slot];
+                    let attenuated = e.attenuation.map(|a| value * a).unwrap_or(value);
+                    let with_offset = e.offset.map(|o| attenuated + o).unwrap_or(attenuated);
+                    sum += with_offset;
+                }
+                dst.set(plan.port_id, sum);
+            } else if plan.normalled_to.is_none() {
+                dst.set(plan.port_id, plan.default);
+            }
+            // else: normalled + unpatched -> resolved in pass 2 below.
+        }
+        // Pass 2: normalled-but-unpatched inputs read the *current-tick* value of the
+        // sibling INPUT they normal to (already resolved above), else fall back to default.
+        for plan in &self.inputs {
+            if dst.has(plan.port_id) {
+                continue;
+            }
+            let value = match plan.normalled_to {
+                Some(norm) => dst.get(norm).unwrap_or(plan.default),
+                None => plan.default,
+            };
+            dst.set(plan.port_id, value);
+        }
+    }
+
+    /// Scatter the module's outputs from `src` into the dense `out_buf`, flushing denormals
+    /// so inter-module feedback loops cannot circulate subnormal values. Only ports the
+    /// module actually wrote are updated; unwritten output slots retain their prior value
+    /// (matching the previous map-based scatter).
+    fn scatter(&self, src: &PortValues, out_buf: &mut [f64]) {
+        for (k, &port_id) in self.out_ids.iter().enumerate() {
+            if let Some(value) = src.get(port_id) {
+                out_buf[self.out_base + k] = flush_denorm(value);
+            }
+        }
+    }
+}
+
+/// Compiled, allocation-free routing state produced by [`Patch::compile`].
+///
+/// All buffers are preallocated at compile time so [`Patch::tick`] performs no heap
+/// allocation. `out_buf` persists across ticks, which is what gives cycle-breaker
+/// (delay-style) modules their one-sample feedback: a downstream node not yet executed this
+/// tick still holds last tick's value.
+#[derive(Default)]
+struct Routing {
+    /// Per-node execution records, in topological (execution) order.
+    nodes: Vec<NodeExec>,
+    /// Dense storage for every node's output values (one slot per output port).
+    out_buf: Vec<f64>,
+    /// Maps an output [`PortRef`] to its dense slot in `out_buf` (for `get_output_value`
+    /// and compile-time edge resolution). Not touched on the hot path.
+    out_slot_index: StdMap<PortRef, usize>,
+    /// Precomputed `(left, right)` output slots for `read_output` (right = left when mono).
+    output_slots: Option<(usize, usize)>,
+    /// Reusable per-node input buffers (parallel to `nodes`), cleared and refilled per tick.
+    scratch_in: Vec<PortValues>,
+    /// Reusable per-node output buffers (parallel to `nodes`), cleared and written per tick.
+    scratch_out: Vec<PortValues>,
+}
+
+impl Routing {
+    /// Read the stereo output from the precomputed output slots (silence if uncompiled or
+    /// the patch has no output node).
+    fn read_output(&self) -> (f64, f64) {
+        match self.output_slots {
+            Some((left, right)) => (self.out_buf[left], self.out_buf[right]),
+            None => (0.0, 0.0),
+        }
+    }
+}
+
 /// The main patch graph containing modules and connections
 pub struct Patch {
     nodes: SlotMap<NodeId, Node>,
@@ -370,7 +498,8 @@ pub struct Patch {
 
     // Execution state
     execution_order: Vec<NodeId>,
-    buffers: StdMap<PortRef, f64>,
+    // Compiled, preallocated routing (dense buffers + adjacency). Rebuilt by compile().
+    routing: Routing,
 
     // True when the graph has been mutated since the last successful compile().
     // tick() checks this and recompiles lazily.
@@ -397,7 +526,7 @@ impl Patch {
             cables: Vec::new(),
             next_cable_id: 0,
             execution_order: Vec::new(),
-            buffers: StdMap::new(),
+            routing: Routing::default(),
             // A fresh patch is "dirty" so the first tick() compiles automatically even if
             // the caller forgets to call compile().
             dirty: true,
@@ -740,7 +869,7 @@ impl Patch {
     /// last-tick values; `tick()` recompiles lazily via the `dirty` flag.
     fn invalidate(&mut self) {
         self.execution_order.clear();
-        self.buffers.clear();
+        self.routing = Routing::default();
         self.dirty = true;
     }
 
@@ -796,7 +925,7 @@ impl Patch {
             Ok(order) => order,
             Err(e) => {
                 self.execution_order.clear();
-                self.buffers.clear();
+                self.routing = Routing::default();
                 // Do not stay dirty: avoid re-running a known-failing sort every tick.
                 // A later structural mutation re-sets dirty via invalidate().
                 self.dirty = false;
@@ -806,23 +935,128 @@ impl Patch {
         };
         self.execution_order = order;
 
-        // Pre-allocate output buffers
-        self.buffers.clear();
-        for (id, node) in &self.nodes {
-            for output in &node.module.port_spec().outputs {
-                self.buffers.insert(
-                    PortRef {
-                        node: id,
-                        port: output.id,
-                    },
-                    0.0,
-                );
-            }
-        }
+        // Build the dense, preallocated routing plan (adjacency + buffers).
+        self.build_routing();
 
         self.dirty = false;
         self.last_compile_error = None;
         Ok(())
+    }
+
+    /// Build the compiled [`Routing`] from the current `execution_order`, cables and output
+    /// node. Runs only at compile time; all per-tick buffers are preallocated here so that
+    /// [`tick`](Self::tick) never allocates.
+    fn build_routing(&mut self) {
+        let mut routing = Routing::default();
+
+        // Pass A: assign a dense output slot to every node's output ports (in PortSpec
+        // order) and record each node's output base/ids. Slot order is stable and used by
+        // both edge resolution and get_output_value.
+        let mut slot: usize = 0;
+        for &node_id in &self.execution_order {
+            let node = self
+                .nodes
+                .get(node_id)
+                .expect("execution_order only holds live nodes");
+            let spec = node.module.port_spec();
+            let out_base = slot;
+            let mut out_ids = Vec::with_capacity(spec.outputs.len());
+            for output in &spec.outputs {
+                routing.out_slot_index.insert(
+                    PortRef {
+                        node: node_id,
+                        port: output.id,
+                    },
+                    slot,
+                );
+                out_ids.push(output.id);
+                slot += 1;
+            }
+            routing.nodes.push(NodeExec {
+                node_id,
+                out_base,
+                out_ids,
+                inputs: Vec::new(),
+            });
+        }
+        routing.out_buf.resize(slot, 0.0);
+
+        // Pass B: resolve each input's incoming cables into dense edges and preallocate the
+        // reusable scratch buffers (keys inserted here so the hot path never grows them).
+        for (exec_idx, &node_id) in self.execution_order.iter().enumerate() {
+            let node = self
+                .nodes
+                .get(node_id)
+                .expect("execution_order only holds live nodes");
+            let spec = node.module.port_spec();
+
+            let mut scratch_in = PortValues::new();
+            let mut scratch_out = PortValues::new();
+            let mut inputs = Vec::with_capacity(spec.inputs.len());
+
+            for input in &spec.inputs {
+                let port_ref = PortRef {
+                    node: node_id,
+                    port: input.id,
+                };
+                let mut edges = Vec::new();
+                let mut has_connection = false;
+                for cable in &self.cables {
+                    if cable.to == port_ref {
+                        has_connection = true;
+                        // A validated cable's source output always has a slot; guard anyway.
+                        if let Some(&src_slot) = routing.out_slot_index.get(&cable.from) {
+                            edges.push(InEdge {
+                                src_slot,
+                                attenuation: cable.attenuation,
+                                offset: cable.offset,
+                            });
+                        }
+                    }
+                }
+                inputs.push(InputPlan {
+                    port_id: input.id,
+                    default: input.default,
+                    normalled_to: input.normalled_to,
+                    has_connection,
+                    edges,
+                });
+                scratch_in.set(input.id, 0.0);
+            }
+            for output in &spec.outputs {
+                scratch_out.set(output.id, 0.0);
+            }
+
+            routing.nodes[exec_idx].inputs = inputs;
+            routing.scratch_in.push(scratch_in);
+            routing.scratch_out.push(scratch_out);
+        }
+
+        // Pass C: precompute the stereo output read slots (right = left when mono).
+        routing.output_slots = self.output_node.and_then(|out_node| {
+            let node = self.nodes.get(out_node)?;
+            let outputs = &node.module.port_spec().outputs;
+            let left_id = outputs.first()?.id;
+            let left = *routing.out_slot_index.get(&PortRef {
+                node: out_node,
+                port: left_id,
+            })?;
+            let right = outputs
+                .get(1)
+                .and_then(|p| {
+                    routing
+                        .out_slot_index
+                        .get(&PortRef {
+                            node: out_node,
+                            port: p.id,
+                        })
+                        .copied()
+                })
+                .unwrap_or(left);
+            Some((left, right))
+        });
+
+        self.routing = routing;
     }
 
     /// Whether the module at `node` is a feedback cycle-breaker (delay-style).
@@ -925,127 +1159,63 @@ impl Patch {
     /// output node, or an empty graph, likewise ticks to silence.
     pub fn tick(&mut self) -> (f64, f64) {
         // Lazily (re)compile if the graph was mutated since the last compile. On failure
-        // compile() records last_compile_error and leaves an empty schedule, so the loop
+        // compile() records last_compile_error and leaves an empty schedule, so the step
         // below is a no-op and we fall through to silence.
         if self.dirty {
             let _ = self.compile();
         }
-
-        for &node_id in &self.execution_order.clone() {
-            let inputs = self.gather_inputs(node_id);
-            let mut outputs = PortValues::new();
-
-            // Process the module
-            if let Some(node) = self.nodes.get_mut(node_id) {
-                node.module.tick(&inputs, &mut outputs);
-            }
-
-            // Store outputs in buffers
-            self.scatter_outputs(node_id, &outputs);
-        }
-
-        self.read_output()
+        self.tick_step()
     }
 
-    fn gather_inputs(&self, node_id: NodeId) -> PortValues {
-        let node = match self.nodes.get(node_id) {
-            Some(n) => n,
-            None => return PortValues::new(),
-        };
-        let spec = node.module.port_spec();
-        let mut values = PortValues::new();
-
-        // Pass 1: resolve every input that has a patched cable, plus plain (non-normalled)
-        // defaults. Normalled-but-unpatched inputs are deferred to pass 2 so they can read
-        // the *current-tick* resolved value of the sibling INPUT port they normal to.
-        for input in &spec.inputs {
-            let port_ref = PortRef {
-                node: node_id,
-                port: input.id,
-            };
-
-            // Sum all incoming cables (hardware-style input mixing)
-            let mut sum = 0.0;
-            let mut has_connection = false;
-
-            for cable in &self.cables {
-                if cable.to == port_ref {
-                    has_connection = true;
-                    let value = self.buffers.get(&cable.from).copied().unwrap_or(0.0);
-                    // Apply attenuation/attenuverter (signal * gain)
-                    let attenuated = cable.attenuation.map(|a| value * a).unwrap_or(value);
-                    // Apply DC offset after attenuation
-                    let with_offset = cable.offset.map(|o| attenuated + o).unwrap_or(attenuated);
-                    sum += with_offset;
-                }
-            }
-
-            if has_connection {
-                values.set(input.id, sum);
-            } else if input.normalled_to.is_none() {
-                // Unpatched with no normal: use the port's default.
-                values.set(input.id, input.default);
-            }
-            // else: normalled + unpatched -> resolved in pass 2 below.
+    /// Process a block of samples into stereo `out_left`/`out_right` slices with **no
+    /// per-frame heap allocation**.
+    ///
+    /// This is the allocation-free block entry point (in contrast to the default
+    /// [`GraphModule::process_block`], which builds a fresh [`PortValues`] per frame). It
+    /// (re)compiles once if needed, then drives the same per-sample engine over
+    /// `n = out_left.len().min(out_right.len())` frames, reusing the preallocated routing
+    /// buffers across every frame. Full SIMD-vectorized block execution is not performed;
+    /// the guarantee here is zero allocation, not vectorization.
+    pub fn tick_block(&mut self, out_left: &mut [f64], out_right: &mut [f64]) {
+        if self.dirty {
+            let _ = self.compile();
         }
-
-        // Pass 2: resolve normalled inputs. `normalled_to` names a sibling INPUT port on the
-        // SAME node; we read that port's value resolved above (this tick), NOT the output
-        // buffer namespace. This gives, e.g., StereoOutput's mono fallback (right normals to
-        // left) the current-sample left value on both channels instead of a stale/colliding
-        // output-buffer read. If the referenced sibling has not been resolved (e.g. a
-        // normal to a later normalled port, or a missing id), fall back to this port's
-        // default.
-        for input in &spec.inputs {
-            if values.has(input.id) {
-                continue;
-            }
-            if let Some(normalled) = input.normalled_to {
-                let v = values.get(normalled).unwrap_or(input.default);
-                values.set(input.id, v);
-            } else {
-                values.set(input.id, input.default);
-            }
-        }
-
-        values
-    }
-
-    fn scatter_outputs(&mut self, node_id: NodeId, outputs: &PortValues) {
-        for (&port_id, &value) in &outputs.values {
-            let port_ref = PortRef {
-                node: node_id,
-                port: port_id,
-            };
-            self.buffers.insert(port_ref, value);
+        let frames = out_left.len().min(out_right.len());
+        for frame in 0..frames {
+            let (left, right) = self.tick_step();
+            out_left[frame] = left;
+            out_right[frame] = right;
         }
     }
 
-    /// Read the stereo output from the output node's first two output ports (in
-    /// [`PortSpec`] order), rather than hardcoded port ids 0/1. The first output port is
-    /// the left channel; the second (if any) is the right. A mono node (single output) is
-    /// duplicated to both channels. Missing output node or buffers yield silence.
-    fn read_output(&self) -> (f64, f64) {
-        let Some(output_node) = self.output_node else {
-            return (0.0, 0.0);
-        };
-        let Some(node) = self.nodes.get(output_node) else {
-            return (0.0, 0.0);
-        };
-        let outputs = &node.module.port_spec().outputs;
+    /// Execute one sample of the already-compiled schedule (no dirty/recompile check).
+    ///
+    /// Allocation-free: iterates the execution order by index (no `execution_order.clone()`),
+    /// gathering into and scattering from reusable per-node scratch buffers via precompiled
+    /// adjacency and a dense output buffer. `nodes` and `routing` are disjoint fields, so the
+    /// module borrow and the routing-buffer borrows coexist without conflict.
+    fn tick_step(&mut self) -> (f64, f64) {
+        let routing = &mut self.routing;
+        let nodes = &mut self.nodes;
 
-        let read = |port: PortId| -> Option<f64> {
-            self.buffers
-                .get(&PortRef {
-                    node: output_node,
-                    port,
-                })
-                .copied()
-        };
+        for i in 0..routing.nodes.len() {
+            // Gather this node's inputs from the dense output buffer via precompiled edges.
+            routing.nodes[i].gather(&routing.out_buf, &mut routing.scratch_in[i]);
 
-        let left = outputs.first().and_then(|p| read(p.id)).unwrap_or(0.0);
-        let right = outputs.get(1).and_then(|p| read(p.id)).unwrap_or(left); // Mono fallback: duplicate left to right
-        (left, right)
+            // Run the module. scratch_out is cleared first so unwritten outputs are absent,
+            // matching the previous "fresh PortValues per tick" semantics.
+            let node_id = routing.nodes[i].node_id;
+            routing.scratch_out[i].clear();
+            if let Some(node) = nodes.get_mut(node_id) {
+                node.module
+                    .tick(&routing.scratch_in[i], &mut routing.scratch_out[i]);
+            }
+
+            // Scatter outputs back into the dense buffer (with denormal flushing).
+            routing.nodes[i].scatter(&routing.scratch_out[i], &mut routing.out_buf);
+        }
+
+        routing.read_output()
     }
 
     /// Reset all modules in the patch
@@ -1053,7 +1223,7 @@ impl Patch {
         for (_, node) in &mut self.nodes {
             node.module.reset();
         }
-        for value in self.buffers.values_mut() {
+        for value in self.routing.out_buf.iter_mut() {
             *value = 0.0;
         }
     }
@@ -1107,7 +1277,10 @@ impl Patch {
     /// This is used by the observer to collect real-time values for metering,
     /// scope display, and other visualizations.
     pub fn get_output_value(&self, node: NodeId, port: PortId) -> Option<f64> {
-        self.buffers.get(&PortRef { node, port }).copied()
+        self.routing
+            .out_slot_index
+            .get(&PortRef { node, port })
+            .map(|&slot| self.routing.out_buf[slot])
     }
 
     /// Get the signal kind for an output port by node ID and port ID
@@ -2088,5 +2261,104 @@ mod tests {
         assert!(s.contains("my_osc"));
         assert!(s.contains("my_out"));
         assert!(s.contains("validation_mode"));
+    }
+
+    // ========================================================================
+    // Wave C-0 performance remediation tests (zero-alloc routing)
+    // ========================================================================
+
+    // Q111: tick_block produces exactly the same stereo stream as an equal number of
+    // per-sample tick() calls (the block path is a pure loop over the same engine).
+    #[test]
+    fn test_tick_block_matches_per_sample_tick() {
+        fn ramp_svf_patch() -> (Patch, NodeHandle) {
+            let mut patch = Patch::new(44100.0);
+            let src = patch.add("src", ConstSource::new(0.9));
+            let pass = patch.add("pass", Passthrough::new());
+            patch.connect(src.out("out"), pass.in_("in")).unwrap();
+            patch.set_output(pass.id());
+            patch.compile().unwrap();
+            (patch, pass)
+        }
+
+        // Reference: 8 per-sample ticks.
+        let (mut a, _) = ramp_svf_patch();
+        let mut reference = Vec::new();
+        for _ in 0..8 {
+            reference.push(a.tick());
+        }
+
+        // Block: one tick_block of length 8 on a fresh identical patch.
+        let (mut b, _) = ramp_svf_patch();
+        let mut left = [0.0_f64; 8];
+        let mut right = [0.0_f64; 8];
+        b.tick_block(&mut left, &mut right);
+
+        for (i, &(l, r)) in reference.iter().enumerate() {
+            assert!((left[i] - l).abs() < 1e-12, "left[{}] mismatch", i);
+            assert!((right[i] - r).abs() < 1e-12, "right[{}] mismatch", i);
+        }
+    }
+
+    // Q111: tick_block only writes min(left.len(), right.len()) frames.
+    #[test]
+    fn test_tick_block_uses_min_length() {
+        let mut patch = Patch::new(44100.0);
+        let src = patch.add("src", ConstSource::new(1.0));
+        patch.set_output(src.id());
+        patch.compile().unwrap();
+
+        let mut left = [0.0_f64; 4];
+        let mut right = [0.0_f64; 2]; // shorter -> only 2 frames processed
+        patch.tick_block(&mut left, &mut right);
+
+        assert_eq!(left[0], 1.0);
+        assert_eq!(left[1], 1.0);
+        assert_eq!(left[2], 0.0, "frame beyond min length must be untouched");
+        assert_eq!(left[3], 0.0);
+        assert_eq!(right[0], 1.0);
+        assert_eq!(right[1], 1.0);
+    }
+
+    // Q108: a subnormal value produced by a module is flushed to zero as it is scattered
+    // into the routing buffers, so it cannot circulate through the graph.
+    #[test]
+    fn test_denormal_is_flushed_at_scatter() {
+        let mut patch = Patch::new(44100.0);
+        // Source emits a subnormal-magnitude value (< 1e-20 flush threshold).
+        let src = patch.add("src", ConstSource::new(1e-30));
+        let pass = patch.add("pass", Passthrough::new());
+        patch.connect(src.out("out"), pass.in_("in")).unwrap();
+        patch.set_output(pass.id());
+        patch.compile().unwrap();
+
+        let (l, r) = patch.tick();
+        assert_eq!(l, 0.0, "subnormal must be flushed to zero");
+        assert_eq!(r, 0.0);
+        // The source's own output slot is flushed too (observable via get_output_value).
+        assert_eq!(patch.get_output_value(src.id(), 10), Some(0.0));
+    }
+
+    // Q107: precompiled adjacency preserves multi-cable input summing with per-cable
+    // attenuation/offset, and get_output_value reflects the dense buffer.
+    #[test]
+    fn test_precompiled_adjacency_sums_and_exposes_outputs() {
+        let mut patch = Patch::new(44100.0);
+        let s1 = patch.add("s1", ConstSource::new(2.0));
+        let s2 = patch.add("s2", ConstSource::new(3.0));
+        let sum = patch.add("sum", SumModule::new());
+        // Two cables into input "a": 2.0 and (3.0 * 0.5 + 1.0) = 2.5 -> a = 4.5; b = default 0.
+        patch.connect(s1.out("out"), sum.in_("a")).unwrap();
+        patch
+            .connect_modulated(s2.out("out"), sum.in_("a"), 0.5, 1.0)
+            .unwrap();
+        patch.set_output(sum.id());
+        patch.compile().unwrap();
+
+        let (l, _) = patch.tick();
+        assert!((l - 4.5).abs() < 1e-12, "expected 4.5, got {}", l);
+        assert_eq!(patch.get_output_value(sum.id(), 10), Some(4.5));
+        // Non-existent port -> None (dense slot index miss).
+        assert_eq!(patch.get_output_value(sum.id(), 999), None);
     }
 }
