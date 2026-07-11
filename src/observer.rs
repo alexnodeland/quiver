@@ -12,6 +12,7 @@
 //! - **Scope**: Oscilloscope waveform capture for visualization
 //! - **Spectrum**: Frequency spectrum via DFT for analyzer display
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 #[cfg(feature = "wasm")]
 use alloc::string::ToString;
@@ -20,7 +21,7 @@ use alloc::vec::Vec;
 use core::f64::consts::PI;
 use serde::{Deserialize, Serialize};
 
-use crate::StdMap;
+use crate::graph::NodeId;
 
 // =============================================================================
 // Observable Value Types
@@ -164,43 +165,84 @@ impl SubscriptionTarget {
 // Port Buffer for Sample Accumulation
 // =============================================================================
 
-/// Unique key for a port buffer
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct PortKey {
-    node_id: String,
-    port_id: u32,
+/// Discriminates how a port buffer is consumed when its window fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BufferKind {
+    /// Level metering: RMS/peak over the accumulated window.
+    Level,
+    /// Gate state with hysteresis (no accumulation).
+    Gate,
+    /// Oscilloscope waveform capture.
+    Scope,
+    /// Spectrum analysis via FFT.
+    Spectrum,
+    /// Parameter subscription (no per-sample capture).
+    Param,
 }
 
-/// Buffer for accumulating samples from a single port
+/// A result produced when a buffer's window fills, awaiting formatting into an
+/// [`ObservableValue`] on the consumer/poll side.
+///
+/// `Level`/`Gate` results carry the (allocation-free) derived scalars computed
+/// on the capture path. `ScopeFull`/`SpectrumFull` keep their raw samples in the
+/// owning [`PortBuffer`] so the expensive cloning / FFT / dB conversion happens
+/// off the audio thread (see [`StateObserver::flush_ready`]).
+#[derive(Debug, Clone)]
+enum ReadyResult {
+    Level { rms_db: f64, peak_db: f64 },
+    Gate { active: bool },
+    ScopeFull,
+    SpectrumFull,
+}
+
+/// Buffer for accumulating per-sample data from a single subscribed port.
+///
+/// The sample `Vec` is preallocated to `target_size` and reused; the capture
+/// path ([`StateObserver::collect_sample`]) never grows it, so it performs no
+/// heap allocation.
 #[derive(Debug)]
 struct PortBuffer {
-    /// Accumulated samples
+    /// Accumulated samples (capacity == `target_size`, never reallocated on the
+    /// capture path).
     samples: Vec<f32>,
-    /// Target buffer size
+    /// Target buffer size (window length).
     target_size: usize,
-    /// Current gate state (for Gate subscriptions)
+    /// Current gate state (for Gate subscriptions).
     gate_active: bool,
+    /// How this buffer is consumed.
+    kind: BufferKind,
+    /// Resolved node id, cached lazily to avoid a per-sample name lookup (and
+    /// the per-sample `String` allocation that a keyed map would require).
+    node_id: Option<NodeId>,
+    /// Deferred result awaiting formatting on the poll side.
+    ready: Option<ReadyResult>,
 }
 
 impl PortBuffer {
-    fn new(size: usize) -> Self {
+    fn new(kind: BufferKind, size: usize) -> Self {
         Self {
             samples: Vec::with_capacity(size),
             target_size: size,
             gate_active: false,
+            kind,
+            node_id: None,
+            ready: None,
         }
     }
 
+    #[inline]
     fn push(&mut self, sample: f32) {
         if self.samples.len() < self.target_size {
             self.samples.push(sample);
         }
     }
 
+    #[inline]
     fn is_full(&self) -> bool {
         self.samples.len() >= self.target_size
     }
 
+    #[inline]
     fn clear(&mut self) {
         self.samples.clear();
     }
@@ -245,12 +287,12 @@ impl Default for ObserverConfig {
 pub struct StateObserver {
     /// Active subscriptions
     subscriptions: Vec<SubscriptionTarget>,
-    /// Pending updates to send to UI
-    pending_updates: Vec<ObservableValue>,
+    /// Per-subscription capture buffers, index-parallel to `subscriptions`.
+    buffers: Vec<PortBuffer>,
+    /// Pending updates to send to the UI (bounded ring buffer).
+    pending_updates: VecDeque<ObservableValue>,
     /// Configuration
     config: ObserverConfig,
-    /// Sample buffers for ports requiring accumulation
-    port_buffers: StdMap<PortKey, PortBuffer>,
 }
 
 impl StateObserver {
@@ -263,9 +305,9 @@ impl StateObserver {
     pub fn with_config(config: ObserverConfig) -> Self {
         Self {
             subscriptions: Vec::new(),
-            pending_updates: Vec::new(),
+            buffers: Vec::new(),
+            pending_updates: VecDeque::new(),
             config,
-            port_buffers: StdMap::new(),
         }
     }
 
@@ -278,95 +320,51 @@ impl StateObserver {
     pub fn add_subscriptions(&mut self, targets: Vec<SubscriptionTarget>) {
         for target in targets {
             if !self.subscriptions.iter().any(|s| s.id() == target.id()) {
-                // Create port buffer for Level/Scope/Spectrum subscriptions
-                self.ensure_port_buffer(&target);
+                // Each subscription owns one capture buffer, kept index-parallel.
+                let buffer = Self::make_buffer(&target, &self.config);
                 self.subscriptions.push(target);
+                self.buffers.push(buffer);
             }
         }
     }
 
-    /// Ensure a port buffer exists for subscriptions that need sample accumulation
-    fn ensure_port_buffer(&mut self, target: &SubscriptionTarget) {
-        let (key, size) = match target {
-            SubscriptionTarget::Level { node_id, port_id } => (
-                PortKey {
-                    node_id: node_id.clone(),
-                    port_id: *port_id,
-                },
-                self.config.level_buffer_size,
-            ),
-            SubscriptionTarget::Gate { node_id, port_id } => (
-                PortKey {
-                    node_id: node_id.clone(),
-                    port_id: *port_id,
-                },
-                1, // Gate doesn't need accumulation, but we track state
-            ),
-            SubscriptionTarget::Scope {
-                node_id,
-                port_id,
-                buffer_size,
-            } => (
-                PortKey {
-                    node_id: node_id.clone(),
-                    port_id: *port_id,
-                },
-                *buffer_size,
-            ),
-            SubscriptionTarget::Spectrum {
-                node_id,
-                port_id,
-                fft_size,
-            } => (
-                PortKey {
-                    node_id: node_id.clone(),
-                    port_id: *port_id,
-                },
-                *fft_size,
-            ),
-            SubscriptionTarget::Param { .. } => return, // Params don't need buffers
-        };
-
-        self.port_buffers
-            .entry(key)
-            .or_insert_with(|| PortBuffer::new(size));
+    /// Build the capture buffer for a subscription target.
+    fn make_buffer(target: &SubscriptionTarget, config: &ObserverConfig) -> PortBuffer {
+        match target {
+            SubscriptionTarget::Level { .. } => {
+                PortBuffer::new(BufferKind::Level, config.level_buffer_size)
+            }
+            // Gate does not accumulate, but tracks state with a 1-sample window.
+            SubscriptionTarget::Gate { .. } => PortBuffer::new(BufferKind::Gate, 1),
+            SubscriptionTarget::Scope { buffer_size, .. } => {
+                PortBuffer::new(BufferKind::Scope, *buffer_size)
+            }
+            SubscriptionTarget::Spectrum { fft_size, .. } => {
+                PortBuffer::new(BufferKind::Spectrum, *fft_size)
+            }
+            // Params don't capture per-sample; the buffer is inert.
+            SubscriptionTarget::Param { .. } => PortBuffer::new(BufferKind::Param, 0),
+        }
     }
 
     /// Remove subscriptions by ID
     pub fn remove_subscriptions(&mut self, ids: &[String]) {
-        self.subscriptions.retain(|s| !ids.contains(&s.id()));
-        // Clean up orphaned port buffers
-        self.cleanup_port_buffers();
-    }
-
-    /// Remove port buffers that no longer have subscriptions
-    fn cleanup_port_buffers(&mut self) {
-        let active_keys: Vec<PortKey> = self
-            .subscriptions
-            .iter()
-            .filter_map(|s| match s {
-                SubscriptionTarget::Level { node_id, port_id }
-                | SubscriptionTarget::Gate { node_id, port_id }
-                | SubscriptionTarget::Scope {
-                    node_id, port_id, ..
-                }
-                | SubscriptionTarget::Spectrum {
-                    node_id, port_id, ..
-                } => Some(PortKey {
-                    node_id: node_id.clone(),
-                    port_id: *port_id,
-                }),
-                SubscriptionTarget::Param { .. } => None,
-            })
-            .collect();
-
-        self.port_buffers.retain(|k, _| active_keys.contains(k));
+        // Remove in lockstep so `subscriptions` and `buffers` stay index-parallel.
+        let mut i = 0;
+        while i < self.subscriptions.len() {
+            if ids.contains(&self.subscriptions[i].id()) {
+                self.subscriptions.remove(i);
+                self.buffers.remove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Clear all subscriptions
     pub fn clear_subscriptions(&mut self) {
         self.subscriptions.clear();
-        self.port_buffers.clear();
+        self.buffers.clear();
     }
 
     /// Get all active subscriptions
@@ -379,33 +377,47 @@ impl StateObserver {
         self.subscriptions.iter().any(|s| s.id() == target.id())
     }
 
-    /// Push an update (should be called from audio processing)
+    /// Push an update directly into the pending queue (if subscribed).
+    ///
+    /// Retained for compatibility with callers that format their own updates;
+    /// the per-sample capture path uses [`Self::collect_sample`] instead.
     pub fn push_update(&mut self, value: ObservableValue) {
-        // Only push if subscribed
-        let is_subscribed = self.subscriptions.iter().any(|s| s.id() == value.key());
-
-        if is_subscribed {
-            // Remove old update for same key (keep latest)
-            self.pending_updates.retain(|v| v.key() != value.key());
-
-            // Add new update
-            self.pending_updates.push(value);
-
-            // Trim if over limit (drop oldest)
-            while self.pending_updates.len() > self.config.max_pending_updates {
-                self.pending_updates.remove(0);
-            }
+        if self.subscriptions.iter().any(|s| s.id() == value.key()) {
+            self.enqueue(value);
         }
     }
 
-    /// Drain all pending updates (for WASM polling)
-    pub fn drain_updates(&mut self) -> Vec<ObservableValue> {
-        core::mem::take(&mut self.pending_updates)
+    /// Enqueue a formatted update, deduplicating by key and enforcing the bound.
+    ///
+    /// Runs on the consumer/poll side, never on the per-sample capture path.
+    /// Uses `VecDeque::pop_front` (O(1)) to drop the oldest when over the limit,
+    /// replacing the old `Vec::remove(0)` O(n) shift.
+    fn enqueue(&mut self, value: ObservableValue) {
+        if let Some(pos) = self
+            .pending_updates
+            .iter()
+            .position(|v| v.key() == value.key())
+        {
+            self.pending_updates.remove(pos);
+        }
+        self.pending_updates.push_back(value);
+        while self.pending_updates.len() > self.config.max_pending_updates {
+            self.pending_updates.pop_front();
+        }
     }
 
-    /// Peek at pending updates without draining
-    pub fn pending_updates(&self) -> &[ObservableValue] {
-        &self.pending_updates
+    /// Drain all pending updates (for WASM polling).
+    ///
+    /// Flushes any capture buffers that have filled (formatting them off the
+    /// audio thread) before returning the queued updates.
+    pub fn drain_updates(&mut self) -> Vec<ObservableValue> {
+        self.flush_ready();
+        self.pending_updates.drain(..).collect()
+    }
+
+    /// Peek at pending updates without draining.
+    pub fn pending_updates(&self) -> impl Iterator<Item = &ObservableValue> {
+        self.pending_updates.iter()
     }
 
     /// Get number of pending updates
@@ -418,216 +430,187 @@ impl StateObserver {
         &self.config
     }
 
-    /// Collect observable values from the patch after processing
+    /// Capture one sample per subscribed port from the patch.
     ///
-    /// This method should be called after each audio processing cycle
-    /// to update subscribed values. It accumulates samples for Level/Scope/Spectrum
-    /// and emits updates when buffers are full.
-    pub fn collect_from_patch(&mut self, patch: &crate::graph::Patch) {
-        // Clone subscriptions to avoid borrow issues
-        let subscriptions = self.subscriptions.clone();
-
-        for target in &subscriptions {
-            match target {
-                SubscriptionTarget::Param { node_id, param_id } => {
-                    self.collect_param(patch, node_id, param_id);
-                }
-                SubscriptionTarget::Level { node_id, port_id } => {
-                    self.collect_level(patch, node_id, *port_id);
-                }
-                SubscriptionTarget::Gate { node_id, port_id } => {
-                    self.collect_gate(patch, node_id, *port_id);
-                }
-                SubscriptionTarget::Scope {
-                    node_id, port_id, ..
-                } => {
-                    self.collect_scope(patch, node_id, *port_id);
-                }
-                SubscriptionTarget::Spectrum {
-                    node_id, port_id, ..
-                } => {
-                    self.collect_spectrum(patch, node_id, *port_id);
-                }
-            }
-        }
-    }
-
-    /// Collect parameter value
-    fn collect_param(&mut self, patch: &crate::graph::Patch, node_id: &str, param_id: &str) {
-        if let Some(nid) = patch.get_node_id_by_name(node_id) {
-            if let Ok(idx) = param_id.parse::<u32>() {
-                if let Some(value) = patch.get_param(nid, idx) {
-                    self.push_update(ObservableValue::Param {
-                        node_id: node_id.into(),
-                        param_id: param_id.into(),
-                        value,
-                    });
-                }
-            }
-        }
-    }
-
-    /// Collect level metering (accumulates samples, emits when buffer full)
-    fn collect_level(&mut self, patch: &crate::graph::Patch, node_id: &str, port_id: u32) {
-        let key = PortKey {
-            node_id: node_id.into(),
-            port_id,
-        };
-
-        // Get current sample value from patch
-        let value = patch
-            .get_node_id_by_name(node_id)
-            .and_then(|nid| patch.get_output_value(nid, port_id));
-
-        let Some(value) = value else { return };
-
-        // Check if buffer is ready and compute update
-        let update = if let Some(buffer) = self.port_buffers.get_mut(&key) {
-            buffer.push(value as f32);
-
-            if buffer.is_full() {
-                let rms_db = calculate_rms_db(&buffer.samples);
-                let peak_db = calculate_peak_db(&buffer.samples);
-                buffer.clear();
-                Some(ObservableValue::Level {
-                    node_id: node_id.into(),
-                    port_id,
-                    rms_db,
-                    peak_db,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some(update) = update {
-            self.push_update(update);
-        }
-    }
-
-    /// Collect gate state (immediate, with hysteresis)
-    fn collect_gate(&mut self, patch: &crate::graph::Patch, node_id: &str, port_id: u32) {
-        let key = PortKey {
-            node_id: node_id.into(),
-            port_id,
-        };
-
-        let value = patch
-            .get_node_id_by_name(node_id)
-            .and_then(|nid| patch.get_output_value(nid, port_id));
-
-        let Some(value) = value else { return };
-
-        // Hysteresis thresholds
+    /// This is the real-time capture entry point: call it **once per audio
+    /// sample** inside the engine's tick loop so that Scope/Spectrum/Level see
+    /// every sample rather than one per block (which aliases everything above
+    /// `sample_rate / (2 * block_size)`). It is allocation-free: subscriptions
+    /// are iterated by index (no clone), node ids are resolved once and cached,
+    /// samples land in preallocated buffers, and formatting/serialization of any
+    /// filled buffer is deferred to [`Self::flush_ready`] / [`Self::drain_updates`]
+    /// on the consumer side.
+    pub fn collect_sample(&mut self, patch: &crate::graph::Patch) {
         const THRESHOLD_ON: f32 = 2.5;
         const THRESHOLD_OFF: f32 = 0.5;
 
-        let update = if let Some(buffer) = self.port_buffers.get_mut(&key) {
-            let sample = value as f32;
-            let was_active = buffer.gate_active;
-
-            if buffer.gate_active {
-                if sample < THRESHOLD_OFF {
-                    buffer.gate_active = false;
+        for i in 0..self.subscriptions.len() {
+            // Disjoint field borrows: read the subscription, write its buffer.
+            let (node_name, port_id) = match &self.subscriptions[i] {
+                SubscriptionTarget::Level { node_id, port_id }
+                | SubscriptionTarget::Gate { node_id, port_id }
+                | SubscriptionTarget::Scope {
+                    node_id, port_id, ..
                 }
-            } else if sample > THRESHOLD_ON {
-                buffer.gate_active = true;
-            }
+                | SubscriptionTarget::Spectrum {
+                    node_id, port_id, ..
+                } => (node_id.as_str(), *port_id),
+                SubscriptionTarget::Param { .. } => continue,
+            };
 
-            // Only emit update on state change
-            if buffer.gate_active != was_active {
-                Some(ObservableValue::Gate {
-                    node_id: node_id.into(),
-                    port_id,
-                    active: buffer.gate_active,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+            let buffer = &mut self.buffers[i];
 
-        if let Some(update) = update {
-            self.push_update(update);
+            // Resolve the node id once (avoids a per-sample name scan/allocation).
+            if buffer.node_id.is_none() {
+                buffer.node_id = patch.get_node_id_by_name(node_name);
+            }
+            let Some(nid) = buffer.node_id else { continue };
+            let Some(value) = patch.get_output_value(nid, port_id) else {
+                continue;
+            };
+            let sample = value as f32;
+
+            match buffer.kind {
+                BufferKind::Level => {
+                    buffer.push(sample);
+                    if buffer.is_full() {
+                        let rms_db = calculate_rms_db(&buffer.samples);
+                        let peak_db = calculate_peak_db(&buffer.samples);
+                        buffer.clear();
+                        buffer.ready = Some(ReadyResult::Level { rms_db, peak_db });
+                    }
+                }
+                BufferKind::Gate => {
+                    let was_active = buffer.gate_active;
+                    if buffer.gate_active {
+                        if sample < THRESHOLD_OFF {
+                            buffer.gate_active = false;
+                        }
+                    } else if sample > THRESHOLD_ON {
+                        buffer.gate_active = true;
+                    }
+                    if buffer.gate_active != was_active {
+                        buffer.ready = Some(ReadyResult::Gate {
+                            active: buffer.gate_active,
+                        });
+                    }
+                }
+                BufferKind::Scope => {
+                    buffer.push(sample);
+                    if buffer.is_full() {
+                        // Keep samples; clone/format happens off the audio thread.
+                        buffer.ready = Some(ReadyResult::ScopeFull);
+                    }
+                }
+                BufferKind::Spectrum => {
+                    buffer.push(sample);
+                    if buffer.is_full() {
+                        // Keep samples; FFT/dB conversion happens off the audio thread.
+                        buffer.ready = Some(ReadyResult::SpectrumFull);
+                    }
+                }
+                BufferKind::Param => {}
+            }
         }
     }
 
-    /// Collect scope waveform (accumulates samples, emits when buffer full)
-    fn collect_scope(&mut self, patch: &crate::graph::Patch, node_id: &str, port_id: u32) {
-        let key = PortKey {
-            node_id: node_id.into(),
-            port_id,
-        };
+    /// Format any filled capture buffers into pending updates.
+    ///
+    /// Runs on the consumer/poll side: this is where String node ids are
+    /// allocated, scope samples are cloned, and the spectrum FFT + dB conversion
+    /// run — all kept off the per-sample audio path.
+    fn flush_ready(&mut self) {
+        for i in 0..self.buffers.len() {
+            let Some(ready) = self.buffers[i].ready.take() else {
+                continue;
+            };
 
-        let value = patch
-            .get_node_id_by_name(node_id)
-            .and_then(|nid| patch.get_output_value(nid, port_id));
+            let (node_id, port_id) = match &self.subscriptions[i] {
+                SubscriptionTarget::Level { node_id, port_id }
+                | SubscriptionTarget::Gate { node_id, port_id }
+                | SubscriptionTarget::Scope {
+                    node_id, port_id, ..
+                }
+                | SubscriptionTarget::Spectrum {
+                    node_id, port_id, ..
+                } => (node_id.clone(), *port_id),
+                SubscriptionTarget::Param { .. } => continue,
+            };
 
-        let Some(value) = value else { return };
-
-        let update = if let Some(buffer) = self.port_buffers.get_mut(&key) {
-            buffer.push(value as f32);
-
-            if buffer.is_full() {
-                let samples = buffer.samples.clone();
-                buffer.clear();
-                Some(ObservableValue::Scope {
-                    node_id: node_id.into(),
+            let value = match ready {
+                ReadyResult::Level { rms_db, peak_db } => ObservableValue::Level {
+                    node_id,
                     port_id,
-                    samples,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+                    rms_db,
+                    peak_db,
+                },
+                ReadyResult::Gate { active } => ObservableValue::Gate {
+                    node_id,
+                    port_id,
+                    active,
+                },
+                ReadyResult::ScopeFull => {
+                    let samples = self.buffers[i].samples.clone();
+                    self.buffers[i].clear();
+                    ObservableValue::Scope {
+                        node_id,
+                        port_id,
+                        samples,
+                    }
+                }
+                ReadyResult::SpectrumFull => {
+                    let bins = compute_magnitude_spectrum(&self.buffers[i].samples);
+                    // Bins were captured one-per-sample, so the true capture rate
+                    // is the full sample rate and Nyquist is sample_rate / 2.
+                    let freq_range = (0.0, self.config.sample_rate as f32 / 2.0);
+                    self.buffers[i].clear();
+                    ObservableValue::Spectrum {
+                        node_id,
+                        port_id,
+                        bins,
+                        freq_range,
+                    }
+                }
+            };
 
-        if let Some(update) = update {
-            self.push_update(update);
+            self.enqueue(value);
         }
     }
 
-    /// Collect spectrum data (accumulates samples, computes DFT when buffer full)
-    fn collect_spectrum(&mut self, patch: &crate::graph::Patch, node_id: &str, port_id: u32) {
-        let key = PortKey {
-            node_id: node_id.into(),
-            port_id,
-        };
+    /// Collect observable values from the patch after processing.
+    ///
+    /// Legacy per-block entry point kept so existing callers (the WASM engine)
+    /// compile unchanged. It captures one sample per call via [`Self::collect_sample`]
+    /// and formats immediately. **New code should call [`Self::collect_sample`]
+    /// once per audio sample** for correct (non-aliased) Scope/Spectrum capture,
+    /// then [`Self::drain_updates`] on the UI side.
+    pub fn collect_from_patch(&mut self, patch: &crate::graph::Patch) {
+        self.collect_params(patch);
+        self.collect_sample(patch);
+        self.flush_ready();
+    }
 
-        let value = patch
-            .get_node_id_by_name(node_id)
-            .and_then(|nid| patch.get_output_value(nid, port_id));
-
-        let Some(value) = value else { return };
-
-        let sample_rate = self.config.sample_rate as f32;
-
-        let update = if let Some(buffer) = self.port_buffers.get_mut(&key) {
-            buffer.push(value as f32);
-
-            if buffer.is_full() {
-                let bins = compute_magnitude_spectrum(&buffer.samples);
-                let freq_range = (0.0, sample_rate / 2.0);
-                buffer.clear();
-                Some(ObservableValue::Spectrum {
-                    node_id: node_id.into(),
-                    port_id,
-                    bins,
-                    freq_range,
-                })
-            } else {
-                None
+    /// Collect parameter values (control-rate; off the audio path).
+    fn collect_params(&mut self, patch: &crate::graph::Patch) {
+        // Iterate immutably, then enqueue, to avoid borrowing conflicts.
+        let mut updates: Vec<ObservableValue> = Vec::new();
+        for sub in &self.subscriptions {
+            if let SubscriptionTarget::Param { node_id, param_id } = sub {
+                if let Some(nid) = patch.get_node_id_by_name(node_id) {
+                    if let Ok(idx) = param_id.parse::<u32>() {
+                        if let Some(value) = patch.get_param(nid, idx) {
+                            updates.push(ObservableValue::Param {
+                                node_id: node_id.clone(),
+                                param_id: param_id.clone(),
+                                value,
+                            });
+                        }
+                    }
+                }
             }
-        } else {
-            None
-        };
-
-        if let Some(update) = update {
-            self.push_update(update);
+        }
+        for update in updates {
+            self.enqueue(update);
         }
     }
 }
@@ -696,21 +679,37 @@ impl Default for LevelMeterState {
     }
 }
 
+/// Peak-hold decay rate once the hold window has elapsed, in dB per sample.
+///
+/// ≈20 dB/s at a 44.1 kHz sample rate — a typical VU/PPM meter fall-back rate.
+const PEAK_HOLD_DECAY_DB_PER_SAMPLE: f64 = 20.0 / 44_100.0;
+
 impl LevelMeterState {
-    /// Update the meter with new samples
+    /// Update the meter with new samples.
+    ///
+    /// The held peak latches on a new maximum, is held for `peak_hold_samples`,
+    /// and then **decays gradually** toward the current peak at
+    /// [`PEAK_HOLD_DECAY_DB_PER_SAMPLE`] rather than snapping to it. The hold
+    /// window re-arms only when a new higher peak arrives; the counter is bounded
+    /// so decay continues every update after the window (it never collapses into
+    /// a plain follower).
     pub fn update(&mut self, samples: &[f32], peak_hold_samples: usize) {
         self.rms_db = calculate_rms_db(samples);
         self.peak_db = calculate_peak_db(samples);
 
-        // Update peak hold
-        if self.peak_db > self.peak_hold_db {
+        if self.peak_db >= self.peak_hold_db {
+            // New (or equal) peak: latch and re-arm the hold window.
             self.peak_hold_db = self.peak_db;
             self.samples_since_peak = 0;
         } else {
-            self.samples_since_peak += samples.len();
+            self.samples_since_peak = self.samples_since_peak.saturating_add(samples.len());
             if self.samples_since_peak > peak_hold_samples {
-                // Decay peak hold
-                self.peak_hold_db = self.peak_db;
+                // Hold elapsed: decay smoothly toward the current peak. Saturate
+                // the counter (rather than resetting to zero, which would re-hold
+                // and stair-step) so decay keeps progressing each update.
+                let decay = PEAK_HOLD_DECAY_DB_PER_SAMPLE * samples.len() as f64;
+                self.peak_hold_db = (self.peak_hold_db - decay).max(self.peak_db);
+                self.samples_since_peak = peak_hold_samples + 1;
             }
         }
     }
@@ -783,20 +782,119 @@ impl Default for GateDetector {
 }
 
 // =============================================================================
-// Spectrum Analysis (Simple DFT for no_std compatibility)
+// Spectrum Analysis (radix-2 FFT, no_std-safe via libm)
 // =============================================================================
 
-/// Compute magnitude spectrum using a simple DFT
+/// In-place iterative radix-2 Cooley–Tukey FFT (forward transform).
 ///
-/// Returns N/2 magnitude bins (positive frequencies only).
-/// For production use, consider using a proper FFT library.
+/// `re` and `im` must have equal length that is a power of two. Runs in
+/// O(n log n) with only O(log n) transcendental (`libm::cos`/`sin`) calls — the
+/// per-butterfly twiddle is advanced by complex recurrence — making it suitable
+/// for the real-time path where the old O(n²) DFT called sin/cos O(n²) times.
+///
+/// Shared by [`compute_magnitude_spectrum`] here and by
+/// `visual::SpectrumAnalyzer` (which is `std`-only but reuses this alloc-tier
+/// routine).
+pub(crate) fn fft_radix2(re: &mut [f64], im: &mut [f64]) {
+    let n = re.len();
+    debug_assert_eq!(n, im.len());
+    debug_assert!(n == 0 || n.is_power_of_two());
+    if n <= 1 {
+        return;
+    }
+
+    // Bit-reversal permutation.
+    let mut j = 0usize;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+
+    // Danielson–Lanczos stages.
+    let mut len = 2;
+    while len <= n {
+        let ang = -2.0 * PI / len as f64; // negative sign => forward transform
+        let (wlen_re, wlen_im) = (libm::cos(ang), libm::sin(ang));
+        let half = len / 2;
+        let mut base = 0;
+        while base < n {
+            let (mut w_re, mut w_im) = (1.0_f64, 0.0_f64);
+            for k in 0..half {
+                let a = base + k;
+                let b = base + k + half;
+                let t_re = re[b] * w_re - im[b] * w_im;
+                let t_im = re[b] * w_im + im[b] * w_re;
+                re[b] = re[a] - t_re;
+                im[b] = im[a] - t_im;
+                re[a] += t_re;
+                im[a] += t_im;
+                // Advance twiddle: w *= wlen.
+                let nw_re = w_re * wlen_re - w_im * wlen_im;
+                let nw_im = w_re * wlen_im + w_im * wlen_re;
+                w_re = nw_re;
+                w_im = nw_im;
+            }
+            base += len;
+        }
+        len <<= 1;
+    }
+}
+
+/// Compute a Hann-windowed magnitude spectrum (dB), N/2 positive-frequency bins.
+///
+/// Uses the O(n log n) [`fft_radix2`] for power-of-two lengths and falls back to
+/// a direct DFT only for the rare non-power-of-two window.
 fn compute_magnitude_spectrum(samples: &[f32]) -> Vec<f32> {
     let n = samples.len();
-    if n == 0 {
+    if n < 2 {
         return vec![];
     }
 
-    // Apply Hann window to reduce spectral leakage
+    if !n.is_power_of_two() {
+        return compute_magnitude_spectrum_dft(samples);
+    }
+
+    // Hann-window into the real part; imaginary part starts at zero.
+    let mut re: Vec<f64> = Vec::with_capacity(n);
+    let mut im: Vec<f64> = vec![0.0; n];
+    for (i, &s) in samples.iter().enumerate() {
+        let window = 0.5 * (1.0 - libm::cos(2.0 * PI * i as f64 / (n - 1) as f64));
+        re.push(s as f64 * window);
+    }
+
+    fft_radix2(&mut re, &mut im);
+
+    let num_bins = n / 2;
+    let mut magnitudes = Vec::with_capacity(num_bins);
+    for k in 0..num_bins {
+        let magnitude = libm::sqrt(re[k] * re[k] + im[k] * im[k]) / n as f64;
+        let magnitude_db = if magnitude > 1e-10 {
+            20.0 * libm::log10(magnitude)
+        } else {
+            -100.0
+        };
+        magnitudes.push(magnitude_db.clamp(-100.0, 0.0) as f32);
+    }
+
+    magnitudes
+}
+
+/// Direct O(n²) DFT magnitude spectrum. Used only as a fallback for
+/// non-power-of-two windows and as a numeric reference in tests.
+fn compute_magnitude_spectrum_dft(samples: &[f32]) -> Vec<f32> {
+    let n = samples.len();
+    if n < 2 {
+        return vec![];
+    }
+
     let windowed: Vec<f64> = samples
         .iter()
         .enumerate()
@@ -806,29 +904,22 @@ fn compute_magnitude_spectrum(samples: &[f32]) -> Vec<f32> {
         })
         .collect();
 
-    // Compute DFT for positive frequencies only (N/2 bins)
     let num_bins = n / 2;
     let mut magnitudes = Vec::with_capacity(num_bins);
-
     for k in 0..num_bins {
         let mut real = 0.0;
         let mut imag = 0.0;
-
         for (i, &sample) in windowed.iter().enumerate() {
             let angle = -2.0 * PI * k as f64 * i as f64 / n as f64;
             real += sample * libm::cos(angle);
             imag += sample * libm::sin(angle);
         }
-
-        // Magnitude in dB (normalized)
         let magnitude = libm::sqrt(real * real + imag * imag) / n as f64;
         let magnitude_db = if magnitude > 1e-10 {
             20.0 * libm::log10(magnitude)
         } else {
             -100.0
         };
-
-        // Clamp to reasonable range and convert to f32
         magnitudes.push(magnitude_db.clamp(-100.0, 0.0) as f32);
     }
 
@@ -955,24 +1046,27 @@ mod tests {
     }
 
     #[test]
-    fn test_state_observer_creates_port_buffers() {
+    fn test_state_observer_creates_buffers() {
         let mut observer = StateObserver::new();
 
-        // Level subscription should create a port buffer
+        // Level subscription should create a Level capture buffer.
         observer.add_subscriptions(vec![SubscriptionTarget::Level {
             node_id: "vco1".into(),
             port_id: 0,
         }]);
 
-        assert_eq!(observer.port_buffers.len(), 1);
+        assert_eq!(observer.buffers.len(), 1);
+        assert_eq!(observer.buffers[0].kind, BufferKind::Level);
 
-        // Param subscription should NOT create a port buffer
+        // Buffers stay index-parallel to subscriptions; a Param subscription
+        // gets an inert buffer.
         observer.add_subscriptions(vec![SubscriptionTarget::Param {
             node_id: "vco1".into(),
             param_id: "freq".into(),
         }]);
 
-        assert_eq!(observer.port_buffers.len(), 1);
+        assert_eq!(observer.buffers.len(), 2);
+        assert_eq!(observer.buffers[1].kind, BufferKind::Param);
     }
 
     #[test]
@@ -984,11 +1078,12 @@ mod tests {
             port_id: 0,
         }]);
 
-        assert_eq!(observer.port_buffers.len(), 1);
+        assert_eq!(observer.buffers.len(), 1);
 
         observer.remove_subscriptions(&["level:vco1:0".into()]);
 
-        assert_eq!(observer.port_buffers.len(), 0);
+        assert_eq!(observer.buffers.len(), 0);
+        assert_eq!(observer.subscriptions().len(), 0);
     }
 
     #[test]
@@ -1154,5 +1249,268 @@ mod tests {
         let json = serde_json::to_string(&spectrum).unwrap();
         assert!(json.contains("\"type\":\"spectrum\""));
         assert!(json.contains("\"freq_range\""));
+    }
+
+    // ---- Q104: peak-hold holds, then decays gradually (no snap / no follower) ----
+    #[test]
+    fn test_level_meter_peak_hold_and_decay() {
+        let mut meter = LevelMeterState::default();
+        let hold = 100usize;
+
+        // Establish a peak at ~0 dB (amplitude 1.0).
+        meter.update(&[1.0, -1.0], hold);
+        let held = meter.peak_hold_db;
+        assert!((held - 0.0).abs() < 0.1);
+
+        // Within the hold window: quieter signal, peak hold must NOT drop.
+        meter.update(&[0.1; 50], hold); // 50 < 100 samples
+        assert_eq!(
+            meter.peak_hold_db, held,
+            "peak hold must hold within the window"
+        );
+
+        // Past the hold window: it must begin decaying.
+        meter.update(&[0.1; 60], hold); // total 110 > 100
+        assert!(
+            meter.peak_hold_db < held,
+            "peak hold must decay after the window"
+        );
+        // ...but must NOT snap straight to the current (much lower) peak.
+        let current_peak = meter.peak_db;
+        assert!(
+            meter.peak_hold_db > current_peak + 1.0,
+            "decay must be gradual, not an instant snap"
+        );
+
+        // Decay continues each subsequent update (does not collapse to a follower).
+        let after_first = meter.peak_hold_db;
+        meter.update(&[0.1; 60], hold);
+        assert!(
+            meter.peak_hold_db < after_first,
+            "decay must continue every update after the hold window"
+        );
+        assert!(
+            meter.peak_hold_db >= current_peak,
+            "decay never overshoots the current peak"
+        );
+    }
+
+    // ---- Q101: radix-2 FFT agrees with the direct DFT on a known sine ----
+    #[test]
+    fn test_fft_matches_dft_on_sine() {
+        let n = 64usize;
+        let bin = 5usize;
+
+        // Real cosine at exactly `bin` cycles across the window.
+        let input: Vec<f64> = (0..n)
+            .map(|i| libm::cos(2.0 * PI * bin as f64 * i as f64 / n as f64))
+            .collect();
+
+        // FFT magnitudes.
+        let mut re = input.clone();
+        let mut im = vec![0.0f64; n];
+        fft_radix2(&mut re, &mut im);
+
+        // Reference direct DFT magnitude at bin k.
+        let dft_mag = |k: usize| -> f64 {
+            let mut r = 0.0;
+            let mut i = 0.0;
+            for (t, &x) in input.iter().enumerate() {
+                let ang = -2.0 * PI * k as f64 * t as f64 / n as f64;
+                r += x * libm::cos(ang);
+                i += x * libm::sin(ang);
+            }
+            libm::sqrt(r * r + i * i)
+        };
+
+        let mut peak_bin = 0usize;
+        let mut peak_mag = -1.0;
+        for k in 0..n / 2 {
+            let fft_mag = libm::sqrt(re[k] * re[k] + im[k] * im[k]);
+            assert!(
+                (fft_mag - dft_mag(k)).abs() < 1e-9,
+                "bin {k}: fft {fft_mag} vs dft {}",
+                dft_mag(k)
+            );
+            if fft_mag > peak_mag {
+                peak_mag = fft_mag;
+                peak_bin = k;
+            }
+        }
+        assert_eq!(peak_bin, bin, "FFT peak bin must match the input frequency");
+    }
+
+    // ---- Q099: collect_sample captures one sample per call (per-sample rate) ----
+    fn build_constant_patch(value: f64) -> crate::graph::Patch {
+        let mut patch = crate::graph::Patch::new(44_100.0);
+        let level = alloc::sync::Arc::new(crate::io::AtomicF64::new(value));
+        let src = patch.add("src", crate::io::ExternalInput::audio(level));
+        let out = patch.add("out", crate::modules::StereoOutput::new());
+        patch.connect(src.out("out"), out.in_("left")).unwrap();
+        patch.set_output(out.id());
+        patch.compile().unwrap();
+        patch
+    }
+
+    #[test]
+    fn test_collect_sample_per_sample_capture() {
+        let mut patch = build_constant_patch(0.5);
+        let mut obs = StateObserver::new();
+        obs.add_subscriptions(vec![SubscriptionTarget::Scope {
+            node_id: "src".into(),
+            port_id: 0,
+            buffer_size: 8,
+        }]);
+
+        // Eight per-sample captures fill an 8-sample scope buffer exactly once
+        // (the old path needed eight *blocks*).
+        for _ in 0..8 {
+            patch.tick();
+            obs.collect_sample(&patch);
+        }
+
+        let updates = obs.drain_updates();
+        let samples = updates
+            .iter()
+            .find_map(|u| match u {
+                ObservableValue::Scope { samples, .. } => Some(samples.clone()),
+                _ => None,
+            })
+            .expect("expected a scope update after 8 per-sample captures");
+        assert_eq!(samples.len(), 8);
+        for s in &samples {
+            assert!((s - 0.5).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_spectrum_freq_range_uses_true_capture_rate() {
+        let mut patch = build_constant_patch(0.25);
+        let mut obs = StateObserver::new();
+        let fft_size = 16usize;
+        obs.add_subscriptions(vec![SubscriptionTarget::Spectrum {
+            node_id: "src".into(),
+            port_id: 0,
+            fft_size,
+        }]);
+
+        for _ in 0..fft_size {
+            patch.tick();
+            obs.collect_sample(&patch);
+        }
+
+        let updates = obs.drain_updates();
+        let (bins, freq_range) = updates
+            .iter()
+            .find_map(|u| match u {
+                ObservableValue::Spectrum {
+                    bins, freq_range, ..
+                } => Some((bins.clone(), *freq_range)),
+                _ => None,
+            })
+            .expect("expected a spectrum update");
+        // Per-sample capture => true rate is the full sample rate; Nyquist = sr/2.
+        assert_eq!(freq_range, (0.0, 22_050.0));
+        assert_eq!(bins.len(), fft_size / 2);
+    }
+
+    // ---- Q100: the per-sample capture path performs no heap allocation ----
+    #[test]
+    fn test_collect_sample_is_allocation_free() {
+        let mut patch = build_constant_patch(0.5);
+        let mut obs = StateObserver::new();
+        obs.add_subscriptions(vec![
+            SubscriptionTarget::Level {
+                node_id: "src".into(),
+                port_id: 0,
+            },
+            SubscriptionTarget::Scope {
+                node_id: "src".into(),
+                port_id: 0,
+                buffer_size: 64,
+            },
+            SubscriptionTarget::Spectrum {
+                node_id: "src".into(),
+                port_id: 0,
+                fft_size: 64,
+            },
+            SubscriptionTarget::Gate {
+                node_id: "src".into(),
+                port_id: 0,
+            },
+        ]);
+
+        // Populate output buffers once (patch.tick itself allocates elsewhere, so
+        // it is deliberately outside the measured region), and warm up the
+        // node-id cache and the thread-local allocation counter.
+        patch.tick();
+        obs.collect_sample(&patch);
+        let _ = alloc_guard::count_allocations(|| {});
+
+        // Many per-sample captures must not allocate.
+        let allocs = alloc_guard::count_allocations(|| {
+            for _ in 0..2048 {
+                obs.collect_sample(&patch);
+            }
+        });
+        assert_eq!(
+            allocs, 0,
+            "collect_sample must be allocation-free on the audio path"
+        );
+    }
+}
+
+/// Thread-scoped allocation counter used to prove the per-sample capture path
+/// (`StateObserver::collect_sample`) does not allocate. Thread-local so it is
+/// robust under the parallel test harness.
+#[cfg(all(test, feature = "std"))]
+mod alloc_guard {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNTING: Cell<bool> = const { Cell::new(false) };
+        static LOCAL_COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    struct CountingAllocator;
+
+    #[inline]
+    fn note_alloc() {
+        // Only count on threads that armed the guard; `try_with` avoids panics
+        // (and re-entrancy) during TLS init/teardown. Const-initialized `Cell`s
+        // do not themselves allocate on access.
+        let _ = COUNTING.try_with(|c| {
+            if c.get() {
+                let _ = LOCAL_COUNT.try_with(|n| n.set(n.get() + 1));
+            }
+        });
+    }
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note_alloc();
+            System.alloc(layout)
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout);
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            note_alloc();
+            System.realloc(ptr, layout, new_size)
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: CountingAllocator = CountingAllocator;
+
+    /// Run `f` with allocation counting armed on the current thread and return
+    /// the number of allocations observed.
+    pub(super) fn count_allocations<F: FnOnce()>(f: F) -> usize {
+        LOCAL_COUNT.with(|n| n.set(0));
+        COUNTING.with(|c| c.set(true));
+        f();
+        COUNTING.with(|c| c.set(false));
+        LOCAL_COUNT.with(|n| n.get())
     }
 }

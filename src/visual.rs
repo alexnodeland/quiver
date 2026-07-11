@@ -727,27 +727,25 @@ impl SpectrumAnalyzer {
     }
 
     fn compute_spectrum(&mut self) {
-        // Simple DFT (not optimized, but works for demonstration)
-        // In production, you'd use a proper FFT library
+        // O(n log n) radix-2 FFT (shared with the observer) instead of the old
+        // O(n²) hand-rolled DFT. `fft_size` is always a power of two (enforced
+        // in `new`), so the FFT is always applicable.
         let n = self.fft_size;
         let half = n / 2;
 
+        // Hann-window into the real part; imaginary part starts at zero.
+        let mut re: Vec<f64> = Vec::with_capacity(n);
+        let mut im: Vec<f64> = vec![0.0; n];
+        for (i, &sample) in self.buffer.iter().enumerate() {
+            let window =
+                0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / (n - 1) as f64).cos());
+            re.push(sample * window);
+        }
+
+        crate::observer::fft_radix2(&mut re, &mut im);
+
         for k in 0..half {
-            let mut real = 0.0;
-            let mut imag = 0.0;
-
-            for (i, &sample) in self.buffer.iter().enumerate() {
-                // Apply Hann window
-                let window =
-                    0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / (n - 1) as f64).cos());
-                let windowed = sample * window;
-
-                let angle = -2.0 * std::f64::consts::PI * k as f64 * i as f64 / n as f64;
-                real += windowed * angle.cos();
-                imag += windowed * angle.sin();
-            }
-
-            let magnitude = (real * real + imag * imag).sqrt() / (n as f64);
+            let magnitude = (re[k] * re[k] + im[k] * im[k]).sqrt() / (n as f64);
             let db = 20.0 * (magnitude + 1e-10).log10();
 
             // Apply smoothing
@@ -776,7 +774,12 @@ impl SpectrumAnalyzer {
         }
     }
 
-    /// Get peak frequency
+    /// Get peak frequency.
+    ///
+    /// NaN bins (which can arise from divergent feedback or filter self-
+    /// oscillation blow-up — exactly the failures this analyzer helps diagnose)
+    /// are treated as negative infinity, so they are never selected as the peak
+    /// and the comparison never panics.
     pub fn peak_frequency(&self) -> f64 {
         let freq_resolution = self.sample_rate / self.fft_size as f64;
 
@@ -784,7 +787,11 @@ impl SpectrumAnalyzer {
             .spectrum
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| {
+                let a = if a.is_nan() { f64::NEG_INFINITY } else { **a };
+                let b = if b.is_nan() { f64::NEG_INFINITY } else { **b };
+                a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+            })
             .unwrap_or((0, &-100.0));
 
         peak_bin as f64 * freq_resolution
@@ -1045,6 +1052,27 @@ mod tests {
         let peak = analyzer.peak_frequency();
         // Should be close to 440 Hz (within one bin)
         assert!((peak - 440.0).abs() < 200.0);
+    }
+
+    #[test]
+    fn test_spectrum_peak_frequency_nan_safe() {
+        let mut analyzer = SpectrumAnalyzer::new(256, 44100.0);
+
+        // Establish a real peak, then poison a bin with NaN (as a divergent
+        // patch would). peak_frequency must not panic and must ignore the NaN.
+        let freq_resolution = 44100.0 / analyzer.fft_size as f64;
+        analyzer.spectrum[5] = 0.0; // clear real peak
+        analyzer.spectrum[10] = f64::NAN;
+
+        let peak = analyzer.peak_frequency();
+        assert!(peak.is_finite());
+        assert!((peak - 5.0 * freq_resolution).abs() < 1e-6);
+
+        // All-NaN spectrum still returns a finite sentinel rather than panicking.
+        for bin in analyzer.spectrum.iter_mut() {
+            *bin = f64::NAN;
+        }
+        assert!(analyzer.peak_frequency().is_finite());
     }
 
     // Level meter tests

@@ -121,114 +121,198 @@ impl OscMessage {
     }
 }
 
-/// OSC address pattern matching
+/// OSC address pattern matcher implementing OSC 1.0 wildcard semantics.
+///
+/// Matching is **component-scoped** (`*` and `?` never cross a `/`), and
+/// supports character classes `[a-z]` with ranges, negation `[!...]`, and
+/// alternation `{foo,bar}`. Malformed patterns (an unterminated `[` or `{`,
+/// or an empty class) fail to match rather than silently swallowing the rest
+/// of the pattern.
 pub struct OscPattern {
-    /// Pattern segments
-    segments: Vec<PatternSegment>,
-}
-
-#[derive(Debug, Clone)]
-enum PatternSegment {
-    Literal(String),
-    Wildcard,             // *
-    SingleChar,           // ?
-    CharClass(Vec<char>), // [abc]
+    /// Pattern split into path components (each free of `/`).
+    components: Vec<String>,
 }
 
 impl OscPattern {
-    /// Parse an OSC address pattern
+    /// Parse an OSC address pattern.
     pub fn new(pattern: &str) -> Self {
-        let mut segments = Vec::new();
-        let mut current = String::new();
-
-        let mut chars = pattern.chars().peekable();
-        while let Some(c) = chars.next() {
-            match c {
-                '/' => {
-                    if !current.is_empty() {
-                        segments.push(PatternSegment::Literal(current.clone()));
-                        current.clear();
-                    }
-                }
-                '*' => {
-                    if !current.is_empty() {
-                        segments.push(PatternSegment::Literal(current.clone()));
-                        current.clear();
-                    }
-                    segments.push(PatternSegment::Wildcard);
-                }
-                '?' => {
-                    if !current.is_empty() {
-                        segments.push(PatternSegment::Literal(current.clone()));
-                        current.clear();
-                    }
-                    segments.push(PatternSegment::SingleChar);
-                }
-                '[' => {
-                    if !current.is_empty() {
-                        segments.push(PatternSegment::Literal(current.clone()));
-                        current.clear();
-                    }
-                    let mut class = Vec::new();
-                    while let Some(&next) = chars.peek() {
-                        if next == ']' {
-                            chars.next();
-                            break;
-                        }
-                        class.push(chars.next().unwrap());
-                    }
-                    segments.push(PatternSegment::CharClass(class));
-                }
-                _ => {
-                    current.push(c);
-                }
-            }
-        }
-        if !current.is_empty() {
-            segments.push(PatternSegment::Literal(current));
-        }
-
-        Self { segments }
+        let components = pattern
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        Self { components }
     }
 
-    /// Check if an address matches this pattern
+    /// Check if an address matches this pattern.
+    ///
+    /// Both sides are split into path components; each address component must
+    /// match the pattern component at the same position, and the component
+    /// counts must be equal (OSC has no cross-component `*`).
     pub fn matches(&self, address: &str) -> bool {
-        // Simplified matching - just check for literal prefix
         let parts: Vec<&str> = address.split('/').filter(|s| !s.is_empty()).collect();
-        let mut part_idx = 0;
+        if parts.len() != self.components.len() {
+            return false;
+        }
+        self.components
+            .iter()
+            .zip(parts.iter())
+            .all(|(pat, part)| component_matches(pat, part))
+    }
+}
 
-        for segment in &self.segments {
-            if part_idx >= parts.len() {
-                return matches!(segment, PatternSegment::Wildcard);
+/// Match a single path component against an OSC pattern component.
+fn component_matches(pattern: &str, text: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = text.chars().collect();
+    glob_match(&pat, &txt)
+}
+
+/// Recursive OSC glob matcher over the remaining pattern and text.
+fn glob_match(pat: &[char], text: &[char]) -> bool {
+    let Some((&c, rest)) = pat.split_first() else {
+        return text.is_empty();
+    };
+
+    match c {
+        '*' => {
+            // Match zero or more characters (never `/`, already split out).
+            (0..=text.len()).any(|i| glob_match(rest, &text[i..]))
+        }
+        '?' => !text.is_empty() && glob_match(rest, &text[1..]),
+        '[' => match parse_class(pat) {
+            Some((class, consumed)) => {
+                !text.is_empty()
+                    && class_matches(&class, text[0])
+                    && glob_match(&pat[consumed..], &text[1..])
             }
+            // Malformed class => fail to match.
+            None => false,
+        },
+        '{' => match parse_alternation(pat) {
+            Some((alts, consumed)) => alts.iter().any(|alt| {
+                strip_prefix(alt, text).is_some_and(|rem| glob_match(&pat[consumed..], rem))
+            }),
+            // Malformed alternation => fail to match.
+            None => false,
+        },
+        _ => !text.is_empty() && text[0] == c && glob_match(rest, &text[1..]),
+    }
+}
 
-            match segment {
-                PatternSegment::Literal(lit) => {
-                    if parts[part_idx] != lit {
-                        return false;
-                    }
-                    part_idx += 1;
+/// One entry of a character class.
+enum ClassItem {
+    Char(char),
+    Range(char, char),
+}
+
+/// A parsed `[...]` character class.
+struct CharClass {
+    negated: bool,
+    items: Vec<ClassItem>,
+}
+
+/// Parse a `[...]` class beginning at `pat[0] == '['`.
+///
+/// Returns the class and the number of pattern chars consumed (including the
+/// closing `]`), or `None` if the class is unterminated or empty (malformed).
+fn parse_class(pat: &[char]) -> Option<(CharClass, usize)> {
+    debug_assert_eq!(pat.first(), Some(&'['));
+    let mut i = 1;
+    let mut negated = false;
+    if matches!(pat.get(i), Some('!') | Some('^')) {
+        negated = true;
+        i += 1;
+    }
+
+    let mut items = Vec::new();
+    let mut closed = false;
+    while i < pat.len() {
+        if pat[i] == ']' {
+            closed = true;
+            i += 1;
+            break;
+        }
+        // A range `a-z`: a '-' between two chars, where the char after '-' is
+        // not the closing ']'.
+        if i + 2 < pat.len() && pat[i + 1] == '-' && pat[i + 2] != ']' {
+            items.push(ClassItem::Range(pat[i], pat[i + 2]));
+            i += 3;
+        } else {
+            items.push(ClassItem::Char(pat[i]));
+            i += 1;
+        }
+    }
+
+    if !closed || items.is_empty() {
+        return None;
+    }
+    Some((CharClass { negated, items }, i))
+}
+
+/// Test a character against a parsed class.
+fn class_matches(class: &CharClass, ch: char) -> bool {
+    let mut hit = false;
+    for item in &class.items {
+        match item {
+            ClassItem::Char(c) => {
+                if *c == ch {
+                    hit = true;
+                    break;
                 }
-                PatternSegment::Wildcard => {
-                    return true; // Match rest
-                }
-                PatternSegment::SingleChar => {
-                    if parts[part_idx].len() != 1 {
-                        return false;
-                    }
-                    part_idx += 1;
-                }
-                PatternSegment::CharClass(chars) => {
-                    let p = parts[part_idx];
-                    if p.len() != 1 || !chars.contains(&p.chars().next().unwrap()) {
-                        return false;
-                    }
-                    part_idx += 1;
+            }
+            ClassItem::Range(a, b) => {
+                let (lo, hi) = if a <= b { (*a, *b) } else { (*b, *a) };
+                if ch >= lo && ch <= hi {
+                    hit = true;
+                    break;
                 }
             }
         }
+    }
+    hit ^ class.negated
+}
 
-        part_idx >= parts.len()
+/// Parse a `{a,b,c}` alternation beginning at `pat[0] == '{'`.
+///
+/// Returns the (literal) alternatives and the number of pattern chars consumed
+/// (including the closing `}`), or `None` if unterminated (malformed).
+fn parse_alternation(pat: &[char]) -> Option<(Vec<Vec<char>>, usize)> {
+    debug_assert_eq!(pat.first(), Some(&'{'));
+    let mut i = 1;
+    let mut alts = Vec::new();
+    let mut current = Vec::new();
+    let mut closed = false;
+    while i < pat.len() {
+        match pat[i] {
+            '}' => {
+                alts.push(current);
+                closed = true;
+                i += 1;
+                break;
+            }
+            ',' => {
+                alts.push(core::mem::take(&mut current));
+                i += 1;
+            }
+            c => {
+                current.push(c);
+                i += 1;
+            }
+        }
+    }
+    if !closed {
+        return None;
+    }
+    Some((alts, i))
+}
+
+/// If `text` starts with the literal `prefix`, return the remaining text.
+fn strip_prefix<'a>(prefix: &[char], text: &'a [char]) -> Option<&'a [char]> {
+    if text.len() >= prefix.len() && text[..prefix.len()] == *prefix {
+        Some(&text[prefix.len()..])
+    } else {
+        None
     }
 }
 
@@ -1400,8 +1484,82 @@ mod tests {
     #[test]
     fn test_osc_pattern_wildcard() {
         let pattern = OscPattern::new("/synth/*");
+        // `*` matches within a single component...
         assert!(pattern.matches("/synth/osc"));
-        assert!(pattern.matches("/synth/filter/cutoff"));
+        assert!(pattern.matches("/synth/filter"));
+        // ...but never crosses a component boundary (OSC has no cross-component `*`).
+        assert!(!pattern.matches("/synth/filter/cutoff"));
+        assert!(!pattern.matches("/synth"));
+    }
+
+    #[test]
+    fn test_osc_pattern_wildcard_partial_component() {
+        let pattern = OscPattern::new("/synth/osc*");
+        assert!(pattern.matches("/synth/osc"));
+        assert!(pattern.matches("/synth/osc1"));
+        assert!(pattern.matches("/synth/oscillator"));
+        assert!(!pattern.matches("/synth/lfo"));
+
+        let mid = OscPattern::new("/a/f*r");
+        assert!(mid.matches("/a/filter"));
+        assert!(mid.matches("/a/fr"));
+        assert!(!mid.matches("/a/filik"));
+    }
+
+    #[test]
+    fn test_osc_pattern_char_class_range() {
+        let pattern = OscPattern::new("/ch[0-9]");
+        assert!(pattern.matches("/ch0"));
+        assert!(pattern.matches("/ch7"));
+        assert!(!pattern.matches("/chx"));
+        // A range char is not a literal set of {0, -, 9}.
+        assert!(!pattern.matches("/ch-"));
+
+        let alpha = OscPattern::new("/[a-c]");
+        assert!(alpha.matches("/a"));
+        assert!(alpha.matches("/c"));
+        assert!(!alpha.matches("/d"));
+    }
+
+    #[test]
+    fn test_osc_pattern_char_class_negation() {
+        let pattern = OscPattern::new("/ch[!0-9]");
+        assert!(pattern.matches("/chx"));
+        assert!(!pattern.matches("/ch5"));
+
+        let neg = OscPattern::new("/[!abc]");
+        assert!(neg.matches("/d"));
+        assert!(!neg.matches("/a"));
+    }
+
+    #[test]
+    fn test_osc_pattern_alternation() {
+        let pattern = OscPattern::new("/synth/{osc,lfo}");
+        assert!(pattern.matches("/synth/osc"));
+        assert!(pattern.matches("/synth/lfo"));
+        assert!(!pattern.matches("/synth/vcf"));
+
+        // Alternation combined with surrounding literals.
+        let mixed = OscPattern::new("/v{1,2}/gain");
+        assert!(mixed.matches("/v1/gain"));
+        assert!(mixed.matches("/v2/gain"));
+        assert!(!mixed.matches("/v3/gain"));
+    }
+
+    #[test]
+    fn test_osc_pattern_malformed_fails() {
+        // Unterminated class must fail to match, not swallow the rest.
+        let unterminated_class = OscPattern::new("/ch[0-9");
+        assert!(!unterminated_class.matches("/ch5"));
+        assert!(!unterminated_class.matches("/ch"));
+
+        // Unterminated alternation must fail to match.
+        let unterminated_alt = OscPattern::new("/synth/{osc,lfo");
+        assert!(!unterminated_alt.matches("/synth/osc"));
+
+        // Empty class is malformed.
+        let empty_class = OscPattern::new("/ch[]");
+        assert!(!empty_class.matches("/ch"));
     }
 
     #[test]
