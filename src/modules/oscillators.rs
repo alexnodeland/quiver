@@ -426,6 +426,11 @@ impl GraphModule for Supersaw {
 /// Creates realistic plucked string and percussion sounds.
 pub struct KarplusStrong {
     buffer: Vec<f64>,
+    /// Maximum delay-line length (samples), sized for the lowest supported note.
+    /// The per-pluck period is clamped against this, not the current buffer
+    /// length, so a high note that shrinks the buffer cannot pin later low
+    /// notes to a too-short period (Q003 tuning regression).
+    max_len: usize,
     write_pos: usize,
     sample_rate: f64,
     last_output: f64,
@@ -444,6 +449,7 @@ impl KarplusStrong {
         let buffer_size = (sample_rate / 20.0) as usize + 10;
         Self {
             buffer: vec![0.0; buffer_size],
+            max_len: buffer_size,
             write_pos: 0,
             sample_rate,
             last_output: 0.0,
@@ -505,9 +511,12 @@ impl GraphModule for KarplusStrong {
         let brightness = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
         let stretch = inputs.get_or(4, 0.0).clamp(-1.0, 1.0);
 
-        // Calculate period from frequency
+        // Calculate period from frequency. Clamp against the FULL delay-line
+        // capacity (`max_len`), not the current buffer length: a prior high-note
+        // pluck shrinks `buffer`, but a later low note must still be able to
+        // request its full (longer) period and grow the buffer back on pluck.
         let freq = voct_to_hz(voct);
-        let period = (self.sample_rate / freq).clamp(2.0, self.buffer.len() as f64 - 1.0);
+        let period = (self.sample_rate / freq).clamp(2.0, self.max_len as f64 - 1.0);
         let period_int = period as usize;
 
         // Q002/Q129: excite only on a rising edge across the canonical gate
@@ -573,6 +582,7 @@ impl GraphModule for KarplusStrong {
     fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
         let buffer_size = (sample_rate / 20.0) as usize + 10;
+        self.max_len = buffer_size;
         self.buffer.resize(buffer_size, 0.0);
     }
 
@@ -2208,6 +2218,54 @@ mod tests {
                 cents
             );
         }
+    }
+
+    #[test]
+    fn test_ks_high_then_low_pitch_same_instance() {
+        // Regression: a high-note pluck shrinks the delay buffer. A later, lower
+        // note on the SAME instance must still tune correctly, because the
+        // requested period is clamped against the full buffer capacity (max_len)
+        // and the buffer grows back on pluck — not clamped to the shrunken
+        // high-note length (which would pin the low note to the wrong pitch).
+        let mut ks = KarplusStrong::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(2, 0.95); // bright, slow decay
+        inputs.set(3, 0.5);
+
+        // Pluck a high note (C6, ~1046 Hz) and let it ring — this shrinks buffer.
+        inputs.set(0, 2.0);
+        inputs.set(1, 5.0);
+        ks.tick(&inputs, &mut outputs);
+        inputs.set(1, 0.0);
+        for _ in 0..4000 {
+            ks.tick(&inputs, &mut outputs);
+        }
+
+        // Now pluck a low note (C2, ~65.4 Hz) on the SAME instance.
+        let target_hz = 65.41;
+        inputs.set(0, -2.0);
+        inputs.set(1, 5.0);
+        ks.tick(&inputs, &mut outputs);
+        inputs.set(1, 0.0);
+        let mut out = Vec::with_capacity(12000);
+        for _ in 0..12000 {
+            ks.tick(&inputs, &mut outputs);
+            out.push(outputs.get(10).unwrap());
+        }
+        let seg = &out[2000..10000];
+        let expected_period = 44100.0 / target_hz;
+        let period = measure_period(seg, expected_period);
+        let measured_hz = 44100.0 / period;
+        let cents = 1200.0 * Libm::<f64>::log2(measured_hz / target_hz);
+        assert!(
+            cents.abs() < 50.0,
+            "KS low note after high pluck mistuned: measured {} Hz \
+             (target {} Hz, {:+.1} cents)",
+            measured_hz,
+            target_hz,
+            cents
+        );
     }
 
     // ---- Q004: KarplusStrong DC decay ----

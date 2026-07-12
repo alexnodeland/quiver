@@ -3,6 +3,7 @@
 //! This module provides primitives for modeling analog circuit behavior:
 //! saturation, soft clipping, component variation, thermal drift, and noise.
 
+use crate::modules::common::C4_HZ;
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use crate::rng;
 use alloc::vec;
@@ -564,7 +565,7 @@ pub struct AnalogVco {
 
     // Sync state
     last_output: f64,
-    last_sync: f64,
+    prev_sync: f64,
     sync_ramp: f64, // For soft sync ramping
 
     spec: PortSpec,
@@ -581,7 +582,7 @@ impl AnalogVco {
             voct_tracking: VoctTrackingModel::new(),
             hf_rolloff: HighFrequencyRolloff::default_analog(sample_rate),
             last_output: 0.0,
-            last_sync: 0.0,
+            prev_sync: 0.0,
             sync_ramp: 1.0,
             spec: PortSpec {
                 inputs: vec![
@@ -623,8 +624,10 @@ impl GraphModule for AnalogVco {
         // Phase 3: Apply V/Oct tracking errors
         let voct_with_error = self.voct_tracking.apply(voct, dt);
 
-        // Apply component tolerance and thermal drift to frequency
-        let base_freq = 261.63 * Libm::<f64>::pow(2.0, voct_with_error);
+        // Apply component tolerance and thermal drift to frequency.
+        // Q008: anchor at the exact shared C4 reference (`C4_HZ`), not an
+        // imprecise 261.63 literal, so all oscillators share one tuning source.
+        let base_freq = C4_HZ * Libm::<f64>::pow(2.0, voct_with_error);
         let freq = self.freq_component.apply(base_freq);
         let freq = freq * self.thermal.detune_ratio(); // Thermal detuning (a few cents warmed)
         let freq = freq * Libm::<f64>::pow(2.0, fm);
@@ -633,13 +636,13 @@ impl GraphModule for AnalogVco {
         self.thermal.update(self.last_output * self.last_output, dt);
 
         // Phase 3: Improved oscillator sync with soft ramp
-        if sync > 2.5 && self.last_sync <= 2.5 {
+        if sync > 2.5 && self.prev_sync <= 2.5 {
             // Hard sync: reset phase
             self.phase = 0.0;
             // Start a soft sync ramp for smoother transient
             self.sync_ramp = 0.0;
         }
-        self.last_sync = sync;
+        self.prev_sync = sync;
 
         // Ramp up sync amplitude smoothly to avoid clicks
         if self.sync_ramp < 1.0 {
@@ -682,7 +685,7 @@ impl GraphModule for AnalogVco {
     fn reset(&mut self) {
         self.phase = 0.0;
         self.last_output = 0.0;
-        self.last_sync = 0.0;
+        self.prev_sync = 0.0;
         self.sync_ramp = 1.0;
         self.thermal.reset();
         self.voct_tracking.reset();
@@ -851,6 +854,46 @@ mod tests {
         vco.tick(&inputs, &mut outputs);
         assert!(outputs.get(10).is_some());
         assert!(outputs.get(12).is_some());
+    }
+
+    #[test]
+    fn test_analog_vco_pitch_anchored_at_c4() {
+        // Q008: with the analog imperfections neutralized, AnalogVco at 0 V must
+        // oscillate at the shared C4 reference (C4_HZ), confirming the pitch
+        // path is anchored to the single tuning constant, not a stray literal.
+        // (The 0.029-cent difference vs 261.63 is below what a zero-crossing
+        // count resolves; this guards against gross regressions and the literal
+        // drifting away from C4_HZ.)
+        let sr = 44100.0;
+        let mut vco = AnalogVco::new(sr);
+        // Neutralize component tolerance, V/Oct tracking error, thermal drift, DC.
+        vco.freq_component = ComponentModel::perfect();
+        vco.voct_tracking = VoctTrackingModel::perfect();
+        vco.thermal = ThermalModel::new(25.0, 0.0, 0.025); // heat_rate 0 => no drift
+        vco.dc_offset = 0.0;
+
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.0); // 0 V = C4
+
+        // Count rising zero-crossings of the saw output over one second.
+        let n = sr as usize;
+        let mut prev = 0.0;
+        let mut crossings = 0usize;
+        for i in 0..n {
+            vco.tick(&inputs, &mut outputs);
+            let s = outputs.get(12).unwrap();
+            if i > 0 && prev < 0.0 && s >= 0.0 {
+                crossings += 1;
+            }
+            prev = s;
+        }
+        let measured_hz = crossings as f64; // cycles per one-second window
+        assert!(
+            (measured_hz - C4_HZ).abs() < 2.0,
+            "AnalogVco 0 V pitch not anchored at C4: measured {measured_hz} Hz, \
+             expected {C4_HZ} Hz"
+        );
     }
 
     // Phase 3 Tests
