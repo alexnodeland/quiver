@@ -764,8 +764,8 @@ pub struct StepSequencer {
     steps: [f64; 8],
     gates: [bool; 8],
     current: usize,
-    last_clock: f64,
-    last_reset: f64,
+    prev_clock: f64,
+    prev_reset: f64,
     spec: PortSpec,
 }
 
@@ -775,8 +775,8 @@ impl StepSequencer {
             steps: [0.0; 8],
             gates: [true; 8],
             current: 0,
-            last_clock: 0.0,
-            last_reset: 0.0,
+            prev_clock: 0.0,
+            prev_reset: 0.0,
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "clock", SignalKind::Clock),
@@ -822,8 +822,8 @@ impl GraphModule for StepSequencer {
         let clock = inputs.get_or(0, 0.0);
         let reset = inputs.get_or(1, 0.0);
 
-        let clock_rising = clock > GATE_THRESHOLD_V && self.last_clock <= GATE_THRESHOLD_V;
-        let reset_rising = reset > GATE_THRESHOLD_V && self.last_reset <= GATE_THRESHOLD_V;
+        let clock_rising = clock > GATE_THRESHOLD_V && self.prev_clock <= GATE_THRESHOLD_V;
+        let reset_rising = reset > GATE_THRESHOLD_V && self.prev_reset <= GATE_THRESHOLD_V;
 
         let mut trigger = 0.0;
 
@@ -835,8 +835,8 @@ impl GraphModule for StepSequencer {
             trigger = GATE_HIGH_V;
         }
 
-        self.last_clock = clock;
-        self.last_reset = reset;
+        self.prev_clock = clock;
+        self.prev_reset = reset;
 
         let cv = self.steps[self.current];
         let gate = if self.gates[self.current] && clock > GATE_THRESHOLD_V {
@@ -852,8 +852,8 @@ impl GraphModule for StepSequencer {
 
     fn reset(&mut self) {
         self.current = 0;
-        self.last_clock = 0.0;
-        self.last_reset = 0.0;
+        self.prev_clock = 0.0;
+        self.prev_reset = 0.0;
     }
 
     fn set_sample_rate(&mut self, _: f64) {}
@@ -1980,7 +1980,7 @@ impl GraphModule for VcSwitch {
 /// to one of two outputs based on a probability parameter.
 /// Inspired by Mutable Instruments Branches.
 pub struct BernoulliGate {
-    last_trigger: f64,
+    prev_trigger: f64,
     /// Latched gate A state, persisted in the struct because the engine hands
     /// `tick` a fresh output buffer each sample (Q036).
     gate_a: f64,
@@ -1992,7 +1992,7 @@ pub struct BernoulliGate {
 impl BernoulliGate {
     pub fn new() -> Self {
         Self {
-            last_trigger: 0.0,
+            prev_trigger: 0.0,
             gate_a: 0.0,
             gate_b: 0.0,
             spec: PortSpec {
@@ -2026,8 +2026,8 @@ impl GraphModule for BernoulliGate {
         let trigger = inputs.get_or(0, 0.0);
         let prob = (inputs.get_or(1, 5.0) / 10.0).clamp(0.0, 1.0); // Normalize to 0-1
 
-        let rising_edge = trigger > GATE_THRESHOLD_V && self.last_trigger <= GATE_THRESHOLD_V;
-        self.last_trigger = trigger;
+        let rising_edge = trigger > GATE_THRESHOLD_V && self.prev_trigger <= GATE_THRESHOLD_V;
+        self.prev_trigger = trigger;
 
         // Default: no trigger output
         let mut trig_a = 0.0;
@@ -2063,7 +2063,7 @@ impl GraphModule for BernoulliGate {
     }
 
     fn reset(&mut self) {
-        self.last_trigger = 0.0;
+        self.prev_trigger = 0.0;
         self.gate_a = 0.0;
         self.gate_b = 0.0;
     }
@@ -3150,7 +3150,7 @@ mod tests {
 
         seq.reset();
         assert!(seq.current == 0);
-        assert!(seq.last_clock == 0.0);
+        assert!(seq.prev_clock == 0.0);
 
         seq.set_sample_rate(48000.0);
         assert_eq!(seq.type_id(), "step_sequencer");
@@ -3300,7 +3300,7 @@ mod tests {
         bg.tick(&inputs, &mut outputs);
 
         bg.reset();
-        assert!(bg.last_trigger == 0.0);
+        assert!(bg.prev_trigger == 0.0);
 
         bg.set_sample_rate(48000.0);
         assert_eq!(bg.type_id(), "bernoulli_gate");

@@ -862,7 +862,13 @@ impl GraphModule for Vibrato {
     fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
         let buffer_size = (sample_rate * Self::MAX_DELAY_MS / 1000.0) as usize + 10;
-        self.buffer.resize(buffer_size, 0.0);
+        // Reset the buffer and write cursor: `write_pos` is a direct (non-modulo)
+        // index at the write site, so a stale value left over from a larger
+        // buffer would index out of bounds after lowering the sample rate
+        // shrinks the buffer. Matches Chorus/Flanger/DelayLine.
+        self.buffer = vec![0.0; buffer_size];
+        self.write_pos = 0;
+        self.lfo_phase = 0.0;
     }
 
     fn type_id(&self) -> &'static str {
@@ -2087,6 +2093,30 @@ mod tests {
         assert!(vib.buffer.iter().all(|&x| x == 0.0));
         vib.set_sample_rate(48000.0);
         assert_eq!(vib.sample_rate, 48000.0);
+        vib.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap().is_finite());
+    }
+
+    #[test]
+    fn test_vibrato_lowering_sample_rate_does_not_panic() {
+        // Regression: at 96kHz the delay buffer is large; ticking advances
+        // write_pos to a large value. Lowering the sample rate shrinks the
+        // buffer, and the write site indexes it directly (non-modulo). If
+        // set_sample_rate leaves write_pos stale, the next tick panics with
+        // index-out-of-bounds. It must reset write_pos.
+        let mut vib = Vibrato::new(96000.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.5);
+        inputs.set(2, 0.5);
+        // Advance write_pos well past a shrunken buffer's length.
+        for _ in 0..1000 {
+            vib.tick(&inputs, &mut outputs);
+        }
+        // Lower the sample rate: buffer shrinks from ~1930 to ~451 samples.
+        vib.set_sample_rate(22050.0);
+        assert_eq!(vib.write_pos, 0, "write_pos must be reset after resize");
+        // Must not panic on the next tick.
         vib.tick(&inputs, &mut outputs);
         assert!(outputs.get(10).unwrap().is_finite());
     }

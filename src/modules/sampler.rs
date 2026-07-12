@@ -242,15 +242,16 @@ impl GraphModule for SamplePlayer {
         if self.phase >= end {
             eos = GATE_HIGH_V;
             if looping {
-                // Wrap back into the loop region [start, end).
+                // Wrap back into the loop region [start, end) with a single
+                // bounded modulo instead of a data-dependent `while` loop: at a
+                // high playback rate over a short loop span the loop could
+                // otherwise iterate O(rate/span) times per tick (a variable-time
+                // algorithm in the RT path). `fmod(phase - start, span)` lands in
+                // [0, span) since span > 0, so `start + ..` is always in
+                // [start, end).
                 let start = self.start_sample();
                 let span = (end - start).max(1.0);
-                while self.phase >= end {
-                    self.phase -= span;
-                }
-                if self.phase < start {
-                    self.phase = start;
-                }
+                self.phase = start + Libm::<f64>::fmod(self.phase - start, span);
             } else {
                 self.playing = false;
                 self.phase = end;
@@ -377,6 +378,37 @@ mod tests {
         }
         // Without looping there are only 3 impulses total; wrapping produces many more.
         assert!(impulses > 6, "loop did not wrap: {impulses} impulses");
+    }
+
+    #[test]
+    fn test_loop_wrap_bounded_at_pathological_rate() {
+        // Regression: the loop wrap must be bounded modular arithmetic, not a
+        // data-dependent `while` that iterates O(rate/span) times per tick. With
+        // a huge playback rate over a 1-sample loop span the old loop would hang
+        // (at f64 magnitudes where `phase -= span` is a no-op it never
+        // terminates). The fix keeps every tick O(1) and phase inside the loop.
+        let sr = 48000.0;
+        let mut player = SamplePlayer::new(impulse_buffer(1, 8), sr, sr); // len 8
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        // Start knob at the very end so the loop span collapses to 1 sample.
+        player.set_start(1.0);
+        inputs.set(4, 5.0); // loop on
+        inputs.set(2, 60.0); // +60 V/oct: rate = 2^60, wildly overshoots each tick
+
+        trigger_once(&mut player, &mut inputs, &mut outputs);
+        // Each tick must terminate quickly and keep phase within [0, len).
+        for _ in 0..100 {
+            player.tick(&inputs, &mut outputs);
+            assert!(
+                player.phase.is_finite()
+                    && player.phase >= 0.0
+                    && player.phase < player.len() as f64,
+                "phase escaped the loop region: {}",
+                player.phase
+            );
+            assert!(outputs.get(10).unwrap().is_finite());
+        }
     }
 
     #[test]

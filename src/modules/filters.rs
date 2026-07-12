@@ -510,7 +510,10 @@ impl GraphModule for ParametricEq {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize the audio input so a non-finite sample can never latch
+        // the recursive biquad state to NaN/Inf permanently (matching Svf and
+        // DiodeLadderFilter).
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
 
         // Map CV to parameters
         // Gain: bipolar CV ±5V maps to ±12dB
@@ -694,6 +697,36 @@ mod tests {
         // Should be approximately 1.0 (input) after settling
         assert!((out - 1.0).abs() < 0.01);
     }
+
+    #[test]
+    fn test_parametric_eq_nan_recovery() {
+        // Q160: a non-finite input must not permanently latch the recursive
+        // biquad state to NaN. After poisoning, a clean signal must recover.
+        let mut eq = ParametricEq::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(1, 0.0);
+        inputs.set(3, 0.0);
+        inputs.set(6, 0.0);
+
+        for &bad in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            inputs.set(0, bad);
+            eq.tick(&inputs, &mut outputs);
+        }
+
+        // Feed a clean signal; the cascade must return to finite output.
+        inputs.set(0, 0.5);
+        let mut last = 0.0;
+        for _ in 0..2000 {
+            eq.tick(&inputs, &mut outputs);
+            last = outputs.get(10).unwrap();
+        }
+        assert!(
+            last.is_finite(),
+            "ParametricEq output stayed non-finite after a NaN input: {last}"
+        );
+    }
+
     #[test]
     fn test_parametric_eq_low_boost() {
         let mut eq = ParametricEq::new(44100.0);

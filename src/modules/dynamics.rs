@@ -1,7 +1,7 @@
 //! Envelope, amplifier, and dynamics modules.
 
 use super::common::{
-    db_to_gain, env_coef, flush_denorm, gain_to_db, GATE_HIGH_V, GATE_THRESHOLD_V,
+    db_to_gain, env_coef, flush_denorm, gain_to_db, sanitize_audio, GATE_HIGH_V, GATE_THRESHOLD_V,
 };
 use crate::port::{
     GraphModule, ModulatedParam, ParamRange, PortDef, PortSpec, PortValues, SignalKind,
@@ -51,8 +51,8 @@ pub struct Adsr {
     stage: AdsrStage,
     level: f64,
     sample_rate: f64,
-    last_gate: f64,
-    last_retrig: f64,
+    prev_gate: f64,
+    prev_retrig: f64,
     /// Level captured when the gate falls, used to scale the release rate so the
     /// release duration equals the labeled release time regardless of the level
     /// the envelope was at when the gate was released.
@@ -66,8 +66,8 @@ impl Adsr {
             stage: AdsrStage::Idle,
             level: 0.0,
             sample_rate,
-            last_gate: 0.0,
-            last_retrig: 0.0,
+            prev_gate: 0.0,
+            prev_retrig: 0.0,
             release_start_level: 0.0,
             spec: PortSpec {
                 inputs: vec![
@@ -126,9 +126,9 @@ impl GraphModule for Adsr {
         let exp_mode = inputs.get_or(6, 0.0) > GATE_THRESHOLD_V;
 
         let gate_high = gate > GATE_THRESHOLD_V;
-        let gate_rising = gate_high && self.last_gate <= GATE_THRESHOLD_V;
-        let gate_falling = !gate_high && self.last_gate > GATE_THRESHOLD_V;
-        let retrig_rising = retrig > GATE_THRESHOLD_V && self.last_retrig <= GATE_THRESHOLD_V;
+        let gate_rising = gate_high && self.prev_gate <= GATE_THRESHOLD_V;
+        let gate_falling = !gate_high && self.prev_gate > GATE_THRESHOLD_V;
+        let retrig_rising = retrig > GATE_THRESHOLD_V && self.prev_retrig <= GATE_THRESHOLD_V;
 
         // State transitions. A retrigger/gate continues from the current level
         // (see the struct docs); it never resets `level` to zero.
@@ -213,8 +213,8 @@ impl GraphModule for Adsr {
             }
         }
 
-        self.last_gate = gate;
-        self.last_retrig = retrig;
+        self.prev_gate = gate;
+        self.prev_retrig = retrig;
 
         // Output scaled to standard modular levels
         outputs.set(10, self.level * 10.0); // 0-10V unipolar
@@ -225,8 +225,8 @@ impl GraphModule for Adsr {
     fn reset(&mut self) {
         self.stage = AdsrStage::Idle;
         self.level = 0.0;
-        self.last_gate = 0.0;
-        self.last_retrig = 0.0;
+        self.prev_gate = 0.0;
+        self.prev_retrig = 0.0;
         self.release_start_level = 0.0;
     }
 
@@ -371,12 +371,14 @@ impl GraphModule for Limiter {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize audio + sidechain so a non-finite sample cannot latch
+        // the envelope detector (a one-pole feedback state) to NaN permanently.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let threshold = inputs.get_or(1, 0.8).clamp(0.01, 1.0) * 5.0;
         let release_cv = inputs.get_or(2, 0.3).clamp(0.0, 1.0);
         let soft_mode = inputs.get_or(3, 5.0) > GATE_THRESHOLD_V;
         // Q148: detect on the sidechain; unpatched it mirrors the main input.
-        let sidechain = inputs.get_or(4, input);
+        let sidechain = sanitize_audio(inputs.get_or(4, input));
 
         let release_ms = 10.0 + release_cv * 990.0;
         let release_coef = env_coef(release_ms / 1000.0, self.sample_rate);
@@ -519,13 +521,15 @@ impl GraphModule for NoiseGate {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize audio + sidechain to keep a non-finite sample out of
+        // the envelope detector's feedback state.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let threshold = inputs.get_or(1, 0.1).clamp(0.0, 1.0) * 5.0;
         let attack_cv = inputs.get_or(2, 0.1).clamp(0.0, 1.0);
         let release_cv = inputs.get_or(3, 0.3).clamp(0.0, 1.0);
         let range = inputs.get_or(4, 1.0).clamp(0.0, 1.0);
         // Q148: detect on the sidechain; unpatched it mirrors the main input.
-        let sidechain = inputs.get_or(5, input);
+        let sidechain = sanitize_audio(inputs.get_or(5, input));
 
         let attack_ms = 0.1 + attack_cv * 49.9;
         let release_ms = 10.0 + release_cv * 490.0;
@@ -649,13 +653,15 @@ impl GraphModule for Compressor {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize audio + sidechain to keep a non-finite sample out of
+        // the envelope detector's feedback state.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let threshold_cv = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let ratio_cv = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
         let attack_cv = inputs.get_or(3, 0.2).clamp(0.0, 1.0);
         let release_cv = inputs.get_or(4, 0.3).clamp(0.0, 1.0);
         let makeup_cv = inputs.get_or(5, 0.0).clamp(0.0, 1.0);
-        let sidechain = inputs.get_or(6, input);
+        let sidechain = sanitize_audio(inputs.get_or(6, input));
 
         let threshold = threshold_cv * 5.0;
         let ratio = 1.0 + ratio_cv * 19.0;
@@ -795,8 +801,10 @@ impl GraphModule for Ducker {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
-        let key = inputs.get_or(1, 0.0);
+        // Q160: sanitize audio + key so a non-finite sample cannot latch the
+        // key-envelope detector (a one-pole feedback state) to NaN permanently.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
+        let key = sanitize_audio(inputs.get_or(1, 0.0));
         let amount_cv = inputs.get_or(2, 0.0);
         let threshold_cv = inputs.get_or(3, 0.0);
         let attack_cv = inputs.get_or(4, 0.1).clamp(0.0, 1.0);
@@ -904,7 +912,9 @@ impl GraphModule for EnvelopeFollower {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize the audio input so a non-finite sample cannot latch the
+        // envelope detector (a one-pole feedback state) to NaN permanently.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let attack_cv = inputs.get_or(1, 0.2).clamp(0.0, 1.0);
         let release_cv = inputs.get_or(2, 0.3).clamp(0.0, 1.0);
         let gain = inputs.get_or(3, 0.5).clamp(0.0, 1.0) * 4.0;
@@ -1807,5 +1817,72 @@ mod tests {
         }
         assert!((outputs.get(10).unwrap() - 3.0).abs() < 1e-9);
         assert!(outputs.get(11).unwrap().abs() < 1e-9);
+    }
+
+    // ---- Q160: dynamics envelope detectors recover from non-finite input ----
+
+    /// Poison a module's detector ports with NaN/±Inf, then feed a clean signal
+    /// and confirm both the envelope state and the port-10 output recover to
+    /// finite values (a NaN must not latch the one-pole detector permanently).
+    fn assert_detector_recovers<M: GraphModule>(
+        module: &mut M,
+        poison_ports: &[u32],
+        clean: &[(u32, f64)],
+        envelope: impl Fn(&M) -> f64,
+    ) {
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        for &bad in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for &p in poison_ports {
+                inputs.set(p, bad);
+            }
+            module.tick(&inputs, &mut outputs);
+        }
+        // Feed a clean signal and let the detector settle.
+        let mut inputs = PortValues::new();
+        for &(port, value) in clean {
+            inputs.set(port, value);
+        }
+        for _ in 0..2000 {
+            module.tick(&inputs, &mut outputs);
+        }
+        assert!(
+            envelope(module).is_finite(),
+            "envelope stayed non-finite after a NaN input"
+        );
+        assert!(
+            outputs.get(10).unwrap().is_finite(),
+            "output stayed non-finite after a NaN input"
+        );
+    }
+
+    #[test]
+    fn test_limiter_nan_recovery() {
+        let mut m = Limiter::new(44100.0);
+        assert_detector_recovers(&mut m, &[0, 4], &[(0, 0.5), (4, 0.5)], |m| m.envelope);
+    }
+
+    #[test]
+    fn test_noise_gate_nan_recovery() {
+        let mut m = NoiseGate::new(44100.0);
+        assert_detector_recovers(&mut m, &[0, 5], &[(0, 0.5), (5, 0.5)], |m| m.envelope);
+    }
+
+    #[test]
+    fn test_compressor_nan_recovery() {
+        let mut m = Compressor::new(44100.0);
+        assert_detector_recovers(&mut m, &[0, 6], &[(0, 0.5), (6, 0.5)], |m| m.envelope);
+    }
+
+    #[test]
+    fn test_ducker_nan_recovery() {
+        let mut m = Ducker::new(44100.0);
+        assert_detector_recovers(&mut m, &[0, 1], &[(0, 0.5), (1, 0.5)], |m| m.envelope);
+    }
+
+    #[test]
+    fn test_envelope_follower_nan_recovery() {
+        let mut m = EnvelopeFollower::new(44100.0);
+        assert_detector_recovers(&mut m, &[0], &[(0, 0.5)], |m| m.envelope);
     }
 }
