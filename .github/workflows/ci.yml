@@ -51,12 +51,14 @@ jobs:
       - name: Build and run examples
         run: |
           cargo build --examples --all-features
-          cargo run --example quick_taste &
-          cargo run --example first_patch &
-          cargo run --example tutorial_subtractive &
-          cargo run --example tutorial_envelope &
-          cargo run --example tutorial_filter_mod &
-          wait
+          # Run each example in the foreground so `set -e` fails the step on any
+          # runtime panic. A bare `wait` on backgrounded jobs always returns 0
+          # and would silently swallow a panicking example.
+          cargo run --example quick_taste
+          cargo run --example first_patch
+          cargo run --example tutorial_subtractive
+          cargo run --example tutorial_envelope
+          cargo run --example tutorial_filter_mod
 
   # Documentation - check rustdoc warnings
   doc:
@@ -85,18 +87,13 @@ jobs:
   # that have nothing to do with this crate's actual no_std code, because
   # rustc requires an allocator/panic-handler for any cdylib artifact.
   #
-  # KNOWN FAILURE at the time this job was added: both commands below
-  # currently fail to compile on thumbv7em-none-eabihf because
-  # `core::sync::atomic::AtomicU64` does not exist on that target (Cortex-M4/
-  # M7 have no native 64-bit atomic load/store, so `core`'s max_atomic_width
-  # is 32 there) -- see src/polyphony.rs:57 (hit by both commands, since
-  # `polyphony` is unconditional) and src/io.rs:10 (hit only by the `alloc`
-  # command). This is a genuine, previously-uncaught gap: the prior no_std fix
-  # was only ever verified against the host target (which has 64-bit atomics),
-  # never against a real embedded target. Fixing the atomics is out of scope
-  # for this CI-only change; left as a real (non-`continue-on-error`) gate so
-  # the gap is visible in CI instead of silently unverified, per this track's
-  # remit to report build-truth honestly rather than paper over it.
+  # thumbv7em-none-eabihf (Cortex-M4/M7) has no native 64-bit atomic load/store
+  # (`core`'s max_atomic_width is 32 there), so `core::sync::atomic::AtomicU64`
+  # does not exist on this target. The crate handles this by depending on
+  # `portable-atomic` (Cargo.toml) and using `portable_atomic::AtomicU64` in
+  # src/polyphony.rs, src/io.rs, and src/rng.rs instead of the `core` type.
+  # Both commands below therefore compile cleanly on this target; this job is a
+  # real (non-`continue-on-error`) gate that keeps the no_std build honest in CI.
   no_std:
     name: no_std / alloc
     runs-on: ubuntu-latest

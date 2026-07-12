@@ -47,7 +47,9 @@ Quiver supports three tiers for different environments:
 
 #### Tier 1: Core Only (`default-features = false`)
 
-For bare-metal embedded systems without heap allocation:
+`no_std`, but still requires a global allocator — the core patch graph uses
+`Box`/`Vec`/`String`, so you must provide a `#[global_allocator]` (there is no
+allocator-free tier). Suitable for embedded systems that have a heap:
 
 ```toml
 [dependencies]

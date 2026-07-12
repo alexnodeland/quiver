@@ -131,10 +131,12 @@ quiver = "0.1"
 
 ### `no_std` Support
 
-Quiver supports three tiers for different environments:
+Quiver supports three tiers for different environments. All tiers are `no_std`
+but require a global allocator — the core graph uses `Box`/`Vec`/`String`, so
+there is no allocator-free tier:
 
 ```toml
-# Tier 1: Core DSP only (embedded, no heap)
+# Tier 1: Core DSP only (no_std, heap required — bring your own #[global_allocator])
 quiver = { version = "0.1", default-features = false }
 
 # Tier 2: With serialization & presets (WASM web apps)

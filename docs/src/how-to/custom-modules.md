@@ -15,6 +15,33 @@ pub trait GraphModule: Send {
 }
 ```
 
+## Constructor & Sample-Rate Convention
+
+`GraphModule` always provides `set_sample_rate`, and `Patch::add` calls it with
+the patch's sample rate the moment a module is inserted. **The graph is the
+single source of truth for sample rate** — whatever value a module was built
+with is overwritten before its first `tick`. Given that, constructors follow one
+rule so a module's sample-rate dependence is readable straight off its
+signature:
+
+- **Sample-rate-dependent modules take `sample_rate` in `new`.** Anything whose
+  DSP needs the rate to initialize correctly-sized state — phase increments,
+  delay/reverb buffers, envelope/filter coefficients — accepts it, e.g.
+  `Vco::new(sample_rate)`, `Svf::new(sample_rate)`, `DelayLine::new(sample_rate)`.
+  The value seeds initial state; `set_sample_rate` stores the rate and (if the
+  module caches coefficients) recomputes them so a later rate change stays
+  correct.
+- **Sample-rate-independent modules take `new()`** (or only their value
+  parameters). Gain, mixing, logic, and trigger/clock-driven modules do not need
+  the rate: `Vca::new()`, `StereoOutput::new()`, `Mixer::new(num_channels)`,
+  `Offset::new(offset)`. Their `set_sample_rate` is a no-op:
+  `fn set_sample_rate(&mut self, _: f64) {}`.
+
+Do **not** accept `sample_rate` "just in case": an unused constructor parameter
+is misleading. `MyDistortion` below stores `sample_rate` because its DSP is
+sample-rate-dependent (an antialiasing/DC-blocking stage would use it) — a pure
+waveshaper that never reads the rate should take `new()` instead.
+
 ## Step 1: Define Your Ports
 
 ```rust,ignore

@@ -77,6 +77,41 @@ src/
 Build and test with `--all-features` so every code path is exercised. The crate also
 compiles in three tiers: core `no_std` (no default features), `alloc`, and full `std`.
 
+## Module Conventions
+
+### Constructor & sample-rate convention
+
+Every DSP module implements `GraphModule`, which always exposes
+`set_sample_rate(&mut self, sample_rate: f64)`. `Patch::add`/`add_boxed` call it with
+the patch's sample rate the moment a module is inserted (see `graph.rs`), so **the
+graph is the single source of truth for sample rate** — whatever a module was
+constructed with is overwritten before its first `tick`. Constructors therefore
+follow one rule, so a module's sample-rate dependence is readable off its signature:
+
+- **Sample-rate-dependent modules take `sample_rate` in `new`.** If the DSP needs the
+  rate to initialize correctly-sized state (phase increments, delay/reverb buffers,
+  envelope/filter coefficients), accept it: `Vco::new(sample_rate)`,
+  `Svf::new(sample_rate)`, `DelayLine::new(sample_rate)`, `Adsr::new(sample_rate)`, ….
+  The value seeds initial state; `set_sample_rate` keeps it correct on a later change.
+- **Sample-rate-independent modules take `new()`** (or only their value parameters).
+  Gain, mixing, logic, sample-count-based, and trigger/clock-driven modules do not need
+  the rate: `Vca::new()`, `StereoOutput::new()`, `Mixer::new(num_channels)`,
+  `Offset::new(offset)`, `UnitDelay::new()`. Their `set_sample_rate` is a no-op
+  (`fn set_sample_rate(&mut self, _: f64) {}`).
+
+Do **not** accept `sample_rate` "just in case" — an unused constructor parameter is
+misleading and is a convention violation. Because `add` re-applies the rate,
+`Vco::new(44_100.0)` inside a 44.1 kHz patch passes it twice; that is harmless (last
+write wins), but the constructed value should still match the patch rate to keep
+standalone/combinator use (which does not go through `add`) correct.
+
+**Known exception (retained for API stability):** `Crosstalk::new(sample_rate)` accepts
+and stores a sample rate it never uses in `tick` (its HF-emphasis coefficient derives
+from an input, not the rate), so by this convention it should be `Crosstalk::new()`.
+Removing the parameter is a breaking API change that also ripples into
+`ModuleRegistry`, so it is documented here rather than changed pre-1.0. New modules must
+not follow this pattern.
+
 ## Development Workflow
 
 The project uses a `Makefile`. The common targets:
