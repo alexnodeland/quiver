@@ -213,6 +213,11 @@ impl Distortion {
     pub fn set_oversample(&mut self, mode: Oversample) {
         self.oversampler = Oversampler::new(mode);
     }
+
+    /// Current oversampling factor of the waveshaping stage (1 = off, 2, or 4).
+    pub fn oversample_factor(&self) -> usize {
+        self.oversampler.factor()
+    }
 }
 
 impl Default for Distortion {
@@ -275,6 +280,9 @@ impl GraphModule for Distortion {
     fn type_id(&self) -> &'static str {
         "distortion"
     }
+
+    // Bridge the `oversample` internal parameter to live-patch introspection.
+    crate::impl_introspect!();
 }
 
 // ============================================================================
@@ -1047,6 +1055,11 @@ impl Wavefolder {
     pub fn set_oversample(&mut self, mode: Oversample) {
         self.oversampler = Oversampler::new(mode);
     }
+
+    /// Current oversampling factor of the folding stage (1 = off, 2, or 4).
+    pub fn oversample_factor(&self) -> usize {
+        self.oversampler.factor()
+    }
 }
 
 impl Default for Wavefolder {
@@ -1081,6 +1094,9 @@ impl GraphModule for Wavefolder {
     fn type_id(&self) -> &'static str {
         "wavefolder"
     }
+
+    // Bridge the `oversample` internal parameter to live-patch introspection.
+    crate::impl_introspect!();
 }
 
 #[cfg(test)]

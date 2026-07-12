@@ -637,6 +637,51 @@ pub trait GraphModule: Send + Sync {
     ) -> Result<(), alloc::string::String> {
         Ok(())
     }
+
+    /// Downcast this module to its [`ModuleIntrospection`] view, if it exposes one.
+    ///
+    /// A `Box<dyn GraphModule>` (as stored inside a [`Patch`](crate::graph::Patch)) cannot
+    /// otherwise reach the module's `ModuleIntrospection` impl, so this hook bridges the two
+    /// trait objects. It returns `None` by default; modules with genuine internal (non-port)
+    /// parameters override it — typically via [`impl_introspect!`](crate::impl_introspect) —
+    /// to return `Some(self)`. Parameters that are input ports are discovered and driven
+    /// through the port system instead (see [`Patch::param_infos`](crate::graph::Patch::param_infos)),
+    /// so most modules leave this at the default.
+    ///
+    /// Gated on `alloc` because `ModuleIntrospection` (and its `Vec`/`String` payloads) live
+    /// in the alloc tier; pure `no_std` builds never see this method.
+    #[cfg(feature = "alloc")]
+    fn introspect(&self) -> Option<&dyn crate::introspection::ModuleIntrospection> {
+        None
+    }
+
+    /// Mutable companion to [`introspect`](Self::introspect), used to set internal parameters.
+    #[cfg(feature = "alloc")]
+    fn introspect_mut(&mut self) -> Option<&mut dyn crate::introspection::ModuleIntrospection> {
+        None
+    }
+}
+
+/// Wire a module's [`ModuleIntrospection`] impl into the [`GraphModule`] trait object.
+///
+/// Invoke once inside a module's `impl GraphModule for T { .. }` block. It expands to the
+/// `introspect`/`introspect_mut` overrides (both `alloc`-gated) returning `Some(self)`, so a
+/// live [`Patch`](crate::graph::Patch) can reach the module's parameter metadata through its
+/// boxed trait object. Requires `T: ModuleIntrospection` (satisfied under `alloc`).
+#[macro_export]
+macro_rules! impl_introspect {
+    () => {
+        #[cfg(feature = "alloc")]
+        fn introspect(&self) -> Option<&dyn $crate::introspection::ModuleIntrospection> {
+            Some(self)
+        }
+        #[cfg(feature = "alloc")]
+        fn introspect_mut(
+            &mut self,
+        ) -> Option<&mut dyn $crate::introspection::ModuleIntrospection> {
+            Some(self)
+        }
+    };
 }
 
 #[cfg(test)]

@@ -32,6 +32,10 @@
       "default": [],
       "description": "Tags for categorization and search"
     },
+    "output": {
+      "type": ["string", "null"],
+      "description": "Name of the module whose output feeds the patch's stereo out. Optional and additive; when absent the loader falls back to an output-node heuristic."
+    },
     "modules": {
       "type": "array",
       "items": {
@@ -52,7 +56,7 @@
         "type": "number"
       },
       "default": {},
-      "description": "Parameter values keyed by 'module_name.param_id'"
+      "description": "Parameter values keyed by 'module_name.param_id', where param_id is a control-input port name or an internal parameter id exposed via introspection. Unknown keys are ignored on load."
     }
   },
   "$defs": {
@@ -67,44 +71,74 @@
         },
         "module_type": {
           "type": "string",
-          "description": "Module type identifier from the registry",
+          "description": "Module type identifier from the registry. This enum is generated from the ModuleRegistry built-ins and is kept in sync by the `test_schema_enum_matches_registry` drift-guard test.",
           "enum": [
-            "vco",
-            "analog_vco",
-            "lfo",
-            "svf",
-            "diode_ladder",
             "adsr",
-            "vca",
-            "mixer",
-            "offset",
-            "unit_delay",
-            "multiple",
+            "analog_vco",
+            "arpeggiator",
             "attenuverter",
-            "slew_limiter",
-            "sample_and_hold",
-            "precision_adder",
-            "vc_switch",
-            "noise",
-            "step_sequencer",
+            "bernoulli_gate",
+            "bitcrusher",
+            "chord_memory",
+            "chorus",
             "clock",
-            "saturator",
-            "wavefolder",
-            "ring_mod",
+            "comparator",
+            "compressor",
             "crossfader",
-            "rectifier",
             "crosstalk",
+            "delay_line",
+            "diode_ladder",
+            "distortion",
+            "ducker",
+            "envelope_follower",
+            "euclidean",
+            "flanger",
+            "formant_osc",
+            "granular",
             "ground_loop",
+            "karplus_strong",
+            "lfo",
+            "limiter",
             "logic_and",
+            "logic_not",
             "logic_or",
             "logic_xor",
-            "logic_not",
-            "comparator",
-            "bernoulli_gate",
-            "min",
             "max",
+            "mid_side_decode",
+            "mid_side_encode",
+            "min",
+            "mixer",
+            "mixer8",
+            "multiple",
+            "noise",
+            "noise_gate",
+            "offset",
+            "parametric_eq",
+            "phaser",
+            "pitch_shifter",
+            "precision_adder",
+            "quantizer",
+            "rectifier",
+            "reverb",
+            "ring_mod",
+            "sample_and_hold",
+            "sample_player",
+            "saturator",
+            "scale_quantizer",
+            "slew_limiter",
+            "step_sequencer",
             "stereo_output",
-            "quantizer"
+            "supersaw",
+            "svf",
+            "tremolo",
+            "unit_delay",
+            "vc_switch",
+            "vca",
+            "vco",
+            "vibrato",
+            "vocoder",
+            "wavefolder",
+            "wavetable"
           ]
         },
         "position": {
@@ -118,8 +152,8 @@
           "description": "UI position as [x, y] coordinates"
         },
         "state": {
-          "type": "object",
-          "description": "Module-specific state for serialization"
+          "type": ["object", "null"],
+          "description": "Reserved for opaque module-specific state. Currently always null: parameter values round-trip through the top-level 'parameters' map, not here."
         }
       },
       "additionalProperties": false

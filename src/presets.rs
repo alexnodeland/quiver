@@ -367,9 +367,9 @@ impl ClassicPresets {
         // Cables
         patch.cables = vec![
             // VCO1 saw -> mixer ch1
-            CableDef::new("vco1.saw", "mixer.in1"),
+            CableDef::new("vco1.saw", "mixer.ch0"),
             // VCO2 saw -> mixer ch2 (slightly detuned via offset)
-            CableDef::new("vco2.saw", "mixer.in2"),
+            CableDef::new("vco2.saw", "mixer.ch1"),
             // Mixer -> filter
             CableDef::new("mixer.out", "vcf.in"),
             // Filter LP -> VCA
@@ -378,9 +378,9 @@ impl ClassicPresets {
             CableDef::new("vca.out", "output.left"),
             CableDef::new("vca.out", "output.right"),
             // Filter envelope -> cutoff (with attenuation)
-            CableDef::new("env_filter.out", "vcf.cutoff").with_attenuation(0.6),
+            CableDef::new("env_filter.env", "vcf.cutoff").with_attenuation(0.6),
             // Amp envelope -> VCA
-            CableDef::new("env_amp.out", "vca.cv"),
+            CableDef::new("env_amp.env", "vca.cv"),
         ];
 
         // Parameters
@@ -425,8 +425,8 @@ impl ClassicPresets {
             CableDef::new("vcf.out", "vca.in"),
             CableDef::new("vca.out", "output.left"),
             CableDef::new("vca.out", "output.right"),
-            CableDef::new("env.out", "vcf.cutoff").with_attenuation(0.8),
-            CableDef::new("env.out", "vca.cv"),
+            CableDef::new("env.env", "vcf.cutoff").with_attenuation(0.8),
+            CableDef::new("env.env", "vca.cv"),
         ];
 
         patch.parameters.insert("vcf.cutoff".into(), 0.2);
@@ -478,7 +478,7 @@ impl ClassicPresets {
             // Chorus stereo outputs to stereo output
             CableDef::new("chorus.left", "output.left"),
             CableDef::new("chorus.right", "output.right"),
-            CableDef::new("env.out", "vca.cv"),
+            CableDef::new("env.env", "vca.cv"),
         ];
 
         patch.parameters.insert("lfo.rate".into(), 0.2);
@@ -529,8 +529,8 @@ impl ClassicPresets {
             CableDef::new("vca.out", "output.left"),
             CableDef::new("vca.out", "output.right"),
             // Envelope sweeps slave pitch for sync sweep
-            CableDef::new("env_sync.out", "vco_slave.fm").with_attenuation(0.5),
-            CableDef::new("env_amp.out", "vca.cv"),
+            CableDef::new("env_sync.env", "vco_slave.fm").with_attenuation(0.5),
+            CableDef::new("env_amp.env", "vca.cv"),
         ];
 
         patch.parameters.insert("vcf.cutoff".into(), 0.7);
@@ -582,13 +582,13 @@ impl ClassicPresets {
                 .with_attenuation(0.25)
                 .with_offset(0.5),
             // Mix oscillators
-            CableDef::new("vco1.sqr", "mixer.in1"),
-            CableDef::new("vco2.sqr", "mixer.in2"),
+            CableDef::new("vco1.sqr", "mixer.ch0"),
+            CableDef::new("vco2.sqr", "mixer.ch1"),
             CableDef::new("mixer.out", "vcf.in"),
             CableDef::new("vcf.lp", "vca.in"),
             CableDef::new("vca.out", "output.left"),
             CableDef::new("vca.out", "output.right"),
-            CableDef::new("env.out", "vca.cv"),
+            CableDef::new("env.env", "vca.cv"),
         ];
 
         patch.parameters.insert("lfo1.rate".into(), 0.15);
@@ -624,7 +624,7 @@ impl SoundDesignPresets {
         patch.modules = vec![
             ModuleDef::new("vco1", "vco").with_position(100.0, 100.0),
             ModuleDef::new("vco2", "vco").with_position(100.0, 200.0),
-            ModuleDef::new("ring", "ring_modulator").with_position(250.0, 150.0),
+            ModuleDef::new("ring", "ring_mod").with_position(250.0, 150.0),
             ModuleDef::new("vcf", "svf").with_position(400.0, 150.0),
             ModuleDef::new("vca", "vca").with_position(550.0, 150.0),
             ModuleDef::new("env", "adsr").with_position(400.0, 300.0),
@@ -638,7 +638,7 @@ impl SoundDesignPresets {
             CableDef::new("vcf.lp", "vca.in"),
             CableDef::new("vca.out", "output.left"),
             CableDef::new("vca.out", "output.right"),
-            CableDef::new("env.out", "vca.cv"),
+            CableDef::new("env.env", "vca.cv"),
         ];
 
         patch.parameters.insert("vcf.cutoff".into(), 0.8);
@@ -661,7 +661,7 @@ impl SoundDesignPresets {
             .with_tag("fx");
 
         patch.modules = vec![
-            ModuleDef::new("noise", "noise_generator").with_position(100.0, 150.0),
+            ModuleDef::new("noise", "noise").with_position(100.0, 150.0),
             ModuleDef::new("vcf", "svf").with_position(250.0, 150.0),
             ModuleDef::new("vca", "vca").with_position(400.0, 150.0),
             ModuleDef::new("lfo", "lfo").with_position(250.0, 300.0),
@@ -675,7 +675,7 @@ impl SoundDesignPresets {
             CableDef::new("vca.out", "output.left"),
             CableDef::new("vca.out", "output.right"),
             CableDef::new("lfo.tri", "vcf.cutoff").with_attenuation(0.4),
-            CableDef::new("env.out", "vca.cv"),
+            CableDef::new("env.env", "vca.cv"),
         ];
 
         patch.parameters.insert("lfo.rate".into(), 0.1);
@@ -715,12 +715,12 @@ impl SoundDesignPresets {
             CableDef::new("vca.out", "output.left"),
             CableDef::new("vca.out", "output.right"),
             // LFO modulates fold amount
-            CableDef::new("lfo.tri", "folder.amount").with_attenuation(0.3),
-            CableDef::new("env.out", "vca.cv"),
+            CableDef::new("lfo.tri", "folder.threshold").with_attenuation(0.3),
+            CableDef::new("env.env", "vca.cv"),
         ];
 
         patch.parameters.insert("lfo.rate".into(), 0.3);
-        patch.parameters.insert("folder.amount".into(), 0.7);
+        patch.parameters.insert("folder.threshold".into(), 0.7);
         patch.parameters.insert("vcf.cutoff".into(), 0.6);
         patch.parameters.insert("vcf.resonance".into(), 0.3);
         patch.parameters.insert("env.attack".into(), 0.01);
@@ -771,7 +771,7 @@ impl TutorialPresets {
 
         patch.parameters.insert("vcf.cutoff".into(), 0.5);
         patch.parameters.insert("vcf.resonance".into(), 0.2);
-        patch.parameters.insert("vca.level".into(), 0.7);
+        patch.parameters.insert("vca.gain".into(), 0.7);
 
         patch
     }
@@ -805,7 +805,7 @@ impl TutorialPresets {
             CableDef::new("vcf.lp", "vca.in"),
             CableDef::new("vca.out", "output.left"),
             CableDef::new("vca.out", "output.right"),
-            CableDef::new("env.out", "vca.cv"),
+            CableDef::new("env.env", "vca.cv"),
         ];
 
         patch.parameters.insert("vcf.cutoff".into(), 0.6);
@@ -849,7 +849,7 @@ impl TutorialPresets {
             CableDef::new("vcf.lp", "vca.in"),
             CableDef::new("vca.out", "output.left"),
             CableDef::new("vca.out", "output.right"),
-            CableDef::new("env.out", "vca.cv"),
+            CableDef::new("env.env", "vca.cv"),
         ];
 
         patch.parameters.insert("lfo.rate".into(), 0.3);
@@ -892,13 +892,13 @@ impl TutorialPresets {
             // Modulator sine -> carrier FM input
             CableDef::new("modulator.sin", "carrier.fm"),
             // FM envelope controls modulation depth
-            CableDef::new("fm_env.out", "modulator.fm").with_attenuation(0.3),
+            CableDef::new("fm_env.env", "modulator.fm").with_attenuation(0.3),
             // Carrier output through filter and VCA
             CableDef::new("carrier.sin", "vcf.in"),
             CableDef::new("vcf.lp", "vca.in"),
             CableDef::new("vca.out", "output.left"),
             CableDef::new("vca.out", "output.right"),
-            CableDef::new("amp_env.out", "vca.cv"),
+            CableDef::new("amp_env.env", "vca.cv"),
         ];
 
         patch.parameters.insert("vcf.cutoff".into(), 0.8);
@@ -1088,6 +1088,93 @@ mod tests {
         // Should produce some output (even if zero initially)
         assert!(left.is_finite());
         assert!(right.is_finite());
+    }
+
+    /// The names of every preset the library exposes.
+    const ALL_PRESET_NAMES: [&str; 12] = [
+        "Moog Bass",
+        "303 Acid",
+        "Juno Pad",
+        "Sync Lead",
+        "PWM Strings",
+        "Metallic Ring",
+        "Noise Sweep",
+        "Wavefold Growl",
+        "Basic Subtractive",
+        "Envelope Basics",
+        "Filter Modulation",
+        "FM Basics",
+    ];
+
+    /// Q083/Q084: every built-in preset must build via `Patch::from_def` with real port
+    /// names and type_ids, then tick without producing NaN/inf. With every gate/trigger
+    /// input driven high, each preset's full signal chain must also reach the output
+    /// (non-silence), which additionally proves the cables land on real, connected ports.
+    #[test]
+    fn test_all_presets_build_tick_and_sound() {
+        use crate::graph::NodeId;
+        use crate::port::SignalKind;
+
+        let library = PresetLibrary::new();
+        for name in ALL_PRESET_NAMES {
+            let preset = library
+                .get(name)
+                .unwrap_or_else(|| panic!("preset '{name}' not found"));
+            let mut patch = preset
+                .build(44100.0)
+                .unwrap_or_else(|e| panic!("preset '{name}' failed to build: {e}"));
+
+            // Open every gate/trigger input so envelope-gated presets actually sound. These
+            // inputs are unpatched in the presets, so overriding their base value to a gate
+            // high opens the ADSR-driven VCAs. (Patched gates are unaffected: the override
+            // only applies to unpatched inputs.)
+            let gate_targets: Vec<(NodeId, String)> = patch
+                .nodes()
+                .flat_map(|(id, _n, m)| {
+                    m.port_spec()
+                        .inputs
+                        .iter()
+                        .filter(|p| matches!(p.kind, SignalKind::Gate | SignalKind::Trigger))
+                        .map(|p| (id, p.name.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            for (id, port) in gate_targets {
+                patch.set_param_by_id(id, &port, 5.0);
+            }
+
+            let mut peak = 0.0_f64;
+            for i in 0..400 {
+                let (l, r) = patch.tick();
+                assert!(
+                    l.is_finite() && r.is_finite(),
+                    "preset '{name}' produced non-finite output at sample {i}: ({l}, {r})"
+                );
+                peak = peak.max(l.abs()).max(r.abs());
+            }
+            assert!(
+                peak > 1e-6,
+                "preset '{name}' produced silence (peak {peak}) even with gates open"
+            );
+        }
+    }
+
+    /// Q083: a preset that sounds with the default (no-gate) state must be non-silent as
+    /// built, without any parameter poking.
+    #[test]
+    fn test_basic_subtractive_sounds_without_gate() {
+        let mut patch = PresetLibrary::new()
+            .get("Basic Subtractive")
+            .unwrap()
+            .build(44100.0)
+            .unwrap();
+        let mut peak = 0.0_f64;
+        for _ in 0..400 {
+            let (l, r) = patch.tick();
+            assert!(l.is_finite() && r.is_finite());
+            peak = peak.max(l.abs()).max(r.abs());
+        }
+        assert!(peak > 1e-6, "Basic Subtractive should sound without a gate");
     }
 
     #[test]
