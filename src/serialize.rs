@@ -15,12 +15,22 @@ use alloc::vec;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
+/// Current patch schema version written by [`Patch::to_def`].
+///
+/// Version policy: the field is a monotonic integer. A loader accepts any patch whose
+/// `version <= CURRENT_PATCH_VERSION` (older or equal — the format only grows additively, so
+/// old files keep loading) and rejects anything newer with a descriptive error rather than
+/// silently misreading fields it does not understand. New *additive* fields (like `output`)
+/// do **not** bump the version; only a breaking change to existing field meaning would.
+pub const CURRENT_PATCH_VERSION: u32 = 1;
+
 /// Serializable patch definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct PatchDef {
-    /// Schema version for forward compatibility
+    /// Schema version. See [`CURRENT_PATCH_VERSION`] for the compatibility policy: loaders
+    /// accept `version <= CURRENT_PATCH_VERSION` and reject newer patches.
     pub version: u32,
 
     /// Patch metadata
@@ -29,13 +39,26 @@ pub struct PatchDef {
     pub description: Option<String>,
     pub tags: Vec<String>,
 
+    /// Name of the module whose output feeds the patch's stereo out.
+    ///
+    /// Optional and additive: patches written before this field existed omit it, and
+    /// [`Patch::from_def`] then falls back to its output-node heuristic. Written by
+    /// [`Patch::to_def`] whenever the patch has an output node set.
+    #[serde(default)]
+    pub output: Option<String>,
+
     /// Module instances
     pub modules: Vec<ModuleDef>,
 
     /// Cable connections
     pub cables: Vec<CableDef>,
 
-    /// Parameter values (key: "module_name.param_id")
+    /// Parameter values (key: `"module_name.param_id"`).
+    ///
+    /// `param_id` is either a control-input port name (its unpatched base value) or an
+    /// internal parameter id exposed via `ModuleIntrospection`. Applied by
+    /// [`Patch::from_def`] through [`Patch::set_param_by_id`]; unknown keys are ignored so
+    /// hand-edited files degrade gracefully.
     pub parameters: StdMap<String, f64>,
 }
 
@@ -43,11 +66,12 @@ impl PatchDef {
     /// Create a new empty patch definition
     pub fn new(name: impl Into<String>) -> Self {
         Self {
-            version: 1,
+            version: CURRENT_PATCH_VERSION,
             name: name.into(),
             author: None,
             description: None,
             tags: vec![],
+            output: None,
             modules: vec![],
             cables: vec![],
             parameters: StdMap::new(),
@@ -1308,15 +1332,36 @@ impl Patch {
             })
             .collect();
 
+        // Record every parameter whose current value differs from its default, keyed
+        // "module_name.param_id". Covers both control-input port base values and internal
+        // (introspection) parameters; unchanged params are omitted to keep the JSON lean.
+        let mut parameters: StdMap<String, f64> = StdMap::new();
+        for (node_id, node_name, _) in self.nodes() {
+            for p in self.param_infos(node_id) {
+                if (p.value - p.default).abs() > f64::EPSILON {
+                    parameters.insert(format!("{}.{}", node_name, p.id), p.value);
+                }
+            }
+        }
+
+        // Serialize the designated output node by name (Q087), so loading is deterministic
+        // instead of relying on from_def's heuristic.
+        let output = self
+            .output_node()
+            .and_then(|id| self.get_name(id))
+            .map(|n| n.to_string());
+
+        let meta = self.meta();
         PatchDef {
-            version: 1,
+            version: CURRENT_PATCH_VERSION,
             name: name.to_string(),
-            author: None,
-            description: None,
-            tags: vec![],
+            author: meta.author.clone(),
+            description: meta.description.clone(),
+            tags: meta.tags.clone(),
+            output,
             modules,
             cables,
-            parameters: StdMap::new(),
+            parameters,
         }
     }
 
@@ -1326,6 +1371,15 @@ impl Patch {
         registry: &ModuleRegistry,
         sample_rate: f64,
     ) -> Result<Self, PatchError> {
+        // Version policy (Q090): reject patches newer than we understand rather than
+        // silently misreading them; older/equal versions load (the format only grows).
+        if def.version > CURRENT_PATCH_VERSION {
+            return Err(PatchError::CompilationFailed(format!(
+                "Unsupported patch version {} (this build supports up to {})",
+                def.version, CURRENT_PATCH_VERSION
+            )));
+        }
+
         let mut patch = Patch::new(sample_rate);
         let mut name_to_handle: StdMap<String, NodeHandle> = StdMap::new();
 
@@ -1403,17 +1457,46 @@ impl Patch {
             }
         }
 
-        // Find and set output node (look for stereo_output)
-        if let Some(handle) = name_to_handle.get("output") {
-            patch.set_output(handle.id());
-        } else if let Some(handle) = name_to_handle.values().find(|h| {
-            h.spec()
-                .outputs
-                .iter()
-                .any(|p| p.name == "left" || p.name == "right")
-        }) {
-            patch.set_output(handle.id());
+        // Apply parameters (Q086): "module_name.param_id" -> value, via the introspection /
+        // port-default dispatch. Unknown modules/params are skipped so hand-edited or
+        // legacy files degrade gracefully rather than failing to load. Applied before
+        // compile so port-default overrides are baked into the routing.
+        for (key, &value) in &def.parameters {
+            if let Some((module_name, param_id)) = key.split_once('.') {
+                if let Some(handle) = name_to_handle.get(module_name) {
+                    patch.set_param_by_id(handle.id(), param_id, value);
+                }
+            }
         }
+
+        // Set the output node. Honor the serialized `output` field when present (Q087),
+        // otherwise fall back to the legacy heuristic for patches written before it existed.
+        let output_set = def
+            .output
+            .as_ref()
+            .and_then(|name| name_to_handle.get(name))
+            .map(|handle| patch.set_output(handle.id()))
+            .is_some();
+        if !output_set {
+            if let Some(handle) = name_to_handle.get("output") {
+                patch.set_output(handle.id());
+            } else if let Some(handle) = name_to_handle.values().find(|h| {
+                h.spec()
+                    .outputs
+                    .iter()
+                    .any(|p| p.name == "left" || p.name == "right")
+            }) {
+                patch.set_output(handle.id());
+            }
+        }
+
+        // Preserve patch metadata (Q090) so a subsequent to_def round-trips it.
+        patch.set_meta(crate::graph::PatchMeta {
+            name: Some(def.name.clone()),
+            author: def.author.clone(),
+            description: def.description.clone(),
+            tags: def.tags.clone(),
+        });
 
         patch.compile()?;
         Ok(patch)
@@ -2127,5 +2210,214 @@ mod tests {
             }
             other => panic!("expected CompilationFailed, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_from_def_unknown_module_type_returns_err() {
+        // Q180 sweep: an unknown module type must be a descriptive Err, never a panic.
+        let registry = ModuleRegistry::new();
+        let mut def = PatchDef::new("Bad Type");
+        def.modules.push(ModuleDef::new("x", "not_a_real_module"));
+        match Patch::from_def(&def, &registry, 44100.0) {
+            Err(PatchError::CompilationFailed(msg)) => {
+                assert!(msg.contains("not_a_real_module"), "msg: {msg}");
+            }
+            other => panic!("expected CompilationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_def_malformed_cable_ref_returns_err() {
+        // Q180 sweep: a cable reference missing the "module.port" dot must Err, not panic.
+        let registry = ModuleRegistry::new();
+        let mut def = PatchDef::new("Malformed");
+        def.modules.push(ModuleDef::new("vco", "vco"));
+        def.modules.push(ModuleDef::new("output", "stereo_output"));
+        def.cables.push(CableDef::new("no_dot_here", "output.left"));
+        assert!(Patch::from_def(&def, &registry, 44100.0).is_err());
+    }
+
+    #[test]
+    fn test_from_def_rejects_newer_version() {
+        // Q090: a patch from a newer schema version must be rejected with a clear error.
+        let registry = ModuleRegistry::new();
+        let mut def = PatchDef::new("Future");
+        def.version = CURRENT_PATCH_VERSION + 1;
+        def.modules.push(ModuleDef::new("output", "stereo_output"));
+        match Patch::from_def(&def, &registry, 44100.0) {
+            Err(PatchError::CompilationFailed(msg)) => {
+                assert!(msg.contains("version"), "msg: {msg}");
+            }
+            other => panic!("expected version rejection, got {other:?}"),
+        }
+        // A patch at the current version still loads.
+        def.version = CURRENT_PATCH_VERSION;
+        assert!(Patch::from_def(&def, &registry, 44100.0).is_ok());
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_params_and_output() {
+        // Q086: build a patch, change parameters (port-backed and internal), round-trip
+        // through JSON, and verify parameters survive AND the audio output is identical.
+        use crate::modules::{Distortion, StereoOutput, Svf, Vco};
+
+        let build = || -> (Patch, crate::graph::NodeId, crate::graph::NodeId, crate::graph::NodeId) {
+            let mut patch = Patch::new(44100.0);
+            let osc = patch.add("osc", Vco::new(44100.0));
+            let dist = patch.add("dist", Distortion::new(44100.0));
+            let flt = patch.add("flt", Svf::new(44100.0));
+            let out = patch.add("output", StereoOutput::new());
+            patch.connect(osc.out("saw"), dist.in_("in")).unwrap();
+            patch.connect(dist.out("out"), flt.in_("in")).unwrap();
+            patch.connect(flt.out("lp"), out.in_("left")).unwrap();
+            patch.connect(flt.out("lp"), out.in_("right")).unwrap();
+            patch.set_output(out.id());
+            (patch, osc.id(), dist.id(), flt.id())
+        };
+
+        let (mut original, osc_id, dist_id, flt_id) = build();
+        // Port-backed params: filter cutoff and oscillator pitch (V/Oct).
+        assert!(original.set_param_by_id(flt_id, "cutoff", 0.35));
+        assert!(original.set_param_by_id(osc_id, "voct", 1.0));
+        // Internal (non-port) param dispatched through ModuleIntrospection: oversampling.
+        assert!(original.set_param_by_id(dist_id, "oversample", 1.0));
+        // A bogus id must be rejected.
+        assert!(!original.set_param_by_id(flt_id, "no_such_param", 1.0));
+
+        // Serialize -> JSON -> deserialize -> rebuild.
+        let def = original.to_def("Round Trip");
+        assert_eq!(def.output.as_deref(), Some("output"));
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let mut rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+
+        // Params survive, read back through the live-patch introspection getters.
+        let r_osc = rebuilt.get_node_id_by_name("osc").unwrap();
+        let r_dist = rebuilt.get_node_id_by_name("dist").unwrap();
+        let r_flt = rebuilt.get_node_id_by_name("flt").unwrap();
+        assert!((rebuilt.get_param_by_id(r_flt, "cutoff").unwrap() - 0.35).abs() < 1e-9);
+        assert!((rebuilt.get_param_by_id(r_osc, "voct").unwrap() - 1.0).abs() < 1e-9);
+        assert!((rebuilt.get_param_by_id(r_dist, "oversample").unwrap() - 1.0).abs() < 1e-9);
+        // The rebuilt output node is honored from the serialized field.
+        assert_eq!(rebuilt.output_node(), Some(r_out_of(&rebuilt)));
+
+        // Deterministic output must match sample-for-sample.
+        for i in 0..256 {
+            let a = original.tick();
+            let b = rebuilt.tick();
+            assert!(
+                (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9,
+                "sample {i} diverged: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    // Helper: the output node id of a patch (its module named "output").
+    fn r_out_of(p: &Patch) -> crate::graph::NodeId {
+        p.get_node_id_by_name("output").unwrap()
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_metadata() {
+        // Q090: name/author/description/tags survive a to_def -> JSON -> from_def round-trip.
+        use crate::graph::PatchMeta;
+        use crate::modules::StereoOutput;
+
+        let mut patch = Patch::new(44100.0);
+        let out = patch.add("output", StereoOutput::new());
+        patch.set_output(out.id());
+        patch.set_meta(PatchMeta {
+            name: Some("My Patch".into()),
+            author: Some("Ada".into()),
+            description: Some("A lovely patch".into()),
+            tags: vec!["demo".into(), "test".into()],
+        });
+
+        let def = patch.to_def("My Patch");
+        assert_eq!(def.author.as_deref(), Some("Ada"));
+        assert_eq!(def.description.as_deref(), Some("A lovely patch"));
+        assert_eq!(def.tags, vec!["demo".to_string(), "test".to_string()]);
+
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+        let meta = rebuilt.meta();
+        assert_eq!(meta.author.as_deref(), Some("Ada"));
+        assert_eq!(meta.description.as_deref(), Some("A lovely patch"));
+        assert_eq!(meta.tags, vec!["demo".to_string(), "test".to_string()]);
+    }
+
+    #[test]
+    fn test_old_json_without_output_field_still_loads() {
+        // Q087 back-compat: JSON predating the `output` field must deserialize (serde default)
+        // and fall back to the output heuristic.
+        let json = r#"{
+            "version": 1,
+            "name": "Legacy",
+            "author": null,
+            "description": null,
+            "tags": [],
+            "modules": [
+                {"name": "vco", "module_type": "vco", "position": null, "state": null},
+                {"name": "output", "module_type": "stereo_output", "position": null, "state": null}
+            ],
+            "cables": [
+                {"from": "vco.saw", "to": "output.left", "attenuation": null, "offset": null}
+            ],
+            "parameters": {}
+        }"#;
+        let def = PatchDef::from_json(json).unwrap();
+        assert!(def.output.is_none());
+        let registry = ModuleRegistry::new();
+        let patch = Patch::from_def(&def, &registry, 44100.0).unwrap();
+        // Heuristic still selects the stereo output node named "output".
+        assert_eq!(patch.output_node(), patch.get_node_id_by_name("output"));
+    }
+
+    /// Q088 drift-guard: the shipped JSON schema's `module_type` enum and the
+    /// `ModuleRegistry` built-ins must stay in exact 1:1 correspondence. Reads the schema
+    /// file via `include_str!` so a stale schema (or a newly registered module with no enum
+    /// entry) fails the build instead of shipping a patch that valid code cannot round-trip.
+    #[test]
+    fn test_schema_enum_matches_registry() {
+        const SCHEMA: &str = include_str!("../schemas/patch.schema.json");
+        let schema: serde_json::Value =
+            serde_json::from_str(SCHEMA).expect("patch.schema.json must be valid JSON");
+        let enum_vals = schema["$defs"]["ModuleDef"]["properties"]["module_type"]["enum"]
+            .as_array()
+            .expect("schema module_type must define an enum array");
+        let enum_ids: Vec<&str> = enum_vals
+            .iter()
+            .map(|v| v.as_str().expect("enum entries must be strings"))
+            .collect();
+
+        let registry = ModuleRegistry::new();
+        let registry_ids: Vec<String> =
+            registry.list_modules().map(|m| m.type_id.clone()).collect();
+
+        // Every registered type must appear in the schema enum.
+        for id in &registry_ids {
+            assert!(
+                enum_ids.contains(&id.as_str()),
+                "registry type '{id}' is missing from the schema module_type enum"
+            );
+        }
+        // And no schema enum entry may be a dead type unknown to the registry.
+        for id in &enum_ids {
+            assert!(
+                registry_ids.iter().any(|r| r == id),
+                "schema module_type enum lists '{id}', which the registry does not register"
+            );
+        }
+        // Counts must match exactly (guards against duplicate enum entries too).
+        assert_eq!(
+            enum_ids.len(),
+            registry_ids.len(),
+            "schema enum ({}) and registry ({}) type counts diverge",
+            enum_ids.len(),
+            registry_ids.len()
+        );
     }
 }

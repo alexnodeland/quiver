@@ -168,6 +168,27 @@ struct Node {
     module: Box<dyn GraphModule>,
     name: String,
     position: Option<(f32, f32)>,
+    /// Per-node overrides for the base (unpatched) value of control-input ports, keyed by
+    /// port name. Set through [`Patch::set_param_by_id`] and applied at [`Patch::compile`]
+    /// as the [`InputPlan`] default, so an unpatched knob-style input takes this value.
+    /// Empty for a freshly added node.
+    param_overrides: StdMap<String, f64>,
+}
+
+/// Editable, human-facing metadata for a [`Patch`].
+///
+/// Held on the live patch so it survives a `to_def`/`from_def` round-trip (the graph itself
+/// carries no name/author/tags). All fields are optional; a default `PatchMeta` is empty.
+#[derive(Debug, Clone, Default)]
+pub struct PatchMeta {
+    /// Patch name (falls back to the argument passed to [`Patch::to_def`] when `None`).
+    pub name: Option<String>,
+    /// Author / credit.
+    pub author: Option<String>,
+    /// Free-form description.
+    pub description: Option<String>,
+    /// Search / filter tags.
+    pub tags: Vec<String>,
 }
 
 /// Error types for patch operations.
@@ -516,6 +537,9 @@ pub struct Patch {
     // Validation
     validation_mode: ValidationMode,
     warnings: Vec<String>,
+
+    // Human-facing metadata, preserved across to_def/from_def.
+    meta: PatchMeta,
 }
 
 impl Patch {
@@ -537,7 +561,23 @@ impl Patch {
             // warnings without blocking, matching the documented behavior.
             validation_mode: ValidationMode::Warn,
             warnings: Vec::new(),
+            meta: PatchMeta::default(),
         }
+    }
+
+    /// Read the patch's editable metadata (name, author, description, tags).
+    pub fn meta(&self) -> &PatchMeta {
+        &self.meta
+    }
+
+    /// Mutable access to the patch metadata (see [`PatchMeta`]).
+    pub fn meta_mut(&mut self) -> &mut PatchMeta {
+        &mut self.meta
+    }
+
+    /// Replace the patch metadata wholesale.
+    pub fn set_meta(&mut self, meta: PatchMeta) {
+        self.meta = meta;
     }
 
     /// Set the signal validation mode
@@ -577,6 +617,7 @@ impl Patch {
             module: Box::new(module),
             name: name.into(),
             position: None,
+            param_overrides: StdMap::new(),
         });
         self.invalidate();
         NodeHandle { id, spec }
@@ -594,6 +635,7 @@ impl Patch {
             module,
             name: name.into(),
             position: None,
+            param_overrides: StdMap::new(),
         });
         self.invalidate();
         NodeHandle { id, spec }
@@ -789,6 +831,11 @@ impl Patch {
     pub fn set_output(&mut self, node: NodeId) {
         self.output_node = Some(node);
         self.dirty = true;
+    }
+
+    /// The node currently designated as the patch's stereo output, if any.
+    pub fn output_node(&self) -> Option<NodeId> {
+        self.output_node
     }
 
     /// Set the output node, validating that it exists and exposes at least one output port.
@@ -1014,9 +1061,17 @@ impl Patch {
                         }
                     }
                 }
+                // A per-node parameter override (set via `set_param_by_id`) replaces the
+                // spec's static default for this unpatched control input. Baked in here at
+                // compile time so the zero-alloc tick path is untouched.
+                let default = node
+                    .param_overrides
+                    .get(&input.name)
+                    .copied()
+                    .unwrap_or(input.default);
                 inputs.push(InputPlan {
                     port_id: input.id,
-                    default: input.default,
+                    default,
                     normalled_to: input.normalled_to,
                     has_connection,
                     edges,
@@ -1293,6 +1348,123 @@ impl Patch {
             .iter()
             .find(|p| p.id == port)
             .map(|p| p.kind)
+    }
+}
+
+/// A control input is one whose base value behaves as a UI-settable "knob": everything
+/// except raw [`SignalKind::Audio`] carriers (which are meant to be patched, not dialed).
+#[cfg(feature = "alloc")]
+fn is_control_input(kind: SignalKind) -> bool {
+    kind != SignalKind::Audio
+}
+
+/// Synthesize a [`ParamInfo`](crate::introspection::ParamInfo) for a control-input port,
+/// using the port's signal range for bounds and the supplied effective value.
+#[cfg(feature = "alloc")]
+fn port_param_info(port: &crate::port::PortDef, value: f64) -> crate::introspection::ParamInfo {
+    let (min, max) = port.kind.voltage_range();
+    crate::introspection::ParamInfo::new(port.name.clone(), port.name.clone())
+        .with_range(min, max)
+        .with_default(port.default)
+        .with_value(value)
+}
+
+/// Introspection / parameter dispatch for a live patch (alloc tier).
+///
+/// A node's parameters come from two places, unified here:
+/// * **Control-input ports** — any non-audio input. Its base (unpatched) value is a knob,
+///   overridable per node; the override is applied at [`compile`](Self::compile).
+/// * **Internal state** — parameters that are *not* ports (waveform tables, scales, oversample
+///   factor, …), reached through the module's [`ModuleIntrospection`] via the
+///   [`introspect`](crate::port::GraphModule::introspect) hook.
+///
+/// Port parameters take precedence when an id names both, because in a compiled graph the
+/// module reads the injected port value, not any mirrored internal field.
+#[cfg(feature = "alloc")]
+impl Patch {
+    /// All UI-exposable parameters for a node.
+    ///
+    /// Returns internal-state parameters (from `ModuleIntrospection`, minus any shadowed by a
+    /// same-named port) followed by one entry per control-input port with its current
+    /// effective value. Empty if `node` is unknown.
+    pub fn param_infos(&self, node: NodeId) -> Vec<crate::introspection::ParamInfo> {
+        let Some(n) = self.nodes.get(node) else {
+            return Vec::new();
+        };
+        let spec = n.module.port_spec();
+        let mut infos: Vec<crate::introspection::ParamInfo> = n
+            .module
+            .introspect()
+            .map(|i| i.param_infos())
+            .unwrap_or_default()
+            .into_iter()
+            // Drop internal params shadowed by a real port of the same id (the port wins).
+            .filter(|p| spec.input_by_name(&p.id).is_none())
+            .collect();
+
+        for input in &spec.inputs {
+            if !is_control_input(input.kind) {
+                continue;
+            }
+            let value = n
+                .param_overrides
+                .get(&input.name)
+                .copied()
+                .unwrap_or(input.default);
+            infos.push(port_param_info(input, value));
+        }
+        infos
+    }
+
+    /// Read a single parameter's current value by id (port name or internal param id).
+    pub fn get_param_by_id(&self, node: NodeId, id: &str) -> Option<f64> {
+        let n = self.nodes.get(node)?;
+        // Port parameters are authoritative.
+        if let Some(port) = n.module.port_spec().input_by_name(id) {
+            if is_control_input(port.kind) {
+                return Some(n.param_overrides.get(id).copied().unwrap_or(port.default));
+            }
+        }
+        n.module
+            .introspect()
+            .and_then(|i| i.get_param_info(id))
+            .map(|p| p.value)
+    }
+
+    /// Set a parameter by id. Returns `true` if the id was recognized.
+    ///
+    /// A control-input port id sets a per-node base-value override (and marks the graph for
+    /// recompile so the next tick observes it). Otherwise the module's `ModuleIntrospection`
+    /// is asked to set internal state.
+    pub fn set_param_by_id(&mut self, node: NodeId, id: &str, value: f64) -> bool {
+        // Decide the routing without holding a mutable borrow across the invalidate() call.
+        let is_port = self
+            .nodes
+            .get(node)
+            .map(|n| {
+                n.module
+                    .port_spec()
+                    .input_by_name(id)
+                    .map(|p| is_control_input(p.kind))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+
+        if is_port {
+            if let Some(n) = self.nodes.get_mut(node) {
+                n.param_overrides.insert(id.to_string(), value);
+            }
+            // The override is baked into InputPlan defaults at compile time.
+            self.invalidate();
+            return true;
+        }
+
+        if let Some(n) = self.nodes.get_mut(node) {
+            if let Some(intro) = n.module.introspect_mut() {
+                return intro.set_param_by_id(id, value);
+            }
+        }
+        false
     }
 }
 

@@ -103,8 +103,8 @@ pub mod prelude {
 
     // Layer 3: Patch Graph
     pub use crate::graph::{
-        Cable, CableId, CompatibilityResult, NodeHandle, NodeId, Patch, PatchError, PortRef,
-        ValidationMode,
+        Cable, CableId, CompatibilityResult, NodeHandle, NodeId, Patch, PatchError, PatchMeta,
+        PortRef, ValidationMode,
     };
 
     // Core DSP Modules
@@ -185,7 +185,7 @@ pub mod prelude {
     #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub use crate::serialize::{
         CableDef, CatalogResponse, ModuleCatalogEntry, ModuleDef, ModuleMetadata, ModuleRegistry,
-        PatchDef, PortSummary, ValidationError, ValidationResult,
+        PatchDef, PortSummary, ValidationError, ValidationResult, CURRENT_PATCH_VERSION,
     };
 
     // Preset Library (works with alloc - just data structures)

@@ -128,6 +128,9 @@ impl GraphModule for Offset {
             self.offset = value;
         }
     }
+
+    // `offset` is genuine internal state (not an input port); bridge it to introspection.
+    crate::impl_introspect!();
 }
 
 /// Hysteresis band (in semitones) applied by the pitch quantizers so a CV
@@ -858,6 +861,9 @@ impl GraphModule for StepSequencer {
     fn type_id(&self) -> &'static str {
         "step_sequencer"
     }
+
+    // Step CV/gate values are internal state (no ports); bridge to introspection.
+    crate::impl_introspect!();
 }
 
 /// Stereo Output
@@ -1191,6 +1197,9 @@ impl GraphModule for Quantizer {
     fn type_id(&self) -> &'static str {
         "quantizer"
     }
+
+    // `scale` is internal state (no scale port); bridge to introspection.
+    crate::impl_introspect!();
 }
 
 /// Clock Generator
