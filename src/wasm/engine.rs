@@ -83,6 +83,14 @@ pub struct QuiverEngine {
     midi_gate: bool,
     midi_cc_values: [f64; 128],
     midi_pitch_bend_value: f64,
+
+    // Currently-held MIDI notes as a `(note, velocity)` stack, ordered oldest ->
+    // newest. Drives the shared monophonic `midi_*` CV sources with **last-note
+    // priority** (legato): the most recently pressed still-held note sounds, and the
+    // gate stays open until the last held note is released. Without this, releasing
+    // one note of an overlapping pair (a chord or legato line) would drop the shared
+    // gate and prematurely release every cabled envelope.
+    held_notes: Vec<(u8, u8)>,
 }
 
 #[wasm_bindgen]
@@ -112,6 +120,7 @@ impl QuiverEngine {
             midi_gate: false,
             midi_cc_values: [0.0; 128],
             midi_pitch_bend_value: 0.0,
+            held_notes: Vec::new(),
         }
     }
 
@@ -655,11 +664,21 @@ impl QuiverEngine {
     /// Updates both the scalar getters and the shared `midi_voct` / `midi_gate` /
     /// `midi_velocity` CV sources (see [`add_midi_inputs`](Self::add_midi_inputs)),
     /// so a cabled patch responds on the next processed sample.
+    ///
+    /// The shared CV sources are monophonic, so overlapping notes follow **last-note
+    /// priority**: the newly pressed note becomes the sounding note and is pushed onto
+    /// the held-note stack (see [`midi_note_off`](Self::midi_note_off)).
     pub fn midi_note_on(&mut self, note: u8, velocity: u8) -> Result<(), JsValue> {
         // Convert MIDI note to V/Oct (0V = C4, 1V = C5).
-        let v_oct = (note as f64 - 60.0) / 12.0;
+        let v_oct = Self::note_to_voct(note);
         // Convert velocity to 0-1 range.
         let vel = velocity as f64 / 127.0;
+
+        // Last-note priority: move this note to the top of the held-note stack,
+        // dropping any earlier still-tracked press of the same note so a later
+        // note-off removes the correct entry (and re-presses don't stack duplicates).
+        self.held_notes.retain(|&(n, _)| n != note);
+        self.held_notes.push((note, velocity));
 
         self.midi_note = Some(v_oct);
         self.midi_velocity = Some(vel);
@@ -673,11 +692,48 @@ impl QuiverEngine {
         Ok(())
     }
 
-    /// Handle a MIDI Note Off message. Closes the shared gate CV source.
-    pub fn midi_note_off(&mut self, _note: u8, _velocity: u8) -> Result<(), JsValue> {
-        self.midi_gate = false;
-        self.midi.gate.set(0.0);
+    /// Handle a MIDI Note Off message.
+    ///
+    /// The `midi_*` CV sources are monophonic and shared, so releasing a note only
+    /// closes the gate when it is the **last** held note. With overlapping notes (a
+    /// chord, or legato where the next note-on precedes the previous note-off),
+    /// releasing an inner note keeps the gate open and re-points pitch/velocity to the
+    /// most recently pressed note still held (**last-note priority**). This preserves
+    /// the documented "Gate: 5.0 while a note is held" contract instead of dropping the
+    /// gate — and prematurely releasing every cabled envelope — on the first release.
+    pub fn midi_note_off(&mut self, note: u8, _velocity: u8) -> Result<(), JsValue> {
+        // Remove the released note from the held-note stack.
+        self.held_notes.retain(|&(n, _)| n != note);
+
+        match self.held_notes.last().copied() {
+            // Another note is still held: keep the gate open and revert to it.
+            Some((held_note, held_velocity)) => {
+                let v_oct = Self::note_to_voct(held_note);
+                let vel = held_velocity as f64 / 127.0;
+
+                self.midi_note = Some(v_oct);
+                self.midi_velocity = Some(vel);
+                self.midi_gate = true;
+
+                self.midi.voct.set(v_oct);
+                self.midi.velocity.set(vel);
+                // Gate is already high, but set it explicitly so state is coherent
+                // even if this note-off arrives before any note-on was tracked.
+                self.midi.gate.set(5.0);
+            }
+            // Last held note released: close the gate.
+            None => {
+                self.midi_gate = false;
+                self.midi.gate.set(0.0);
+            }
+        }
+
         Ok(())
+    }
+
+    /// Convert a MIDI note number to V/Oct (0V = C4 / MIDI note 60, 1V = C5).
+    fn note_to_voct(note: u8) -> f64 {
+        (note as f64 - 60.0) / 12.0
     }
 
     /// Get the current MIDI note as V/Oct (for connecting to VCO)
@@ -938,6 +994,74 @@ mod native_tests {
 
         assert!(engine.midi_pitch_bend(0.5).is_ok());
         assert_eq!(engine.pitch_bend(), 0.5);
+    }
+
+    #[test]
+    fn note_off_keeps_gate_while_another_note_is_held() {
+        // Overlapping notes (chord / legato): pressing 60 then 64 sounds 64; releasing
+        // 60 (an inner note) must NOT drop the shared gate — 64 is still held.
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.midi_note_on(60, 100).unwrap();
+        engine.midi_note_on(64, 100).unwrap();
+
+        engine.midi_note_off(60, 0).unwrap();
+        assert!(engine.midi_gate(), "gate stays open while note 64 is held");
+        assert!(
+            (engine.midi_note() - (64.0 - 60.0) / 12.0).abs() < 1e-9,
+            "pitch tracks the still-held note 64"
+        );
+
+        // Releasing the last held note finally closes the gate.
+        engine.midi_note_off(64, 0).unwrap();
+        assert!(!engine.midi_gate(), "gate closes once no notes remain");
+    }
+
+    #[test]
+    fn note_off_last_note_priority_reverts_pitch_on_top_release() {
+        // Pressing 60 then 67 sounds 67; releasing the sounding (top) note reverts to
+        // the most recent still-held note (60) with the gate still open.
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.midi_note_on(60, 100).unwrap();
+        engine.midi_note_on(67, 100).unwrap();
+        assert!((engine.midi_note() - (67.0 - 60.0) / 12.0).abs() < 1e-9);
+
+        engine.midi_note_off(67, 0).unwrap();
+        assert!(engine.midi_gate(), "gate stays open, 60 still held");
+        assert!(
+            engine.midi_note().abs() < 1e-9,
+            "pitch reverts to note 60 (0V) under last-note priority"
+        );
+
+        engine.midi_note_off(60, 0).unwrap();
+        assert!(!engine.midi_gate());
+    }
+
+    #[test]
+    fn note_off_single_note_and_stray_release_close_the_gate() {
+        // A single note round-trips to gate-off, and a stray note-off with nothing
+        // held leaves the gate closed (matches the original monophonic behavior).
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.midi_note_on(62, 100).unwrap();
+        assert!(engine.midi_gate());
+        engine.midi_note_off(62, 0).unwrap();
+        assert!(!engine.midi_gate());
+
+        engine.midi_note_off(90, 0).unwrap();
+        assert!(!engine.midi_gate(), "stray note-off keeps the gate closed");
+    }
+
+    #[test]
+    fn note_on_dedupes_repeated_note_so_one_release_clears_it() {
+        // Re-pressing an already-held note must not stack duplicates, so a single
+        // note-off fully releases it and closes the gate.
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.midi_note_on(60, 100).unwrap();
+        engine.midi_note_on(60, 110).unwrap();
+        engine.midi_note_off(60, 0).unwrap();
+        assert!(
+            !engine.midi_gate(),
+            "one release clears a re-pressed note (no duplicate stack entry)"
+        );
     }
 
     #[test]

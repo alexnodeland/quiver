@@ -63,17 +63,22 @@ type WorkletMessage =
   | { type: 'reset' }
   | { type: 'destroy' };
 
+// Every control message from the main thread (except the untracked `init`) carries a
+// monotonic `requestId` that we echo on the matching ack/error, so the caller can
+// correlate each response to the exact request that issued it.
+type IncomingMessage = WorkletMessage & { requestId?: number };
+
 type EngineInstance = InstanceType<typeof QuiverEngine>;
 
 class QuiverProcessor extends AudioWorkletProcessor {
   private engine: EngineInstance | null = null;
   private ready = false;
   private destroyed = false;
-  private pending: WorkletMessage[] = [];
+  private pending: IncomingMessage[] = [];
 
   constructor() {
     super();
-    this.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
+    this.port.onmessage = (event: MessageEvent<IncomingMessage>) => {
       const message = event.data;
       if (message.type === 'init') {
         this.handleInit(message);
@@ -116,21 +121,24 @@ class QuiverProcessor extends AudioWorkletProcessor {
     this.destroyed = true;
   }
 
-  private handleMessage(message: WorkletMessage): void {
+  private handleMessage(message: IncomingMessage): void {
     const engine = this.engine;
     if (!engine) return;
+    // Echoed back on the ack/error so the main thread can correlate the response.
+    const requestId = message.requestId;
     try {
       switch (message.type) {
         case 'load_patch':
           // Atomic whole-patch swap.
           engine.load_patch(message.patch);
           engine.compile();
-          this.port.postMessage({ type: 'patch_loaded' });
+          this.port.postMessage({ type: 'patch_loaded', requestId });
           break;
         case 'save_patch':
           this.port.postMessage({
             type: 'patch_saved',
             patch: engine.save_patch(message.name),
+            requestId,
           });
           break;
         case 'set_param':
@@ -181,14 +189,16 @@ class QuiverProcessor extends AudioWorkletProcessor {
           // Lazy recompile happens automatically on the next process(); this is an
           // explicit trigger for callers that want to surface compile errors now.
           engine.compile();
-          this.port.postMessage({ type: 'compiled' });
+          this.port.postMessage({ type: 'compiled', requestId });
           break;
         case 'reset':
           engine.reset();
           break;
       }
     } catch (e) {
-      this.port.postMessage({ type: 'error', error: String(e) });
+      // Correlate the error to its request so it rejects only the matching awaited
+      // promise (or, for fire-and-forget ops, none).
+      this.port.postMessage({ type: 'error', error: String(e), requestId });
     }
   }
 
