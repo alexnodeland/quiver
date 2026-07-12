@@ -1783,7 +1783,7 @@ mod tests {
     #[test]
     fn test_noise_output_bounded() {
         let mut noise = NoiseGenerator::new();
-        let mut inputs = PortValues::new();
+        let inputs = PortValues::new();
         let mut outputs = PortValues::new();
 
         let max = measure_max_output(10000, || {
@@ -1885,7 +1885,7 @@ mod tests {
         let saw = vco_capture(0.0, 12, (44100.0 / 261.63) as usize * 10);
         let crossings = saw.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
         assert!(
-            crossings >= 8 && crossings <= 12,
+            (8..=12).contains(&crossings),
             "expected ~10 zero crossings, got {}",
             crossings
         );
@@ -2299,5 +2299,103 @@ mod tests {
             (sumsq / n as f64).sqrt() > 0.5,
             "wavetable high-pitch silent"
         );
+    }
+
+    // ---- Q157: Supersaw detune spread ----
+
+    /// Peak-to-peak of the per-block RMS envelope of `sig` (block size `block`).
+    /// A single periodic tone gives a near-flat envelope; detuned voices beat
+    /// against each other and make it fluctuate.
+    fn block_rms_ptp(sig: &[f64], block: usize) -> f64 {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for chunk in sig.chunks(block) {
+            let rms = (chunk.iter().map(|x| x * x).sum::<f64>() / chunk.len() as f64).sqrt();
+            lo = lo.min(rms);
+            hi = hi.max(rms);
+        }
+        hi - lo
+    }
+
+    #[test]
+    fn test_supersaw_detune_spread() {
+        let run = |detune: f64| -> Vec<f64> {
+            let mut ss = Supersaw::new(44100.0);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            inputs.set(0, 0.0); // C4
+            inputs.set(1, detune);
+            inputs.set(2, 1.0); // full supersaw mix
+            let mut out = Vec::with_capacity(20_000);
+            for _ in 0..20_000 {
+                ss.tick(&inputs, &mut outputs);
+                out.push(outputs.get(10).unwrap());
+            }
+            out
+        };
+
+        let ptp_off = block_rms_ptp(&run(0.0), 500);
+        let ptp_on = block_rms_ptp(&run(1.0), 500);
+        // With zero detune all seven voices share one frequency, so the summed
+        // waveform is periodic and its RMS envelope is essentially flat.
+        assert!(
+            ptp_off < 0.02,
+            "no-detune supersaw should not beat: ptp={ptp_off}"
+        );
+        // Detune spreads the voices apart; their beating modulates the RMS.
+        assert!(
+            ptp_on > ptp_off + 0.03,
+            "detuned supersaw must beat (spread the voices): on={ptp_on} off={ptp_off}"
+        );
+    }
+
+    #[test]
+    fn test_supersaw_reset_and_sample_rate() {
+        let mut ss = Supersaw::default();
+        assert_eq!(ss.type_id(), "supersaw");
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.0);
+        for _ in 0..500 {
+            ss.tick(&inputs, &mut outputs);
+        }
+        assert!(ss.sub_phase != 0.0 || ss.phases[3] != 3.0 / 7.0);
+        ss.reset();
+        assert_eq!(ss.sub_phase, 0.0);
+        for (i, &p) in ss.phases.iter().enumerate() {
+            assert_eq!(p, i as f64 / 7.0);
+        }
+        ss.set_sample_rate(48000.0);
+        assert_eq!(ss.sample_rate, 48000.0);
+        ss.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap().is_finite());
+    }
+
+    // ---- Q157: KarplusStrong reset + sample-rate ----
+
+    #[test]
+    fn test_karplus_strong_reset_and_sample_rate() {
+        let mut ks = KarplusStrong::default();
+        assert_eq!(ks.type_id(), "karplus_strong");
+        assert_eq!(ks.sample_rate, 44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.0);
+        inputs.set(1, 5.0); // pluck
+        for _ in 0..500 {
+            ks.tick(&inputs, &mut outputs);
+        }
+        assert!(ks.write_pos != 0);
+        ks.reset();
+        assert_eq!(ks.write_pos, 0);
+        assert_eq!(ks.last_output, 0.0);
+        assert!(ks.buffer.iter().all(|&x| x == 0.0));
+        // Reallocation on sample-rate change must not panic and stays finite.
+        ks.set_sample_rate(48000.0);
+        assert_eq!(ks.sample_rate, 48000.0);
+        for _ in 0..100 {
+            ks.tick(&inputs, &mut outputs);
+            assert!(outputs.get(10).unwrap().is_finite());
+        }
     }
 }

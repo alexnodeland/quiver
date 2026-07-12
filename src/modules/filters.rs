@@ -1,6 +1,6 @@
 //! Filter modules.
 
-use crate::modules::common::flush_denorm;
+use crate::modules::common::{flush_denorm, sanitize_audio};
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use alloc::vec;
 use core::f64::consts::{PI, TAU};
@@ -99,7 +99,9 @@ impl GraphModule for Svf {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize so a non-finite input can never poison the resonant
+        // TPT integrator state (which would otherwise latch NaN forever).
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let cutoff_cv = inputs.get_or(1, 0.5) + inputs.get_or(3, 0.0);
         let res = inputs.get_or(2, 0.0).clamp(0.0, 1.0);
 
@@ -270,7 +272,9 @@ impl GraphModule for DiodeLadderFilter {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize so a non-finite input can never poison the ladder
+        // feedback stages (which would otherwise latch NaN forever).
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let cutoff_cv = inputs.get_or(1, 0.5) + inputs.get_or(3, 0.0);
         let res = inputs.get_or(2, 0.0).clamp(0.0, 1.0);
         let keytrack_voct = inputs.get_or(4, 0.0);
@@ -1286,6 +1290,62 @@ mod tests {
         assert_eq!(
             eq.recompute_count, 4,
             "returning to static must not recompute"
+        );
+    }
+
+    // ---- Q158: ParametricEq real frequency response (in-band vs out-of-band) ----
+
+    #[test]
+    fn test_parametric_eq_mid_band_response() {
+        let sample_rate = 44100.0;
+        // Mid band default CV 0.5 -> 200 * 40^0.5 Hz; drive a tone right at that
+        // peaking-filter center and one far below it (out of band).
+        let mid_freq = 200.0 * Libm::<f64>::pow(40.0, 0.5);
+        let out_of_band = mid_freq / 8.0;
+
+        // Steady-state RMS at `tone_hz` for a given mid-gain CV (input 3).
+        let measure = |tone_hz: f64, mid_gain_cv: f64| -> f64 {
+            let mut eq = ParametricEq::new(sample_rate);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            inputs.set(3, mid_gain_cv); // mid gain (bipolar CV, ±5V -> ±12dB)
+            inputs.set(5, 1.0); // high mid-Q (narrow) so the band is well isolated
+            let dt = tone_hz / sample_rate;
+            let mut phase = 0.0f64;
+            let mut out = alloc::vec::Vec::new();
+            for n in 0..40_000 {
+                let s = Libm::<f64>::sin(TAU * phase);
+                phase += dt;
+                if phase >= 1.0 {
+                    phase -= 1.0;
+                }
+                inputs.set(0, s);
+                eq.tick(&inputs, &mut outputs);
+                if n >= 20_000 {
+                    out.push(outputs.get(10).unwrap());
+                }
+            }
+            rms(&out)
+        };
+
+        // +12 dB boost at the center: the in-band tone is amplified ~+12 dB
+        // relative to the out-of-band tone (which sees the flat parts of the EQ).
+        let boost_in = measure(mid_freq, 5.0);
+        let boost_out = measure(out_of_band, 5.0);
+        let boost_db = 20.0 * Libm::<f64>::log10(boost_in / boost_out);
+        assert!(
+            (9.0..=13.0).contains(&boost_db),
+            "mid +12dB boost: expected ~12dB in-band, got {boost_db:.2}dB"
+        );
+
+        // -12 dB cut at the center: the in-band tone is attenuated well below
+        // the out-of-band tone.
+        let cut_in = measure(mid_freq, -5.0);
+        let cut_out = measure(out_of_band, -5.0);
+        let cut_db = 20.0 * Libm::<f64>::log10(cut_in / cut_out);
+        assert!(
+            (-13.0..=-9.0).contains(&cut_db),
+            "mid -12dB cut: expected ~-12dB in-band, got {cut_db:.2}dB"
         );
     }
 }

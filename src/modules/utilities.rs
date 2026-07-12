@@ -3965,7 +3965,7 @@ mod tests {
 
         // A fresh output buffer every tick (as the engine provides) — the latch
         // must survive without reading back the output buffer.
-        let mut tick = |bg: &mut BernoulliGate, inputs: &PortValues| {
+        let tick = |bg: &mut BernoulliGate, inputs: &PortValues| {
             let mut o = PortValues::new();
             bg.tick(inputs, &mut o);
             o
@@ -4220,5 +4220,126 @@ whole tone
         assert!(err.is_err());
         // Previous custom scale is retained.
         assert!(sq.has_custom_scale());
+    }
+
+    // ---- Q161: Quantizer with negative V/Oct (notes below C4) ----
+
+    #[test]
+    fn test_quantizer_negative_voct_chromatic() {
+        // A fresh quantizer per input avoids boundary hysteresis carrying over.
+        let cases = [
+            (-0.5, -0.5),                 // exactly F#3 -> stays
+            (-1.0, -1.0),                 // C3 -> octave floor, stays
+            (-13.0 / 12.0, -13.0 / 12.0), // B2 -> negative octave, chromatic passthrough
+            (-1.0 / 24.0, 0.0),           // half a semitone below C4 -> wraps UP to C4
+        ];
+        for (input, expected) in cases {
+            let mut q = Quantizer::new(Scale::Chromatic);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            inputs.set(0, input);
+            q.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            assert!(
+                (out - expected).abs() < 1e-9,
+                "chromatic {input}V -> {out}V, expected {expected}V"
+            );
+        }
+    }
+
+    #[test]
+    fn test_quantizer_negative_voct_major_scale() {
+        // -0.5V is F#3; in a major scale it snaps to the nearest degree, F3
+        // (-7/12 V), proving the negative-octave scale-wrap path works.
+        let mut q = Quantizer::new(Scale::Major);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, -0.5);
+        q.tick(&inputs, &mut outputs);
+        let out = outputs.get(10).unwrap();
+        assert!(
+            (out - (-7.0 / 12.0)).abs() < 1e-9,
+            "major -0.5V should snap to F3 (-7/12 V), got {out}V"
+        );
+
+        // -1.0V is exactly C3, a scale degree, so it is preserved.
+        let mut q2 = Quantizer::new(Scale::Major);
+        inputs.set(0, -1.0);
+        q2.tick(&inputs, &mut outputs);
+        assert!((outputs.get(10).unwrap() - (-1.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_scale_quantizer_negative_voct() {
+        // Chromatic passthrough below C4 with the div_euclid/rem_euclid path.
+        let cases = [(-1.0, -1.0), (-13.0 / 12.0, -13.0 / 12.0)];
+        for (input, expected) in cases {
+            let mut sq = ScaleQuantizer::new(44100.0);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            inputs.set(0, input);
+            inputs.set(2, 0.0); // chromatic
+            sq.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap();
+            assert!(
+                (out - expected).abs() < 1e-9,
+                "scale-quantizer chromatic {input}V -> {out}V, expected {expected}V"
+            );
+        }
+
+        // Minor scale, -0.5V (F#3) snaps to F3 (-7/12 V) below C4.
+        let mut sq = ScaleQuantizer::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, -0.5);
+        inputs.set(2, 0.3); // scale index 2 == minor
+        sq.tick(&inputs, &mut outputs);
+        let out = outputs.get(10).unwrap();
+        assert!(
+            (out - (-7.0 / 12.0)).abs() < 1e-9,
+            "minor -0.5V should snap to F3 (-7/12 V), got {out}V"
+        );
+    }
+
+    // ---- Q157: Euclidean + ScaleQuantizer reset / sample-rate ----
+
+    #[test]
+    fn test_euclidean_reset_and_sample_rate() {
+        let mut euc = Euclidean::new(44100.0);
+        assert_eq!(euc.type_id(), "euclidean");
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        // Advance the sequencer a few clock pulses so `step` moves off zero.
+        for _ in 0..3 {
+            inputs.set(0, 5.0);
+            euc.tick(&inputs, &mut outputs);
+            inputs.set(0, 0.0);
+            euc.tick(&inputs, &mut outputs);
+        }
+        assert!(euc.step != 0, "clock pulses should advance the step");
+        euc.reset();
+        assert_eq!(euc.step, 0);
+        assert!(!euc.cycle_accented);
+        // set_sample_rate is a no-op but must not panic and keep it usable.
+        euc.set_sample_rate(48000.0);
+        inputs.set(0, 5.0);
+        euc.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap().is_finite());
+    }
+
+    #[test]
+    fn test_scale_quantizer_reset_and_sample_rate() {
+        let mut sq = ScaleQuantizer::new(44100.0);
+        assert_eq!(sq.type_id(), "scale_quantizer");
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.25); // some note
+        sq.tick(&inputs, &mut outputs);
+        assert!(sq.last_output.is_some());
+        sq.reset();
+        assert!(sq.last_output.is_none());
+        sq.set_sample_rate(48000.0);
+        sq.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap().is_finite());
     }
 }

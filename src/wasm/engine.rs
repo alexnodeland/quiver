@@ -815,3 +815,152 @@ fn parse_signal_kind(s: &str) -> Result<SignalKind, JsValue> {
         _ => Err(JsValue::from_str(&format!("Unknown signal kind: {}", s))),
     }
 }
+
+// Native host-side tests for the Rust glue behind the wasm-bindgen surface
+// (Q164). These run under plain `cargo test --features wasm` on the host — no
+// browser required — and cover parameter marshaling, state bookkeeping, the
+// audio pipeline, MIDI state, and error mapping.
+//
+// IMPORTANT: on a non-wasm target, wasm-bindgen's JS intrinsics are stubbed to
+// abort the process (a non-unwinding SIGABRT), so any method that constructs a
+// `JsValue` — every error branch, and every `-> JsValue`/`-> Result<JsValue,_>`
+// method — cannot be exercised host-side and would kill the test binary. These
+// tests therefore drive only success paths + plain-Rust getters, plus the
+// `QuiverError` conversions (which are pure Rust). That is the full set of
+// Rust-side behavior observable without a JS runtime.
+#[cfg(all(test, feature = "wasm"))]
+mod native_tests {
+    use super::*;
+    use crate::graph::PatchError;
+    use crate::wasm::QuiverError;
+
+    #[test]
+    fn new_engine_reports_sample_rate_and_empty_patch() {
+        let engine = QuiverEngine::new(48_000.0);
+        assert_eq!(engine.sample_rate(), 48_000.0);
+        assert_eq!(engine.module_count(), 0);
+        assert_eq!(engine.cable_count(), 0);
+        assert_eq!(engine.pending_update_count(), 0);
+    }
+
+    #[test]
+    fn add_module_updates_count_and_clear_resets() {
+        let mut engine = QuiverEngine::new(44_100.0);
+        assert!(engine.add_module("vco", "osc").is_ok());
+        assert!(engine.add_module("stereo_output", "out").is_ok());
+        assert_eq!(engine.module_count(), 2);
+        engine.clear_patch();
+        assert_eq!(engine.module_count(), 0);
+        assert_eq!(engine.cable_count(), 0);
+    }
+
+    #[test]
+    fn connect_returns_cable_id_and_updates_cable_count() {
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.add_module("vco", "osc").unwrap();
+        engine.add_module("stereo_output", "out").unwrap();
+        let id = engine
+            .connect("osc.saw", "out.left")
+            .expect("valid connection");
+        assert_eq!(id, 0, "first cable id should be 0");
+        assert_eq!(engine.cable_count(), 1);
+    }
+
+    #[test]
+    fn connect_then_disconnect_round_trips() {
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.add_module("vco", "osc").unwrap();
+        engine.add_module("stereo_output", "out").unwrap();
+        let id = engine.connect("osc.saw", "out.left").ok().unwrap();
+        assert_eq!(engine.cable_count(), 1);
+        assert!(engine.disconnect_cable(id).is_ok());
+        assert_eq!(engine.cable_count(), 0);
+    }
+
+    #[test]
+    fn attenuated_and_modulated_connections_succeed() {
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.add_module("lfo", "lfo").unwrap();
+        engine.add_module("svf", "flt").unwrap();
+        assert!(engine.connect_attenuated("lfo.sin", "flt.fm", 0.5).is_ok());
+        assert!(engine
+            .connect_modulated("lfo.tri", "flt.cutoff", 0.5, 0.1)
+            .is_ok());
+        assert_eq!(engine.cable_count(), 2);
+    }
+
+    #[test]
+    fn compile_and_tick_produce_audio() {
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.add_module("vco", "osc").unwrap();
+        engine.add_module("stereo_output", "out").unwrap();
+        engine.connect("osc.saw", "out.left").ok().unwrap();
+        engine.connect("osc.saw", "out.right").ok().unwrap();
+        engine.set_output("out").unwrap();
+        assert!(engine.compile().is_ok());
+
+        let mut nonzero = 0;
+        for _ in 0..2000 {
+            let frame = engine.tick();
+            assert_eq!(frame.len(), 2, "tick must return a stereo frame");
+            if frame[0].abs() > 1e-9 {
+                nonzero += 1;
+            }
+        }
+        assert!(nonzero > 1000, "compiled VCO patch should produce audio");
+    }
+
+    #[test]
+    fn set_param_on_valid_module_succeeds() {
+        // Success path only: reading back / bad ids route through JsValue and
+        // cannot be exercised host-side.
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.add_module("vco", "osc").unwrap();
+        assert!(engine.set_param("osc", 0, 1.0).is_ok());
+    }
+
+    #[test]
+    fn midi_state_round_trips() {
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.add_midi_inputs();
+        assert_eq!(engine.module_count(), 5, "add_midi_inputs adds 5 modules");
+
+        assert!(engine.midi_note_on(60, 100).is_ok());
+        assert_eq!(engine.midi_note(), 0.0, "note 60 (C4) maps to 0V");
+        assert!(engine.midi_velocity() > 0.0);
+        assert!(engine.midi_gate());
+
+        assert!(engine.midi_note_off(60, 0).is_ok());
+        assert!(!engine.midi_gate());
+
+        assert!(engine.midi_cc(1, 127).is_ok());
+        assert!((engine.get_midi_cc(1) - 1.0).abs() < 1e-9);
+
+        assert!(engine.midi_pitch_bend(0.5).is_ok());
+        assert_eq!(engine.pitch_bend(), 0.5);
+    }
+
+    #[test]
+    fn reset_and_clear_subscriptions_do_not_panic() {
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.add_module("vco", "osc").unwrap();
+        engine.reset();
+        engine.clear_subscriptions();
+        engine.set_observer_interval(4);
+        assert_eq!(engine.pending_update_count(), 0);
+    }
+
+    #[test]
+    fn quiver_error_maps_from_patch_error_and_strings() {
+        // QuiverError conversions are pure Rust (Debug formatting), host-safe.
+        assert_eq!(QuiverError::from("boom").message(), "boom");
+        assert_eq!(
+            QuiverError::from(alloc::string::String::from("halp")).message(),
+            "halp"
+        );
+        assert_eq!(
+            QuiverError::from(PatchError::InvalidCable).message(),
+            "InvalidCable"
+        );
+    }
+}

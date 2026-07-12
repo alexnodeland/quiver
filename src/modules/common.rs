@@ -66,6 +66,25 @@ pub fn gain_to_db(gain: f64) -> f64 {
     20.0 * Libm::<f64>::log10(gain)
 }
 
+/// Sanitize an audio input sample so a non-finite value can never enter a
+/// module's feedback state (Q160).
+///
+/// Stateful/feedback modules (SVF integrators, ladder stages, delay/reverb/
+/// chorus buffers) would otherwise write a single `NaN`/`Inf` input into their
+/// state and circulate it forever, permanently poisoning all future output.
+/// Calling this on the audio input at the top of `tick` costs a single branch
+/// per sample and keeps a finite sample bit-for-bit unchanged, so a clean signal
+/// fed after a poisoned one recovers immediately. Non-finite samples are treated
+/// as silence (`0.0`).
+#[inline]
+pub fn sanitize_audio(x: f64) -> f64 {
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
+}
+
 /// Flush denormalized numbers to zero to avoid CPU denormal penalties.
 ///
 /// Defined here for Wave B, which wires it into the DSP paths; not yet called.

@@ -2139,4 +2139,89 @@ mod tests {
         mixer.set_sample_rate(48000.0);
         assert_eq!(mixer.type_id(), "voice_mixer");
     }
+
+    // ---- Q163: full voice-count contention stress test ----
+
+    /// Drive 16 voices through 12k ticks of interleaved note_on / note_off /
+    /// retrigger churn, asserting no panic, correct active-voice bookkeeping
+    /// (`active_count <= num_voices` at all times), and bounded mixed output.
+    fn poly_stress(mode: AllocationMode) {
+        let sr = 48_000.0;
+        let mut poly = build_synth(16, sr);
+        poly.allocator_mut().set_mode(mode);
+        assert_eq!(poly.num_voices(), 16);
+
+        // Deterministic LCG so the churn is reproducible.
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+
+        let mut held: Vec<u8> = Vec::new();
+        for t in 0..12_000 {
+            // A note event roughly every 30 ticks keeps the allocator churning.
+            if t % 30 == 0 {
+                let r = next() % 100;
+                if r < 55 {
+                    // New note (or a retrigger if the note is already sounding).
+                    let note = 36 + (next() % 48) as u8;
+                    let vel = 1 + (next() % 127) as u8;
+                    poly.note_on(note, vel);
+                    if !held.contains(&note) {
+                        held.push(note);
+                    }
+                } else if r < 80 && !held.is_empty() {
+                    let idx = (next() as usize) % held.len();
+                    let note = held.remove(idx);
+                    poly.note_off(note);
+                } else if !held.is_empty() {
+                    // Explicit retrigger of a held note.
+                    let idx = (next() as usize) % held.len();
+                    let note = held[idx];
+                    let vel = 1 + (next() % 127) as u8;
+                    poly.note_on(note, vel);
+                }
+            }
+
+            let (l, r) = poly.tick();
+            assert!(
+                l.is_finite() && r.is_finite(),
+                "non-finite output at tick {t}"
+            );
+            assert!(
+                l.abs() < 16.0 && r.abs() < 16.0,
+                "polyphonic output exploded at tick {t}: ({l}, {r})"
+            );
+            assert!(
+                poly.allocator().active_count() <= poly.num_voices(),
+                "active_count {} exceeded voice count at tick {t}",
+                poly.allocator().active_count()
+            );
+        }
+
+        // Release everything and let the amplitude-follower auto-free run out.
+        poly.all_notes_off();
+        for _ in 0..48_000 {
+            let (l, r) = poly.tick();
+            assert!(l.is_finite() && r.is_finite());
+        }
+        assert_eq!(
+            poly.allocator().active_count(),
+            0,
+            "all voices should auto-free after a long release tail"
+        );
+    }
+
+    #[test]
+    fn test_poly_stress_16_voices_oldest_steal() {
+        poly_stress(AllocationMode::OldestSteal);
+    }
+
+    #[test]
+    fn test_poly_stress_16_voices_no_steal() {
+        poly_stress(AllocationMode::NoSteal);
+    }
 }

@@ -64,6 +64,7 @@ console_error_panic_hook = { version = "0.1", optional = true }
 [dev-dependencies]
 approx = "0.5"
 criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
 
 [[bench]]
 name = "audio_performance"
