@@ -44,10 +44,11 @@ src/
     └── error.rs
 
 examples/               # Runnable Rust example patches
-├── quick_taste.rs          # Minimal getting-started example
-├── first_patch.rs          # First patch tutorial
-├── simple_patch.rs         # Simple patch demonstration
-├── tutorial_subtractive.rs # Subtractive synthesis tutorial
+├── quick_taste.rs          # Minimal getting-started example; writes a .wav file
+├── first_patch.rs          # Full subtractive voice: VCO -> VCF -> VCA with ADSR + gate
+├── simple_patch.rs         # The smallest possible patch: VCO -> output
+├── render_wav.rs           # Flagship "hear Quiver make sound": sequenced phrase rendered to WAV
+├── tutorial_subtractive.rs # Subtractive synthesis tutorial; writes a .wav file
 ├── tutorial_envelope.rs    # Envelope usage tutorial
 ├── tutorial_filter_mod.rs  # Filter modulation tutorial
 ├── tutorial_fm.rs          # FM synthesis tutorial

@@ -3,6 +3,28 @@
 //! Demonstrates voice allocation for playing multiple simultaneous notes.
 //! This is essential for keyboard-style synthesizers.
 //!
+//! # Why voice allocation is its own problem
+//!
+//! A single VCO/VCF/VCA chain can only play one note at a time. Polyphony
+//! means running several of those chains ("voices") in parallel and
+//! deciding, for each incoming note, *which* voice plays it:
+//! - With fewer voices than notes played at once, something has to give —
+//!   that's what `AllocationMode` governs (steal the oldest note? the
+//!   quietest one? refuse the new note entirely?). Real keyboards make this
+//!   same tradeoff; even 16-32 voices can be exhausted by a sustain pedal
+//!   held through a fast run.
+//! - Mixing N simultaneous voices multiplies their combined peak amplitude
+//!   roughly by N if they're in phase, so naively summing voices can clip.
+//!   `PolyPatch` applies gain compensation (dividing by roughly `sqrt(N)`,
+//!   matching how uncorrelated signals combine in power rather than
+//!   amplitude) so a 4-note chord doesn't come out 4x louder than one note.
+//! - `PolyPatch::with_voice_fn` builds one identical copy of your voice
+//!   graph per voice and wires a per-voice controller into it exposing
+//!   `voct`/`gate`/`trigger`/`velocity` — the same four signals a
+//!   monophonic patch would drive by hand (see `tutorial_envelope.rs`),
+//!   just supplied automatically by the allocator instead of external inputs
+//!   you manage yourself.
+//!
 //! Run with: cargo run --example tutorial_polyphony
 
 use quiver::prelude::*;
