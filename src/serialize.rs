@@ -37,6 +37,11 @@ pub struct PatchDef {
     pub name: String,
     pub author: Option<String>,
     pub description: Option<String>,
+
+    /// Optional and additive: the published JSON schema marks `tags` optional (default `[]`),
+    /// so a hand-authored/tool-generated patch that omits the key must still load. `serde(default)`
+    /// keeps deserialization in sync with the schema.
+    #[serde(default)]
     pub tags: Vec<String>,
 
     /// Name of the module whose output feeds the patch's stereo out.
@@ -59,6 +64,10 @@ pub struct PatchDef {
     /// internal parameter id exposed via `ModuleIntrospection`. Applied by
     /// [`Patch::from_def`] through [`Patch::set_param_by_id`]; unknown keys are ignored so
     /// hand-edited files degrade gracefully.
+    ///
+    /// Optional and additive: the schema marks `parameters` optional (default `{}`), so a patch
+    /// that omits the key must still load. `serde(default)` keeps deserialization in sync.
+    #[serde(default)]
     pub parameters: StdMap<String, f64>,
 }
 
@@ -1401,6 +1410,15 @@ impl Patch {
                 patch.set_position(handle.id(), (x, y));
             }
 
+            // Restore opaque module-specific state (e.g. a ScaleQuantizer custom/Scala tuning
+            // table) captured in `ModuleDef.state` by `GraphModule::serialize_state`. Modules
+            // without such state serialize `None`, so this is skipped for them.
+            if let Some(state) = &module_def.state {
+                patch
+                    .deserialize_module_state(handle.id(), state)
+                    .map_err(PatchError::CompilationFailed)?;
+            }
+
             name_to_handle.insert(module_def.name.clone(), handle);
         }
 
@@ -2492,5 +2510,195 @@ mod tests {
                 "sample {i} diverged after round-trip: {a:?} vs {b:?}"
             );
         }
+    }
+
+    // ---- Schema/serde agreement: minimal JSON without tags/parameters loads ----
+
+    #[test]
+    fn test_minimal_json_without_tags_or_parameters_loads() {
+        // The published schema marks `tags` and `parameters` optional (defaults `[]`/`{}`), so a
+        // hand-authored/tool-generated patch that omits them must deserialize (serde defaults)
+        // and load. Before `#[serde(default)]` this failed with "missing field `tags`".
+        let json = r#"{
+            "version": 1,
+            "name": "Minimal",
+            "modules": [
+                {"name": "output", "module_type": "stereo_output", "position": null, "state": null}
+            ],
+            "cables": []
+        }"#;
+        let def = PatchDef::from_json(json).expect("minimal schema-valid JSON must deserialize");
+        assert!(def.tags.is_empty());
+        assert!(def.parameters.is_empty());
+        assert!(def.author.is_none());
+
+        let registry = ModuleRegistry::new();
+        let patch = Patch::from_def(&def, &registry, 44100.0).expect("minimal patch must load");
+        assert_eq!(patch.output_node(), patch.get_node_id_by_name("output"));
+    }
+
+    // ---- StepSequencer: a muted (gate-off) step must survive round-trip ----
+
+    #[test]
+    fn test_step_sequencer_gate_off_survives_roundtrip() {
+        use crate::modules::{StepSequencer, StereoOutput};
+
+        let mut patch = Patch::new(44100.0);
+        let seq = patch.add("seq", StepSequencer::new());
+        let out = patch.add("output", StereoOutput::new());
+        patch.set_output(out.id());
+        let seq_id = seq.id();
+
+        // Mute step 3 (gate OFF) with a non-zero CV, and mute step 5 at default CV. All other
+        // steps keep their (ON) defaults.
+        assert!(patch.set_param_by_id(seq_id, "step_3_cv", 2.0));
+        assert!(patch.set_param_by_id(seq_id, "step_3_gate", 0.0));
+        assert!(patch.set_param_by_id(seq_id, "step_5_gate", 0.0));
+
+        // A gate turned OFF (value 0.0) must be recorded: the toggle default is now 1.0 (gates
+        // default ON), so the "differs from default" filter no longer drops it.
+        let def = patch.to_def("Seq");
+        assert_eq!(def.parameters.get("seq.step_3_gate"), Some(&0.0));
+        assert_eq!(def.parameters.get("seq.step_3_cv"), Some(&2.0));
+        assert_eq!(def.parameters.get("seq.step_5_gate"), Some(&0.0));
+        // An ON (default) gate equals its default and is correctly omitted.
+        assert!(!def.parameters.contains_key("seq.step_0_gate"));
+
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+        let rid = rebuilt.get_node_id_by_name("seq").unwrap();
+
+        // Muted steps stay muted and step CV survives; untouched steps stay ON.
+        assert_eq!(rebuilt.get_param_by_id(rid, "step_3_gate"), Some(0.0));
+        assert_eq!(rebuilt.get_param_by_id(rid, "step_3_cv"), Some(2.0));
+        assert_eq!(rebuilt.get_param_by_id(rid, "step_5_gate"), Some(0.0));
+        assert_eq!(rebuilt.get_param_by_id(rid, "step_0_gate"), Some(1.0));
+    }
+
+    // ---- Ducker: depth/threshold knobs reachable via Patch and round-trip ----
+
+    #[test]
+    fn test_ducker_knobs_reachable_and_survive_roundtrip() {
+        use crate::modules::{Ducker, StereoOutput};
+
+        let mut patch = Patch::new(44100.0);
+        let d = patch.add("duck", Ducker::default());
+        let out = patch.add("output", StereoOutput::new());
+        patch.connect(d.out("out"), out.in_("left")).unwrap();
+        patch.set_output(out.id());
+        let did = d.id();
+
+        // The depth/thresh KNOBS (introspection) are discoverable, distinct from the same-named
+        // bipolar CV input PORTS which remain exposed alongside them.
+        let ids: Vec<String> = patch.param_infos(did).into_iter().map(|p| p.id).collect();
+        assert!(
+            ids.iter().any(|i| i == "depth"),
+            "depth knob missing: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|i| i == "thresh"),
+            "thresh knob missing: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|i| i == "amount"),
+            "amount CV port missing: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|i| i == "threshold"),
+            "threshold CV port missing: {ids:?}"
+        );
+
+        // Setting the knob moves the knob (not the CV port).
+        assert!(patch.set_param_by_id(did, "depth", 0.4));
+        assert!(patch.set_param_by_id(did, "thresh", 0.7));
+        assert_eq!(patch.get_param_by_id(did, "depth"), Some(0.4));
+        assert_eq!(patch.get_param_by_id(did, "thresh"), Some(0.7));
+
+        let def = patch.to_def("Duck");
+        assert_eq!(def.parameters.get("duck.depth"), Some(&0.4));
+        assert_eq!(def.parameters.get("duck.thresh"), Some(&0.7));
+
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+        let rid = rebuilt.get_node_id_by_name("duck").unwrap();
+        assert_eq!(rebuilt.get_param_by_id(rid, "depth"), Some(0.4));
+        assert_eq!(rebuilt.get_param_by_id(rid, "thresh"), Some(0.7));
+    }
+
+    // ---- ScaleQuantizer: a custom/microtuning scale must survive round-trip ----
+
+    #[test]
+    fn test_scale_quantizer_custom_scale_survives_roundtrip() {
+        use crate::modules::{ScaleQuantizer, StereoOutput};
+
+        // Whole-tone tuning, distinct from the built-in 12-TET chromatic default.
+        let whole_tone = [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0];
+        let test_voct = 0.1; // 120 cents: quantizes differently under whole-tone vs 12-TET.
+
+        // Build a patch whose ScaleQuantizer has the custom scale installed, with its "in"
+        // pitch parked at `test_voct` and "out" wired downstream so it gets ticked.
+        let build_custom = || -> Patch {
+            let mut patch = Patch::new(44100.0);
+            let mut q = ScaleQuantizer::new(44100.0);
+            q.set_custom_scale(&whole_tone);
+            let qh = patch.add("q", q);
+            let out = patch.add("output", StereoOutput::new());
+            patch.connect(qh.out("out"), out.in_("left")).unwrap();
+            patch.set_output(out.id());
+            assert!(patch.set_param_by_id(qh.id(), "in", test_voct));
+            patch.compile().unwrap();
+            patch
+        };
+
+        let mut original = build_custom();
+        let qid_o = original.get_node_id_by_name("q").unwrap();
+
+        // The custom scale must ride in ModuleDef.state (not the scalar parameters map).
+        let def = original.to_def("Tuned");
+        let q_state = &def.modules.iter().find(|m| m.name == "q").unwrap().state;
+        assert!(
+            q_state.is_some(),
+            "custom scale must serialize into ModuleDef.state"
+        );
+
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let mut rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+        let qid_r = rebuilt.get_node_id_by_name("q").unwrap();
+
+        // Reference: an untuned (12-TET) quantizer at the same input.
+        let mut plain = {
+            let mut patch = Patch::new(44100.0);
+            let qh = patch.add("q", ScaleQuantizer::new(44100.0));
+            let out = patch.add("output", StereoOutput::new());
+            patch.connect(qh.out("out"), out.in_("left")).unwrap();
+            patch.set_output(out.id());
+            assert!(patch.set_param_by_id(qh.id(), "in", test_voct));
+            patch.compile().unwrap();
+            patch
+        };
+        let qid_p = plain.get_node_id_by_name("q").unwrap();
+
+        original.tick();
+        rebuilt.tick();
+        plain.tick();
+        // Port id 10 is the ScaleQuantizer "out" (V/Oct).
+        let o = original.get_output_value(qid_o, 10).unwrap();
+        let r = rebuilt.get_output_value(qid_r, 10).unwrap();
+        let p = plain.get_output_value(qid_p, 10).unwrap();
+
+        assert!(
+            (o - r).abs() < 1e-9,
+            "custom scale must survive round-trip: {o} vs {r}"
+        );
+        assert!(
+            (o - p).abs() > 1e-6,
+            "custom (whole-tone) quantization must differ from default 12-TET: {o} vs {p}"
+        );
     }
 }

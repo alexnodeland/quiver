@@ -854,6 +854,11 @@ impl GraphModule for Ducker {
     fn type_id(&self) -> &'static str {
         "ducker"
     }
+
+    // Surface the depth/threshold knobs (ModuleIntrospection) through the boxed trait object
+    // so a live `Patch` can discover, set, and serialize them. Without this the knobs are
+    // dead code: `introspect()` defaults to `None` and only the CV input ports are visible.
+    crate::impl_introspect!();
 }
 
 /// Envelope Follower

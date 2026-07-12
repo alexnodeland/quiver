@@ -1466,6 +1466,25 @@ impl Patch {
         }
         false
     }
+
+    /// Restore opaque, non-scalar module state captured by
+    /// [`GraphModule::serialize_state`] (e.g. a
+    /// [`ScaleQuantizer`](crate::modules::ScaleQuantizer) custom/Scala tuning table that does
+    /// not fit the scalar parameter surface). Used by `Patch::from_def` to reconstruct such
+    /// state on load.
+    ///
+    /// Returns the module's own error string if the state is malformed; an unknown `node` is a
+    /// no-op (`Ok`). Internal state, not routing — no recompile is triggered.
+    pub fn deserialize_module_state(
+        &mut self,
+        node: NodeId,
+        state: &serde_json::Value,
+    ) -> Result<(), String> {
+        match self.nodes.get_mut(node) {
+            Some(n) => n.module.deserialize_state(state),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Manual `Debug` for `Patch` so `println!("{:?}", patch)` works for inspection without
