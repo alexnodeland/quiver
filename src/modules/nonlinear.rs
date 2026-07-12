@@ -2089,4 +2089,30 @@ mod tests {
             "wavefolder 4x oversampling should reduce alias energy: off={a_off} x4={a_x4}"
         );
     }
+
+    // ---- Q157: Distortion reset / sample-rate ----
+
+    #[test]
+    fn test_distortion_reset_and_sample_rate() {
+        let mut dist = Distortion::default();
+        assert_eq!(dist.type_id(), "distortion");
+        assert_eq!(dist.sample_rate, 44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 3.0);
+        inputs.set(1, 0.8); // drive
+        inputs.set(2, 0.2); // low tone -> accumulates one-pole state
+        for _ in 0..500 {
+            dist.tick(&inputs, &mut outputs);
+        }
+        assert!(dist.tone_lp != 0.0, "tone low-pass should hold state");
+        dist.reset();
+        assert_eq!(dist.tone_lp, 0.0);
+        dist.set_sample_rate(48000.0);
+        assert_eq!(dist.sample_rate, 48000.0);
+        for _ in 0..100 {
+            dist.tick(&inputs, &mut outputs);
+            assert!(outputs.get(10).unwrap().is_finite());
+        }
+    }
 }

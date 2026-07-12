@@ -64,7 +64,7 @@ fn main() {
         let carrier = test_patch.add("carrier", Vco::new(sample_rate));
         let modulator = test_patch.add("modulator", Vco::new(sample_rate));
         let mod_depth_node = test_patch.add("mod_depth", Attenuverter::new());
-        let ratio_mult = test_patch.add("ratio", Attenuverter::new()); // Scale modulator pitch
+        let _ratio_mult = test_patch.add("ratio", Attenuverter::new()); // Scale modulator pitch
         let output = test_patch.add("output", StereoOutput::new());
 
         // Set up FM with the given parameters

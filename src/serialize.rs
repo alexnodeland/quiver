@@ -2420,4 +2420,77 @@ mod tests {
             registry_ids.len()
         );
     }
+
+    // ---- Q162: round-trip with a modulated cable + a mult, behavioral equality ----
+
+    #[test]
+    fn test_roundtrip_modulated_cable_and_mult_behavioral_equality() {
+        // The existing round-trip test covers plain cables + a mult; this one
+        // closes the remaining gap: a modulated cable (with attenuation AND
+        // offset) must survive to_def -> JSON -> from_def, and the reloaded
+        // patch must produce a bit-identical tick() sequence on a multi-module
+        // graph that also contains a mult (one output -> two inputs).
+        use crate::modules::{Lfo, StereoOutput, Svf, Vco};
+
+        let build = || -> Patch {
+            let mut patch = Patch::new(44100.0);
+            let lfo = patch.add("lfo", Lfo::new(44100.0));
+            let osc = patch.add("osc", Vco::new(44100.0));
+            let flt = patch.add("flt", Svf::new(44100.0));
+            let out = patch.add("output", StereoOutput::new());
+            // Plain audio cable.
+            patch.connect(osc.out("saw"), flt.in_("in")).unwrap();
+            // Modulated cable: attenuation 0.5, offset +0.1V into the filter FM
+            // input (both endpoints are CvBipolar, so no signal-kind warning).
+            patch
+                .connect_modulated(lfo.out("sin"), flt.in_("fm"), 0.5, 0.1)
+                .unwrap();
+            // Mult: the filter's low-pass output feeds BOTH stereo inputs.
+            patch.connect(flt.out("lp"), out.in_("left")).unwrap();
+            patch.connect(flt.out("lp"), out.in_("right")).unwrap();
+            patch.set_output(out.id());
+            // A non-default modulation rate so the LFO actually moves.
+            let lfo_id = lfo.id();
+            assert!(patch.set_param_by_id(lfo_id, "rate", 0.6));
+            patch
+        };
+
+        let mut original = build();
+
+        // Serialize -> JSON -> deserialize -> rebuild.
+        let def = original.to_def("Modulated Round Trip");
+        assert_eq!(def.cables.len(), 4, "all four cables must serialize");
+        // Exactly one cable carries modulation (attenuation AND offset).
+        let modulated: Vec<_> = def
+            .cables
+            .iter()
+            .filter(|c| c.attenuation.is_some() && c.offset.is_some())
+            .collect();
+        assert_eq!(modulated.len(), 1, "the modulated cable must be preserved");
+        assert!((modulated[0].attenuation.unwrap() - 0.5).abs() < 1e-9);
+        assert!((modulated[0].offset.unwrap() - 0.1).abs() < 1e-9);
+        // The mult shows up as two cables sharing the same source port.
+        let from_lp = def.cables.iter().filter(|c| c.from == "flt.lp").count();
+        assert_eq!(
+            from_lp, 2,
+            "the mult must serialize as two cables from flt.lp"
+        );
+
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let mut rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+
+        assert_eq!(rebuilt.cable_count(), original.cable_count());
+
+        // Behavioral equality: identical stereo output sample-for-sample.
+        for i in 0..512 {
+            let a = original.tick();
+            let b = rebuilt.tick();
+            assert!(
+                (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9,
+                "sample {i} diverged after round-trip: {a:?} vs {b:?}"
+            );
+        }
+    }
 }

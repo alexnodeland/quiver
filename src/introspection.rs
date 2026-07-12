@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn test_value_format_decimal() {
         let fmt = ValueFormat::Decimal { places: 2 };
-        assert_eq!(fmt.format(3.14159), "3.14");
+        assert_eq!(fmt.format(1.23456), "1.23");
     }
 
     #[test]

@@ -2044,16 +2044,16 @@ mod tests {
         // Write directly to left buffer
         {
             let left = processor.left_buffer_mut();
-            for i in 0..128 {
-                left[i] = (i as f64) / 128.0;
+            for (i, slot) in left.iter_mut().enumerate().take(128) {
+                *slot = (i as f64) / 128.0;
             }
         }
 
         // Write directly to right buffer
         {
             let right = processor.right_buffer_mut();
-            for i in 0..128 {
-                right[i] = 1.0 - (i as f64) / 128.0;
+            for (i, slot) in right.iter_mut().enumerate().take(128) {
+                *slot = 1.0 - (i as f64) / 128.0;
             }
         }
 

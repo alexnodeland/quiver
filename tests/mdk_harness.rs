@@ -1,0 +1,125 @@
+//! Dogfood the Module Development Kit (Q131).
+//!
+//! `src/mdk.rs` ships `ModuleTestHarness::run_all` (port-spec, reset-determinism,
+//! sample-rate, zero-input, stability, NaN/Inf, output-range checks) but nothing
+//! in the library ran it against its own modules. This test instantiates EVERY
+//! module registered in `ModuleRegistry` via the registry and runs the full
+//! harness over it, so the kit's contract is verified against the modules it
+//! ships with (and every module gets free NaN/Inf/stability/range coverage).
+//!
+//! A small, documented allowlist covers modules that legitimately violate a
+//! harness assumption rather than having a bug. The test also asserts every
+//! allowlisted `(type_id, check)` STILL fails, so the allowlist cannot rot into
+//! silently masking a regression.
+#![cfg(feature = "std")]
+
+use quiver::prelude::*;
+
+/// `(type_id, failing_check_name, reason)` — modules that legitimately fail one
+/// harness check because the check's assumption does not hold for that module.
+///
+/// - `noise` / `reset_clears_state`: the white-noise output is drawn from a
+///   process-global RNG (`rng::random_bipolar`), so it is stochastic by design.
+///   The harness's reset check assumes `reset()` restores fully deterministic
+///   state; making a noise source replay an identical sequence after reset would
+///   defeat its purpose. Its filter state IS cleared on reset — only the random
+///   draw differs — so this is an inherent property, not a bug.
+const ALLOWLIST: &[(&str, &str)] = &[("noise", "reset_clears_state")];
+
+/// Adapter so a `Box<dyn GraphModule>` from the registry satisfies the
+/// `M: GraphModule` bound on `ModuleTestHarness` (there is no blanket impl for
+/// `Box<dyn GraphModule>`).
+struct Boxed(Box<dyn GraphModule>);
+
+impl GraphModule for Boxed {
+    fn port_spec(&self) -> &PortSpec {
+        self.0.port_spec()
+    }
+    fn tick(&mut self, i: &PortValues, o: &mut PortValues) {
+        self.0.tick(i, o)
+    }
+    fn reset(&mut self) {
+        self.0.reset()
+    }
+    fn set_sample_rate(&mut self, sr: f64) {
+        self.0.set_sample_rate(sr)
+    }
+    fn type_id(&self) -> &'static str {
+        self.0.type_id()
+    }
+}
+
+#[test]
+fn every_registered_module_passes_the_harness() {
+    let registry = ModuleRegistry::new();
+    let mut ids: Vec<String> = registry.list_modules().map(|m| m.type_id.clone()).collect();
+    ids.sort();
+    assert!(
+        ids.len() >= 60,
+        "registry unexpectedly small: {}",
+        ids.len()
+    );
+
+    let mut unexpected = Vec::new();
+    // Track which allowlist entries actually fired, so we can detect stale ones.
+    let mut allowlist_hits = vec![false; ALLOWLIST.len()];
+
+    for id in &ids {
+        let module = registry
+            .instantiate(id, 44_100.0)
+            .expect("registered module");
+        let mut harness = ModuleTestHarness::new(Boxed(module), 44_100.0);
+        let suite = harness.run_all();
+        assert_eq!(suite.results.len(), 7, "{id}: harness should run 7 checks");
+
+        for r in &suite.results {
+            if r.passed {
+                continue;
+            }
+            if let Some(pos) = ALLOWLIST.iter().position(|&(t, c)| t == id && c == r.name) {
+                allowlist_hits[pos] = true;
+            } else {
+                unexpected.push(format!("{} :: {} :: {:?}", id, r.name, r.error));
+            }
+        }
+    }
+
+    assert!(
+        unexpected.is_empty(),
+        "unexpected harness failures ({}):\n{}",
+        unexpected.len(),
+        unexpected.join("\n")
+    );
+
+    // The allowlist must not rot: every entry must still correspond to a real
+    // failure (either the module was removed, or the harness assumption changed).
+    for (i, &(t, c)) in ALLOWLIST.iter().enumerate() {
+        assert!(
+            allowlist_hits[i],
+            "stale allowlist entry ({t}, {c}): it no longer fails — remove it"
+        );
+    }
+}
+
+#[test]
+fn audio_analysis_measures_a_known_signal() {
+    // Dogfood AudioAnalysis (also shipped by the MDK) against a synthesized tone.
+    let sr = 44_100.0;
+    let freq = 440.0;
+    let samples: Vec<f64> = (0..sr as usize)
+        .map(|n| (core::f64::consts::TAU * freq * n as f64 / sr).sin())
+        .collect();
+
+    let rms = AudioAnalysis::rms(&samples);
+    assert!(
+        (rms - core::f64::consts::FRAC_1_SQRT_2).abs() < 0.01,
+        "sine RMS ~0.707, got {rms}"
+    );
+    assert!((AudioAnalysis::peak(&samples) - 1.0).abs() < 0.01);
+    assert!(AudioAnalysis::dc_offset(&samples).abs() < 0.01);
+    let est = AudioAnalysis::estimate_frequency(&samples, sr).expect("frequency");
+    assert!(
+        (est - freq).abs() < 5.0,
+        "estimated {est} Hz, expected {freq} Hz"
+    );
+}

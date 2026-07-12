@@ -23,7 +23,7 @@ fn main() {
     // External inputs
     let pitch = patch.add("midi_pitch", ExternalInput::voct(Arc::clone(&pitch_cv)));
     let gate = patch.add("midi_gate", ExternalInput::gate(Arc::clone(&gate_cv)));
-    let velocity = patch.add("midi_vel", ExternalInput::cv(Arc::clone(&velocity_cv)));
+    let _velocity = patch.add("midi_vel", ExternalInput::cv(Arc::clone(&velocity_cv)));
     let mod_wheel = patch.add("mod_wheel", ExternalInput::cv(Arc::clone(&mod_wheel_cv)));
 
     // Synth voice

@@ -1,6 +1,6 @@
 //! Delay-based and time-domain effect modules.
 
-use super::common::{env_coef, read_interpolated};
+use super::common::{env_coef, read_interpolated, sanitize_audio};
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -127,7 +127,9 @@ impl GraphModule for DelayLine {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize so a non-finite input can never enter the feedback
+        // buffer (where it would recirculate forever, latching NaN).
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let time_cv = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let feedback = inputs.get_or(2, 0.0).clamp(0.0, 0.99); // Prevent runaway
         let mix = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
@@ -273,7 +275,9 @@ impl GraphModule for Chorus {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize so a non-finite input can never enter the modulated
+        // delay buffer.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let rate_cv = inputs.get_or(1, 0.3).clamp(0.0, 1.0);
         let depth_cv = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
         let mix = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
@@ -438,7 +442,9 @@ impl GraphModule for Flanger {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize so a non-finite input can never enter the feedback
+        // delay buffer.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let rate_cv = inputs.get_or(1, 0.3).clamp(0.0, 1.0);
         let depth_cv = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
         let feedback = inputs.get_or(3, 0.0).clamp(-0.95, 0.95);
@@ -589,7 +595,9 @@ impl GraphModule for Phaser {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize so a non-finite input can never enter the all-pass
+        // feedback chain.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let rate_cv = inputs.get_or(1, 0.3).clamp(0.0, 1.0);
         let depth = inputs.get_or(2, 0.7).clamp(0.0, 1.0);
         let feedback = inputs.get_or(3, 0.0).clamp(-0.95, 0.95);
@@ -1040,7 +1048,9 @@ impl GraphModule for Reverb {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q160: sanitize so a non-finite input can never enter the comb/allpass
+        // feedback network (where it would latch NaN across the whole tail).
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let size = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let damping = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
         let mix = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
@@ -1928,5 +1938,156 @@ mod tests {
                 i
             );
         }
+    }
+
+    // ---- Q157: Tremolo unit tests ----
+
+    #[test]
+    fn test_tremolo_am_depth() {
+        // A DC carrier isolates the amplitude modulation. Full depth must swing
+        // the output across (nearly) the whole [0, carrier] range; zero depth
+        // must leave the carrier untouched.
+        let mut trem = Tremolo::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 1.0); // DC carrier
+        inputs.set(1, 1.0); // fast rate (~20 Hz) to sweep the LFO quickly
+        inputs.set(3, 0.0); // sine shape
+
+        inputs.set(2, 1.0); // full depth
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for _ in 0..44_100 {
+            trem.tick(&inputs, &mut outputs);
+            let o = outputs.get(10).unwrap();
+            assert!(o.is_finite());
+            lo = lo.min(o);
+            hi = hi.max(o);
+        }
+        assert!(
+            lo < 0.1 && hi > 0.9,
+            "full-depth AM must reach near 0 and near the carrier: lo={lo} hi={hi}"
+        );
+
+        trem.reset();
+        inputs.set(2, 0.0); // zero depth
+        let (mut lo0, mut hi0) = (f64::INFINITY, f64::NEG_INFINITY);
+        for _ in 0..4410 {
+            trem.tick(&inputs, &mut outputs);
+            let o = outputs.get(10).unwrap();
+            lo0 = lo0.min(o);
+            hi0 = hi0.max(o);
+        }
+        assert!(
+            (hi0 - lo0) < 1e-9 && (hi0 - 1.0).abs() < 1e-9,
+            "zero-depth tremolo must pass the carrier unchanged: span={}",
+            hi0 - lo0
+        );
+    }
+
+    #[test]
+    fn test_tremolo_reset_and_sample_rate() {
+        let mut trem = Tremolo::default();
+        assert_eq!(trem.type_id(), "tremolo");
+        assert_eq!(trem.sample_rate, 44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 1.0);
+        inputs.set(1, 0.5);
+        for _ in 0..500 {
+            trem.tick(&inputs, &mut outputs);
+        }
+        assert!(trem.lfo_phase != 0.0);
+        trem.reset();
+        assert_eq!(trem.lfo_phase, 0.0);
+        trem.set_sample_rate(48000.0);
+        assert_eq!(trem.sample_rate, 48000.0);
+        trem.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap().is_finite());
+    }
+
+    // ---- Q157: Vibrato pitch-modulation depth ----
+
+    /// Collect the spacing (in samples) between successive upward zero crossings
+    /// of `sig`, then return `max_interval - min_interval`.
+    fn zero_crossing_interval_spread(sig: &[f64]) -> f64 {
+        let mut crossings = Vec::new();
+        for i in 1..sig.len() {
+            if sig[i - 1] <= 0.0 && sig[i] > 0.0 {
+                crossings.push(i);
+            }
+        }
+        if crossings.len() < 3 {
+            return 0.0;
+        }
+        let mut min_iv = f64::INFINITY;
+        let mut max_iv = f64::NEG_INFINITY;
+        for w in crossings.windows(2) {
+            let iv = (w[1] - w[0]) as f64;
+            min_iv = min_iv.min(iv);
+            max_iv = max_iv.max(iv);
+        }
+        max_iv - min_iv
+    }
+
+    #[test]
+    fn test_vibrato_pitch_modulation_depth() {
+        // Vibrato modulates a delay line, so the output pitch wobbles: the
+        // spacing between the output's zero crossings must vary far more with a
+        // large modulation depth than with zero depth (constant delay).
+        let run = |depth: f64| -> f64 {
+            let mut vib = Vibrato::new(44100.0);
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            inputs.set(1, 0.78); // ~5 Hz LFO
+            inputs.set(2, depth);
+            inputs.set(3, 1.0); // 100% wet
+            let mut out = Vec::with_capacity(20_000);
+            let dt = 500.0 / 44100.0;
+            let mut phase = 0.0f64;
+            for _ in 0..20_000 {
+                let s = Libm::<f64>::sin(TAU * phase);
+                phase += dt;
+                if phase >= 1.0 {
+                    phase -= 1.0;
+                }
+                inputs.set(0, s);
+                vib.tick(&inputs, &mut outputs);
+                out.push(outputs.get(10).unwrap());
+            }
+            zero_crossing_interval_spread(&out)
+        };
+
+        let spread_off = run(0.0);
+        let spread_on = run(0.8);
+        assert!(
+            spread_off < 3.0,
+            "zero-depth vibrato should have near-constant pitch: spread={spread_off}"
+        );
+        assert!(
+            spread_on > spread_off + 10.0,
+            "depth-0.8 vibrato must wobble the pitch: on={spread_on} off={spread_off}"
+        );
+    }
+
+    #[test]
+    fn test_vibrato_reset_and_sample_rate() {
+        let mut vib = Vibrato::default();
+        assert_eq!(vib.type_id(), "vibrato");
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 1.0);
+        inputs.set(2, 0.5);
+        for _ in 0..500 {
+            vib.tick(&inputs, &mut outputs);
+        }
+        assert!(vib.lfo_phase != 0.0);
+        vib.reset();
+        assert_eq!(vib.lfo_phase, 0.0);
+        assert_eq!(vib.write_pos, 0);
+        assert!(vib.buffer.iter().all(|&x| x == 0.0));
+        vib.set_sample_rate(48000.0);
+        assert_eq!(vib.sample_rate, 48000.0);
+        vib.tick(&inputs, &mut outputs);
+        assert!(outputs.get(10).unwrap().is_finite());
     }
 }
