@@ -217,7 +217,7 @@ pub enum Compatibility {
 /// # Single source of truth
 ///
 /// This function is a thin adapter over the authoritative
-/// [`SignalKind::is_compatible_with`](crate::graph::SignalKind) implementation used by
+/// [`SignalKind::is_compatible_with`] implementation used by
 /// the patch graph's validation. Both APIs therefore always agree: a warning from one
 /// is a [`Compatibility::Warning`] from the other, and a clean verdict maps to
 /// [`Compatibility::Allowed`] (or [`Compatibility::Exact`] for identical kinds). Keep
@@ -389,7 +389,7 @@ impl BlockPortValues {
 
     /// Read frame `index` into an existing [`PortValues`], reusing its allocation.
     ///
-    /// Clears `dst` and refills it from each port buffer at `index`. Unlike [`frame`], this
+    /// Clears `dst` and refills it from each port buffer at `index`. Unlike [`Self::frame`], this
     /// performs no allocation once `dst` has been warmed with the same key set, which lets
     /// block loops (e.g. the default [`GraphModule::process_block`]) avoid a fresh
     /// [`PortValues`] per frame.
@@ -408,7 +408,7 @@ impl BlockPortValues {
 
     /// Write a borrowed [`PortValues`] into frame `index`, without taking ownership.
     ///
-    /// The by-reference companion to [`set_frame`], so a caller can reuse a single output
+    /// The by-reference companion to [`Self::set_frame`], so a caller can reuse a single output
     /// [`PortValues`] across every frame of a block instead of moving (and reallocating) one
     /// per frame.
     pub fn set_frame_ref(&mut self, index: usize, values: &PortValues) {
@@ -638,7 +638,7 @@ pub trait GraphModule: Send + Sync {
         Ok(())
     }
 
-    /// Downcast this module to its [`ModuleIntrospection`] view, if it exposes one.
+    /// Downcast this module to its [`ModuleIntrospection`](crate::introspection::ModuleIntrospection) view, if it exposes one.
     ///
     /// A `Box<dyn GraphModule>` (as stored inside a [`Patch`](crate::graph::Patch)) cannot
     /// otherwise reach the module's `ModuleIntrospection` impl, so this hook bridges the two
@@ -662,7 +662,7 @@ pub trait GraphModule: Send + Sync {
     }
 }
 
-/// Wire a module's [`ModuleIntrospection`] impl into the [`GraphModule`] trait object.
+/// Wire a module's [`ModuleIntrospection`](crate::introspection::ModuleIntrospection) impl into the [`GraphModule`] trait object.
 ///
 /// Invoke once inside a module's `impl GraphModule for T { .. }` block. It expands to the
 /// `introspect`/`introspect_mut` overrides (both `alloc`-gated) returning `Some(self)`, so a

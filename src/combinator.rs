@@ -139,7 +139,7 @@ use core::marker::PhantomData;
 /// associated types `In` and `Out` enable compile-time verification of signal *shape*
 /// (arity): a `Module<Out = f64>` only chains into a `Module<In = f64>`, a stereo
 /// `(f64, f64)` only into a `(f64, f64)`, and so on. This is *structural* type safety;
-/// it does **not** check semantic [`SignalKind`](crate::port::SignalKind) (Audio vs CV
+/// it does **not** check semantic [`SignalKind`] (Audio vs CV
 /// vs V/Oct) — both are `f64` here. Signal-kind compatibility is validated by the graph
 /// layer ([`crate::port`] / [`crate::graph`]).
 ///

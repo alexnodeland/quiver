@@ -54,8 +54,11 @@ use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
+// `AtomicU64` from `portable-atomic`, not `core`: the latter is absent on
+// targets with `max_atomic_width < 64` (e.g. `thumbv7em-none-eabihf`).
 use libm::Libm;
+use portable_atomic::AtomicU64;
 
 // ---------------------------------------------------------------------------
 // Tuning constants (all time-based state derives from these + the sample rate)
@@ -835,7 +838,7 @@ struct VoiceSlot {
 /// Polyphonic patch container.
 ///
 /// Owns one voice graph per allocator voice (multiplied by the unison count),
-/// each fed by an in-graph [`VoiceInput`] controller. On every [`tick`], it:
+/// each fed by an in-graph [`VoiceInput`] controller. On every [`tick`](Self::tick), it:
 ///
 /// 1. writes each active voice's allocator state into its controller handle(s),
 /// 2. ticks each voice graph exactly once and mixes the results (with unison

@@ -521,7 +521,7 @@ impl QuiverEngine {
     ///
     /// The returned `Float32Array` is a **view into WASM linear memory**, valid only
     /// until the next call into this engine (which reuses/grows the buffer) or
-    /// [`free`]. Read it immediately — e.g. copy into your own array with
+    /// `free`. Read it immediately — e.g. copy into your own array with
     /// `Array.from(...)` or `myBuffer.set(...)` — before calling any other engine
     /// method. Do not retain the returned object.
     pub fn process_block(&mut self, num_samples: usize) -> js_sys::Float32Array {

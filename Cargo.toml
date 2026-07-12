@@ -44,6 +44,13 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"], 
 slotmap = { version = "1.0", default-features = false, features = ["serde"] }
 rand = { version = "0.8", optional = true }
 libm = "0.2"
+# Portable 64-bit atomics: targets whose `max_atomic_width < 64` (e.g. the
+# embedded `thumbv7em-none-eabihf` no_std CI target) do not provide
+# `core::sync::atomic::AtomicU64`. `portable-atomic` supplies it (native where
+# available, a lock-based `fallback` otherwise), so `AtomicF64`/`AtomicNote`,
+# the polyphony voice control handles, and the no_std global RNG all build on
+# 32-bit-atomic targets.
+portable-atomic = { version = "1", default-features = false, features = ["fallback"] }
 # SIMD backend (no_std-compatible); enabled by the `simd` feature.
 wide = { version = "0.7", default-features = false, optional = true }
 

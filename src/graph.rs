@@ -1375,7 +1375,7 @@ fn port_param_info(port: &crate::port::PortDef, value: f64) -> crate::introspect
 /// * **Control-input ports** — any non-audio input. Its base (unpatched) value is a knob,
 ///   overridable per node; the override is applied at [`compile`](Self::compile).
 /// * **Internal state** — parameters that are *not* ports (waveform tables, scales, oversample
-///   factor, …), reached through the module's [`ModuleIntrospection`] via the
+///   factor, …), reached through the module's [`ModuleIntrospection`](crate::introspection::ModuleIntrospection) via the
 ///   [`introspect`](crate::port::GraphModule::introspect) hook.
 ///
 /// Port parameters take precedence when an id names both, because in a compiled graph the

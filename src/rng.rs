@@ -20,7 +20,21 @@ std::thread_local! {
 }
 
 #[cfg(not(feature = "std"))]
-static mut RNG_STATE: Rng = Rng::new(0x853c49e6748fea9b, 0xda3e39cb94b95bdb);
+use core::sync::atomic::Ordering;
+// `AtomicU64` from `portable-atomic`, not `core`: the latter is absent on
+// targets with `max_atomic_width < 64` (e.g. `thumbv7em-none-eabihf`).
+#[cfg(not(feature = "std"))]
+use portable_atomic::AtomicU64;
+
+/// Global RNG state for `no_std` builds (a splitmix64 counter).
+///
+/// A single `AtomicU64` replaces the previous `static mut Rng`: it removes the
+/// `static_mut_refs` lint and is sound to read/update from any context. Each
+/// [`random`] call `fetch_add`s the splitmix64 increment and scrambles the
+/// advanced state with [`splitmix64`], so successive draws form a splitmix64
+/// sequence; [`seed`] stores a fresh state.
+#[cfg(not(feature = "std"))]
+static RNG_STATE: AtomicU64 = AtomicU64::new(0x853c49e6748fea9b);
 
 /// A seedable random number generator using xoroshiro128+.
 ///
@@ -207,8 +221,13 @@ pub fn random() -> f64 {
     }
     #[cfg(not(feature = "std"))]
     {
-        // Safety: Single-threaded no_std contexts only
-        unsafe { RNG_STATE.next_f64() }
+        // `fetch_add` the splitmix64 increment, then scramble the advanced
+        // state. `splitmix64` re-adds the same increment internally, so passing
+        // the pre-increment value yields `scramble(new_state)` — exactly one
+        // splitmix64 step. Uses the upper 53 bits for the f64 mantissa, matching
+        // `Rng::next_f64`.
+        let z = splitmix64(RNG_STATE.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed));
+        (z >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 }
 
@@ -229,10 +248,7 @@ pub fn seed(seed: u64) {
     }
     #[cfg(not(feature = "std"))]
     {
-        // Safety: Single-threaded no_std contexts only
-        unsafe {
-            RNG_STATE = Rng::from_seed(seed);
-        }
+        RNG_STATE.store(seed, Ordering::Relaxed);
     }
 }
 
