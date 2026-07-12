@@ -64,21 +64,29 @@ pitch_midi.set(midi_note_to_voct(note_number));
 
 ## MidiState Helper
 
-For more complete MIDI handling:
+`MidiState` decodes raw MIDI bytes into a set of shared `Arc<AtomicF64>` control values —
+`pitch`, `gate`, `velocity`, `mod_wheel`, `pitch_bend`, `aftertouch`, `sustain`, and
+`expression` — that you can wire straight into `ExternalInput` modules.
 
 ```rust,ignore
-let midi_state = MidiState::new();
+let midi = MidiState::new();
 
-// In MIDI callback:
-midi_state.note_on(60, 100);  // Note 60, velocity 100
-midi_state.note_off(60);
-midi_state.control_change(1, 64);  // Mod wheel to 50%
+// In your MIDI callback, feed raw MIDI bytes:
+midi.handle_message(&[0x90, 60, 100]); // Note On, note 60, velocity 100
+midi.handle_message(&[0x80, 60, 0]);   // Note Off
+midi.handle_message(&[0xB0, 1, 64]);   // CC1 (mod wheel)
 
-// Read current state:
-let current_voct = midi_state.voct();
-let current_gate = midi_state.gate();
-let mod_value = midi_state.cc(1);
+// Read the decoded control values on the audio thread:
+let current_voct = midi.pitch.get();
+let current_gate = midi.gate.get();
+let mod_value = midi.mod_wheel.get();
+
+// Or share the atomics directly with the patch:
+let pitch_in = patch.add("pitch", ExternalInput::voct(Arc::clone(&midi.pitch)));
+let gate_in = patch.add("gate", ExternalInput::gate(Arc::clone(&midi.gate)));
 ```
+
+For a coherent (pitch, gate) pair that can never tear, prefer `midi.note_snapshot()`.
 
 ## Example: Complete MIDI Integration
 

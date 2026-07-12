@@ -14,19 +14,20 @@ let vco = patch.add("vco", Vco::new(44100.0));
 
 | Port | Signal | Range | Description |
 |------|--------|-------|-------------|
-| `voct` | V/Oct | ±10V | Pitch (0V = C4) |
-| `fm` | Bipolar CV | ±5V | Frequency modulation |
-| `pw` | Unipolar CV | 0-10V | Pulse width (5V = 50%) |
+| `voct` | V/Oct | ±5V | Pitch (0V = C4) |
+| `fm` | Bipolar CV | ±5V | Exponential FM (±5V ≈ ±5 octaves) |
+| `pw` | Unipolar CV | 0-10V | Pulse width, default 50% |
 | `sync` | Gate | 0/5V | Hard sync reset |
+| `fm_lin` | Bipolar CV | ±5V | Linear through-zero FM (±5V ≈ ±100% of base freq) |
 
 ### Outputs
 
 | Port | Signal | Description |
 |------|--------|-------------|
 | `sin` | Audio | Sine wave |
-| `tri` | Audio | Triangle wave |
-| `saw` | Audio | Sawtooth wave |
-| `sqr` | Audio | Square/pulse wave |
+| `tri` | Audio | Triangle wave (bandlimited, PolyBLAMP) |
+| `saw` | Audio | Sawtooth wave (bandlimited, PolyBLEP) |
+| `sqr` | Audio | Square/pulse wave (bandlimited, PolyBLEP) |
 
 ### Waveform Mathematics
 
@@ -98,20 +99,26 @@ $$f = 0.01 \cdot e^{(\text{CV}/10) \cdot \ln(3000)}$$
 
 ## Noise Generator
 
-White and pink noise sources.
+White and pink noise sources with a CV-controllable stereo second channel.
 
 ```rust,ignore
 let noise = patch.add("noise", NoiseGenerator::new());
 ```
 
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `correlation` | Unipolar CV | 0-10V | Stereo correlation (0 = independent, 1 = identical), default 0.3 |
+
 ### Outputs
 
 | Port | Signal | Description |
 |------|--------|-------------|
-| `white_left` | Audio | White noise (left) |
-| `white_right` | Audio | White noise (right) |
-| `pink_left` | Audio | Pink noise (left) |
-| `pink_right` | Audio | Pink noise (right) |
+| `white` | Audio | White noise |
+| `pink` | Audio | Pink noise |
+| `white2` | Audio | Second white channel, correlated with `white` |
+| `pink2` | Audio | Second pink channel, correlated with `pink` |
 
 ### Noise Spectra
 
@@ -145,6 +152,139 @@ let vco = patch.add("vco", AnalogVco::new(44100.0));
 - Soft saturation
 
 See [Analog Modeling](../concepts/analog-modeling.md) for details.
+
+---
+
+## Supersaw
+
+JP-8000-style stack of seven detuned PolyBLEP saws with an octave-down sub. `type_id`: `supersaw`.
+
+```rust,ignore
+let saw = patch.add("saw", Supersaw::new(44100.0));
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `voct` | V/Oct | ±5V | Pitch (0V = C4) |
+| `detune` | Unipolar CV | 0-10V | Detune spread of the 7 voices, default 50% |
+| `mix` | Unipolar CV | 0-10V | Blend between center voice and full supersaw, default 50% |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `out` | Audio | Mixed 7-oscillator supersaw |
+| `sub` | Audio | Octave-down bandlimited saw sub-oscillator |
+
+---
+
+## Wavetable
+
+Mip-mapped, bandlimited wavetable oscillator with 8 tables and smooth crossfade morphing. `type_id`: `wavetable`.
+
+```rust,ignore
+let wt = patch.add("wt", Wavetable::new(44100.0));
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `v_oct` | V/Oct | ±5V | Pitch (0V = C4) |
+| `table` | Unipolar CV | 0-10V | Table select across 8 tables |
+| `morph` | Unipolar CV | 0-10V | Crossfade morph between adjacent tables |
+| `sync` | Gate | 0/5V | Hard sync (resets phase) |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `out` | Audio | Wavetable output |
+
+The 8 built-in tables are: Sine, Triangle, Saw, Square, Pulse (25%), Pulse (12%), Formant A, Formant O.
+
+---
+
+## FormantOsc
+
+Vocal-synthesis oscillator: a glottal pulse driven through five parallel resonant formant filters. `type_id`: `formant_osc`.
+
+```rust,ignore
+let vox = patch.add("vox", FormantOsc::new(44100.0));
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `v_oct` | V/Oct | ±5V | Pitch (0V = C4) |
+| `vowel` | Unipolar CV | 0-10V | Interpolates the vowel A → E → I → O → U |
+| `formant_shift` | Bipolar CV | ±5V | Shifts all formant frequencies (0.5×–2×) |
+| `vibrato` | Unipolar CV | 0-10V | Vibrato depth (up to ±0.5 semitone) |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `out` | Audio | Vocal formant output |
+
+---
+
+## KarplusStrong
+
+Karplus-Strong physical-model plucked string with damping, brightness, and inharmonicity. `type_id`: `karplus_strong`.
+
+```rust,ignore
+let string = patch.add("string", KarplusStrong::new(44100.0));
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `voct` | V/Oct | ±5V | Pitch → string period |
+| `trigger` | Trigger | 0/5V | Rising edge plucks the string |
+| `damping` | Unipolar CV | 0-10V | Loop lowpass amount, default 50% |
+| `brightness` | Unipolar CV | 0-10V | Noise-vs-impulse excitation blend, default 50% |
+| `stretch` | Bipolar CV | ±5V | All-pass stretch / inharmonicity |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `out` | Audio | Plucked-string output |
+
+---
+
+## SamplePlayer
+
+Mono sample playback with V/Oct pitch, selectable start position, one-shot / looping modes, and an end-of-sample trigger. Reads are cubic-interpolated; the audio path is allocation-free (only `set_buffer` allocates). `type_id`: `sample_player`.
+
+```rust,ignore
+// buffer: Vec<f64>, recorded at buffer_sample_rate; engine runs at engine_sample_rate.
+let sp = patch.add("sp", SamplePlayer::new(buffer, 44100.0, 44100.0));
+// Or start empty and load later with `set_buffer`:
+let sp = patch.add("sp", SamplePlayer::empty(44100.0));
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `trig` | Trigger | 0/5V | Rising edge starts one-shot playback |
+| `gate` | Gate | 0/5V | Gated playback (release stops it) |
+| `voct` | V/Oct | ±5V | Playback pitch (0V = unity rate) |
+| `start` | Unipolar CV | 0-10V | Start position (0–1 of buffer) |
+| `loop` | Gate | 0/5V | Enables looping when high |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `out` | Audio | Sample output |
+| `eos` | Trigger | Fires at end of sample |
 
 ---
 

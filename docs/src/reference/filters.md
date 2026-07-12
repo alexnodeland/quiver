@@ -4,7 +4,7 @@ Filters shape the harmonic content of sound by attenuating certain frequencies w
 
 ## SVF (State-Variable Filter)
 
-A versatile 12dB/octave filter with multiple simultaneous outputs.
+A versatile 12dB/octave TPT / zero-delay-feedback (ZDF) filter with four simultaneous outputs and stable self-oscillation. `type_id`: `svf`.
 
 ```rust,ignore
 let vcf = patch.add("vcf", Svf::new(44100.0));
@@ -15,10 +15,11 @@ let vcf = patch.add("vcf", Svf::new(44100.0));
 | Port | Signal | Range | Description |
 |------|--------|-------|-------------|
 | `in` | Audio | ±5V | Audio input |
-| `cutoff` | Unipolar CV | 0-10V | Cutoff frequency |
-| `resonance` | Unipolar CV | 0-10V | Resonance/Q (0-1) |
-| `fm` | Bipolar CV | ±5V | Frequency modulation |
-| `tracking` | V/Oct | ±10V | Keyboard tracking |
+| `cutoff` | Unipolar CV | 0-10V | Cutoff frequency (20 Hz–20 kHz, exponential) |
+| `res` | Unipolar CV | 0-10V | Resonance (0–1) |
+| `fm` | Bipolar CV | ±5V | Linear FM added to cutoff |
+| `keytrack` | V/Oct | ±5V | Keyboard tracking pitch |
+| `keytrack_amt` | Unipolar CV | 0-10V | Keyboard tracking amount (0–1) |
 
 ### Outputs
 
@@ -50,20 +51,23 @@ $$H_{BP}(s) = \frac{\frac{\omega_c}{Q}s}{s^2 + \frac{\omega_c}{Q}s + \omega_c^2}
 
 ### Resonance Behavior
 
+Resonance sets the ZDF damping factor `k = 2 − 2·res`: `res = 0` gives `k = 2` (Q ≈ 0.5),
+and `res → 1` drives `k → 0` (near-infinite Q). Integrator states are soft-clipped, so
+high resonance self-oscillates as a **slow-decay sine ring** at the cutoff frequency
+rather than blowing up.
+
 | Resonance | Character |
 |-----------|-----------|
 | 0.0 | Flat response |
 | 0.5 | Slight peak |
 | 0.9 | Prominent peak |
-| 0.95+ | Self-oscillation |
-
-At high resonance, the filter produces a sine wave at the cutoff frequency.
+| 1.0 | Self-oscillation (slow-decay ring) |
 
 ---
 
 ## DiodeLadderFilter
 
-Classic 24dB/octave ladder filter with diode saturation modeling.
+Classic 24dB/octave (4-pole) TB-303/Moog-style ladder filter with diode saturation. `type_id`: `diode_ladder`.
 
 ```rust,ignore
 let ladder = patch.add("filter", DiodeLadderFilter::new(44100.0));
@@ -71,18 +75,24 @@ let ladder = patch.add("filter", DiodeLadderFilter::new(44100.0));
 
 ### Inputs
 
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `in` | Audio | ±5V | Audio input |
+| `cutoff` | Unipolar CV | 0-10V | Cutoff frequency (20 Hz–20 kHz, exponential) |
+| `res` | Unipolar CV | 0-10V | Resonance (0–1; feedback `k = res·4`) |
+| `fm` | Bipolar CV | ±5V | Linear FM added to cutoff |
+| `keytrack` | V/Oct | ±5V | Keyboard tracking pitch |
+| `keytrack_amt` | Unipolar CV | 0-10V | Keyboard tracking amount (0–1) |
+| `drive` | Unipolar CV | 0-10V | Input drive (gain 1×–4×) |
+
+### Outputs
+
 | Port | Signal | Description |
 |------|--------|-------------|
-| `in` | Audio | Audio input |
-| `cutoff` | Unipolar CV | Cutoff frequency |
-| `resonance` | Unipolar CV | Resonance (0-1) |
-| `drive` | Unipolar CV | Saturation amount |
-
-### Output
-
-| Port | Signal | Description |
-|------|--------|-------------|
-| `out` | Audio | Filtered output |
+| `out` | Audio | 24 dB/oct main output |
+| `pole1` | Audio | 6 dB/oct tap |
+| `pole2` | Audio | 12 dB/oct tap |
+| `pole3` | Audio | 18 dB/oct tap |
 
 ### Characteristics
 
@@ -102,6 +112,35 @@ flowchart LR
     S4 --> OUT[Output<br/>-24dB/oct]
     S4 -->|Resonance| IN
 ```
+
+---
+
+## ParametricEq
+
+Three-band equalizer — low shelf, parametric mid (with Q), high shelf — using cached biquads. Each band spans ±12 dB. `type_id`: `parametric_eq`.
+
+```rust,ignore
+let eq = patch.add("eq", ParametricEq::new(44100.0));
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `in` | Audio | ±5V | Audio input |
+| `low_gain` | Bipolar CV | ±5V | Low-shelf gain (±12 dB) |
+| `low_freq` | Unipolar CV | 0-10V | Low-shelf frequency (50–500 Hz) |
+| `mid_gain` | Bipolar CV | ±5V | Mid peaking gain (±12 dB) |
+| `mid_freq` | Unipolar CV | 0-10V | Mid frequency (200 Hz–8 kHz) |
+| `mid_q` | Unipolar CV | 0-10V | Mid Q (0.5–10) |
+| `high_gain` | Bipolar CV | ±5V | High-shelf gain (±12 dB) |
+| `high_freq` | Unipolar CV | 0-10V | High-shelf frequency (2–12 kHz) |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `out` | Audio | Equalized output |
 
 ---
 
@@ -129,8 +168,8 @@ patch.connect(lfo.out("sin"), vcf.in_("fm"))?;
 Higher notes = higher cutoff:
 
 ```rust,ignore
-patch.connect(pitch.out("out"), vcf.in_("tracking"))?;
-// 100% tracking: cutoff follows pitch
+patch.connect(pitch.out("out"), vcf.in_("keytrack"))?;
+// Set the amount (0-1) via the `keytrack_amt` input; 1.0 = cutoff follows pitch
 ```
 
 ### Audio-Rate FM

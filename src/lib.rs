@@ -7,6 +7,40 @@
 //! the mathematical elegance of category theory with the tactile joy of patching a
 //! hardware modular synthesizer.
 //!
+//! ## Quick Start
+//!
+//! ```
+//! use quiver::prelude::*;
+//!
+//! // Build a patch at CD-quality sample rate.
+//! let sr = 44_100.0;
+//! let mut patch = Patch::new(sr);
+//!
+//! // Add modules — each `add` returns a `NodeHandle` used to reference its ports.
+//! let vco = patch.add("vco", Vco::new(sr));
+//! let vcf = patch.add("vcf", Svf::new(sr));
+//! let vca = patch.add("vca", Vca::new());
+//! let env = patch.add("env", Adsr::new(sr));
+//! let out = patch.add("out", StereoOutput::new());
+//!
+//! // Patch cables: VCO -> VCF -> VCA -> stereo out.
+//! patch.connect(vco.out("saw"), vcf.in_("in")).unwrap();
+//! patch.connect(vcf.out("lp"), vca.in_("in")).unwrap();
+//! patch.connect(vca.out("out"), out.in_("left")).unwrap();
+//! patch.connect(vca.out("out"), out.in_("right")).unwrap();
+//!
+//! // The envelope shapes both the filter cutoff and the amplitude.
+//! patch.connect(env.out("env"), vcf.in_("cutoff")).unwrap();
+//! patch.connect(env.out("env"), vca.in_("cv")).unwrap();
+//!
+//! // Choose the output module, then compile before processing.
+//! patch.set_output(out.id());
+//! patch.compile().unwrap();
+//!
+//! // Advance the patch by one sample of stereo audio.
+//! let (_left, _right) = patch.tick();
+//! ```
+//!
 //! ## Feature Flags
 //!
 //! - `std` (default): Full standard library support including OSC, plugin wrappers,
@@ -14,6 +48,8 @@
 //! - `alloc`: Enables serialization (JSON save/load), presets, and basic I/O modules
 //!   for `no_std` environments with heap allocation (e.g., WASM).
 //! - `simd`: Enables SIMD vectorization for block processing (works with any tier).
+//! - `wasm`: WebAssembly bindings via `wasm-bindgen` and TypeScript types via `tsify`
+//!   (implies `alloc`).
 //!
 //! Without any features, the library operates in `no_std` mode with `alloc`,
 //! providing core DSP modules for embedded systems and WebAssembly targets.

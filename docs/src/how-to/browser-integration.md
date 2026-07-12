@@ -36,22 +36,36 @@ const engine = await createEngine(44100);
 
 ### Add Modules
 
+`add_module(typeId, name)` takes the snake_case `type_id` first and a unique instance
+name second:
+
 ```typescript
-// Add modules by name and type
-engine.add_module('vco', 'Vco');
-engine.add_module('vca', 'Vca');
-engine.add_module('output', 'StereoOutput');
+engine.add_module('vco', 'osc');
+engine.add_module('vca', 'amp');
+engine.add_module('stereo_output', 'out');
 ```
 
 ### Connect Modules
 
-```typescript
-// Connect output port 0 of 'vco' to input port 0 of 'vca'
-engine.connect('vco', 0, 'vca', 0);
+Connections use `"module.port"` strings and return a stable `CableId` (a number):
 
-// Connect VCA to stereo output (both channels)
-engine.connect('vca', 0, 'output', 0);  // Left
-engine.connect('vca', 0, 'output', 1);  // Right
+```typescript
+const c1 = engine.connect('osc.saw', 'amp.in');
+engine.connect('amp.out', 'out.left');
+engine.connect('amp.out', 'out.right');
+
+// Attenuated / modulated variants:
+engine.connect_attenuated('lfo.sin', 'vcf.cutoff', 0.5);
+engine.connect_modulated('lfo.sin', 'vcf.cutoff', 0.3, 5.0);
+
+// Choose the output module, then compile.
+engine.set_output('out');
+```
+
+Remove a cable by the `CableId` you kept:
+
+```typescript
+engine.disconnect_cable(c1);
 ```
 
 ### Compile the Graph
@@ -67,7 +81,7 @@ engine.compile();
 ### Sample-by-Sample
 
 ```typescript
-// Process one sample, returns [left, right]
+// Process one sample; returns a Float64Array [left, right].
 const [left, right] = engine.tick();
 ```
 
@@ -76,33 +90,63 @@ const [left, right] = engine.tick();
 More efficient for real-time audio:
 
 ```typescript
-// Process 128 samples at once
+// Process 128 samples at once.
 const samples = engine.process_block(128);
-// Returns Float64Array: [L0, R0, L1, R1, ...]
+// Returns Float32Array, interleaved: [L0, R0, L1, R1, ...]
 ```
 
-## AudioWorklet Setup
+> In practice you rarely call `process_block` yourself — the AudioWorklet helper below
+> runs the engine on the audio thread for you.
 
-For real-time audio output in the browser:
+## AudioWorklet Setup (Real-Time Audio)
+
+Real-time audio runs the Quiver engine **inside** an AudioWorklet. `createQuiverAudioNode`
+takes an `AudioContext` and the worklet/wasm URLs, and returns a handle you drive with
+`loadPatch`, `setParam`, `connect`, MIDI methods, and so on. (The older
+`createAudioContext` helper has been removed — this worklet path is the only supported way
+to get audio out.)
 
 ```typescript
 import { createQuiverAudioNode } from '@quiver/wasm';
+import workletUrl from '@quiver/wasm/dist/worklet.js?url';
+import wasmUrl from '@quiver/wasm/quiver_bg.wasm?url';
 
-async function startAudio(engine) {
-  const audioContext = new AudioContext();
+async function startAudio(myPatch) {
+  const ctx = new AudioContext();
 
-  // Create worklet node connected to engine
-  const quiverNode = await createQuiverAudioNode(audioContext, engine);
+  // The engine lives in the worklet render thread.
+  const quiver = await createQuiverAudioNode(ctx, { workletUrl, wasmUrl });
 
-  // Connect to speakers
-  quiverNode.connect(audioContext.destination);
+  // Load a patch (a PatchDef object), then connect to the speakers.
+  await quiver.loadPatch(myPatch);
+  quiver.node.connect(ctx.destination);
 
-  // Start (requires user gesture)
-  await audioContext.resume();
+  // Resume requires a user gesture.
+  await ctx.resume();
 
-  return { audioContext, quiverNode };
+  return { ctx, quiver };
 }
 ```
+
+`createQuiverAudio({ workletUrl, wasmUrl })` is a convenience wrapper that creates the
+`AudioContext` and connects the node to the destination for you.
+
+The returned handle exposes `node`, `context`, `loadPatch`, `savePatch`, `setParam`,
+`addModule`, `removeModule`, `connect`, `disconnect`, `setOutput`, `addMidiInputs`,
+`midiNoteOn`, `midiNoteOff`, `midiCc`, `midiPitchBend`, `compile`, `reset`, and `dispose`.
+
+### MIDI
+
+Inject the engine-owned MIDI CV source modules, then drive them:
+
+```typescript
+quiver.addMidiInputs();      // adds midi_voct, midi_gate, midi_velocity, midi_mod, midi_bend
+quiver.midiNoteOn(60, 100);
+quiver.midiCc(1, 64);        // CC1 drives midi_mod
+quiver.midiPitchBend(0.5);
+```
+
+Cable those `midi_*` module outputs into your patch to play it from MIDI.
 
 ### Architecture
 
@@ -124,10 +168,10 @@ Initialize the engine in a component:
 import { useQuiverEngine } from '@quiver/react';
 
 function Synth() {
-  const { engine, loading, error } = useQuiverEngine(44100);
+  const { engine, isReady, error } = useQuiverEngine(44100);
 
-  if (loading) return <div>Loading...</div>;
   if (error) return <div>Error: {error.message}</div>;
+  if (!isReady || !engine) return <div>Loading...</div>;
 
   return <PatchEditor engine={engine} />;
 }
@@ -135,36 +179,29 @@ function Synth() {
 
 ### useQuiverParam
 
-Bind a parameter to UI:
+Bind a parameter to UI. Returns a `[value, setValue]` tuple:
 
 ```tsx
 import { useQuiverParam } from '@quiver/react';
 
 function FrequencyKnob({ engine, nodeId }) {
-  const [value, setValue, info] = useQuiverParam(engine, nodeId, 0);
+  const [value, setValue] = useQuiverParam(engine, nodeId, 0);
 
-  return (
-    <Knob
-      value={value}
-      min={info.min}
-      max={info.max}
-      onChange={setValue}
-    />
-  );
+  return <Knob value={value} onChange={setValue} />;
 }
 ```
 
 ### useQuiverLevel
 
-Display level meters:
+Display level meters. Returns `{ rmsDb, peakDb }`:
 
 ```tsx
 import { useQuiverLevel } from '@quiver/react';
 
 function Meter({ engine, nodeId, portId }) {
-  const { rms_db, peak_db } = useQuiverLevel(engine, nodeId, portId);
+  const { rmsDb, peakDb } = useQuiverLevel(engine, nodeId, portId);
 
-  return <LevelMeter rms={rms_db} peak={peak_db} />;
+  return <LevelMeter rms={rmsDb} peak={peakDb} />;
 }
 ```
 

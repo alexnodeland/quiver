@@ -7,21 +7,23 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use quiver::prelude::*;
 //!
 //! let library = PresetLibrary::new();
 //!
 //! // List all presets
-//! for preset in library.list() {
+//! for preset in PresetLibrary::list() {
 //!     println!("{}: {}", preset.name, preset.description);
 //! }
 //!
 //! // Search by tags
 //! let acid = library.search_tags(&["acid"]);
+//! assert!(!acid.is_empty());
 //!
 //! // Get and build a preset
-//! let patch = library.get("Moog Bass")?.build(44100.0)?;
+//! let patch = library.get("Moog Bass").unwrap().build(44100.0).unwrap();
+//! assert!(patch.node_count() > 0);
 //! ```
 
 use crate::graph::Patch;
@@ -130,9 +132,13 @@ impl Preset {
     /// A compiled Patch ready for audio processing
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// use quiver::prelude::*;
+    ///
     /// let library = PresetLibrary::new();
-    /// let patch = library.get("Moog Bass")?.build(44100.0)?;
+    /// let preset = library.get("Moog Bass").unwrap();
+    /// let patch = preset.build(44100.0).unwrap();
+    /// assert!(patch.node_count() > 0);
     /// ```
     pub fn build(self, sample_rate: f64) -> Result<Patch, PresetError> {
         let registry = ModuleRegistry::new();
@@ -168,9 +174,11 @@ impl PresetLibrary {
     /// Create a new preset library instance
     ///
     /// # Example
-    /// ```ignore
-    /// let library = PresetLibrary::new();
-    /// for preset in library.list() {
+    /// ```
+    /// use quiver::prelude::*;
+    ///
+    /// let _library = PresetLibrary::new();
+    /// for preset in PresetLibrary::list() {
     ///     println!("{}", preset.name);
     /// }
     /// ```
@@ -181,10 +189,13 @@ impl PresetLibrary {
     /// Get a preset by name, ready to build
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// use quiver::prelude::*;
+    ///
     /// let library = PresetLibrary::new();
     /// if let Some(preset) = library.get("Moog Bass") {
-    ///     let patch = preset.build(44100.0)?;
+    ///     let patch = preset.build(44100.0).unwrap();
+    ///     assert!(patch.node_count() > 0);
     /// }
     /// ```
     pub fn get(&self, name: &str) -> Option<Preset> {
@@ -198,9 +209,12 @@ impl PresetLibrary {
     /// Returns presets that match ANY of the provided tags.
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// use quiver::prelude::*;
+    ///
     /// let library = PresetLibrary::new();
     /// let acid_or_bass = library.search_tags(&["acid", "bass"]);
+    /// assert!(!acid_or_bass.is_empty());
     /// ```
     pub fn search_tags(&self, tags: &[&str]) -> Vec<PresetInfo> {
         Self::all_presets()

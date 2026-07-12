@@ -156,7 +156,9 @@ use core::marker::PhantomData;
 ///
 /// # Implementing Module
 ///
-/// ```rust,ignore
+/// ```
+/// use quiver::prelude::*;
+///
 /// struct Amplifier { gain: f64 }
 ///
 /// impl Module for Amplifier {
@@ -171,6 +173,9 @@ use core::marker::PhantomData;
 ///         // Amplifier is stateless, nothing to reset
 ///     }
 /// }
+///
+/// let mut amp = Amplifier { gain: 2.0 };
+/// assert_eq!(amp.tick(0.5), 1.0);
 /// ```
 ///
 /// # Thread Safety
