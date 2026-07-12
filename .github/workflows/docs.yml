@@ -56,12 +56,21 @@ jobs:
       # Build both doc types in parallel
       - name: Build documentation
         run: |
-          # Build mdBook and rustdoc in parallel
+          # Build mdBook and rustdoc in parallel. A bare `wait` returns 0
+          # regardless of child exit status, so capture each PID and wait on it
+          # individually; under `set -e` a nonzero child then fails the step.
           mdbook build docs/ &
+          mdbook_pid=$!
           cargo doc --no-deps --all-features &
-          wait
+          cargo_doc_pid=$!
+          wait "$mdbook_pid"
+          wait "$cargo_doc_pid"
         env:
-          RUSTDOCFLAGS: --cfg docsrs
+          # Match ci.yml's doc job. Do NOT set `--cfg docsrs` here: on the stable
+          # toolchain that enables the nightly-only `feature(doc_cfg)` and fails
+          # with E0554. docs.rs sets docsrs itself on nightly via
+          # [package.metadata.docs.rs] in Cargo.toml.
+          RUSTDOCFLAGS: -D warnings
 
       # Combine into single site structure
       - name: Prepare site

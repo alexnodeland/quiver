@@ -1,11 +1,14 @@
 //! Dogfood the Module Development Kit (Q131).
 //!
 //! `src/mdk.rs` ships `ModuleTestHarness::run_all` (port-spec, reset-determinism,
-//! sample-rate, zero-input, stability, NaN/Inf, output-range checks) but nothing
-//! in the library ran it against its own modules. This test instantiates EVERY
-//! module registered in `ModuleRegistry` via the registry and runs the full
-//! harness over it, so the kit's contract is verified against the modules it
-//! ships with (and every module gets free NaN/Inf/stability/range coverage).
+//! sample-rate, zero-input, stability, NaN/Inf output, NaN/Inf input recovery,
+//! output-range checks) but nothing in the library ran it against its own
+//! modules. This test instantiates EVERY module registered in `ModuleRegistry`
+//! via the registry and runs the full harness over it, so the kit's contract is
+//! verified against the modules it ships with. The `stability` and
+//! `output_range` checks drive audio-kind inputs with a live tone (not silence)
+//! and `nan_recovery` injects NaN/±Inf on audio inputs then a clean signal, so
+//! every module gets real signal-path and feedback-sanitization coverage.
 //!
 //! A small, documented allowlist covers modules that legitimately violate a
 //! harness assumption rather than having a bug. The test also asserts every
@@ -15,8 +18,10 @@
 
 use quiver::prelude::*;
 
-/// `(type_id, failing_check_name, reason)` — modules that legitimately fail one
-/// harness check because the check's assumption does not hold for that module.
+/// `(type_id, failing_check_name)` — modules that fail one harness check for a
+/// documented, known reason rather than a fresh regression. The test asserts
+/// every entry STILL fails (see the stale-allowlist guard below), so an entry
+/// cannot silently mask a module that has since been fixed or changed.
 ///
 /// - `noise` / `reset_clears_state`: the white-noise output is drawn from a
 ///   process-global RNG (`rng::random_bipolar`), so it is stochastic by design.
@@ -24,7 +29,32 @@ use quiver::prelude::*;
 ///   state; making a noise source replay an identical sequence after reset would
 ///   defeat its purpose. Its filter state IS cleared on reset — only the random
 ///   draw differs — so this is an inherent property, not a bug.
-const ALLOWLIST: &[(&str, &str)] = &[("noise", "reset_clears_state")];
+///
+/// - `*` / `nan_recovery`: these modules read an audio input straight into a
+///   feedback/detector state without `sanitize_audio`, so a single non-finite
+///   input sample latches that state to NaN permanently (recoverable only via
+///   `reset()`). The `nan_recovery` check (added here) is precisely what surfaces
+///   this gap. Sanitizing them is out of scope for this CI/tests/docs pass and
+///   is tracked as its own remediation for the affected modules; allowlisting
+///   keeps the harness a real gate for the many modules that DO sanitize
+///   (Svf, DiodeLadderFilter, Chorus, Flanger, Phaser, DelayLine, Reverb, ...),
+///   catching any future regression in those. When a listed module is sanitized
+///   its entry goes stale and the guard below fails, forcing its removal.
+///   - `compressor`, `ducker`, `envelope_follower`: one-pole envelope detectors.
+///   - `parametric_eq`: TDF-II biquad feedback state.
+///   - `distortion`, `vocoder`: nonlinear/analysis feedback paths.
+///   - `crosstalk`, `ground_loop`: analog-artifact feedback/filter state.
+const ALLOWLIST: &[(&str, &str)] = &[
+    ("noise", "reset_clears_state"),
+    ("compressor", "nan_recovery"),
+    ("ducker", "nan_recovery"),
+    ("envelope_follower", "nan_recovery"),
+    ("parametric_eq", "nan_recovery"),
+    ("distortion", "nan_recovery"),
+    ("vocoder", "nan_recovery"),
+    ("crosstalk", "nan_recovery"),
+    ("ground_loop", "nan_recovery"),
+];
 
 /// Adapter so a `Box<dyn GraphModule>` from the registry satisfies the
 /// `M: GraphModule` bound on `ModuleTestHarness` (there is no blanket impl for
@@ -70,7 +100,7 @@ fn every_registered_module_passes_the_harness() {
             .expect("registered module");
         let mut harness = ModuleTestHarness::new(Boxed(module), 44_100.0);
         let suite = harness.run_all();
-        assert_eq!(suite.results.len(), 7, "{id}: harness should run 7 checks");
+        assert_eq!(suite.results.len(), 8, "{id}: harness should run 8 checks");
 
         for r in &suite.results {
             if r.passed {

@@ -663,11 +663,36 @@ impl TestSuiteResult {
 /// - Reset behavior
 /// - Sample rate handling
 /// - DC offset detection
-/// - Stability testing
-/// - NaN/Inf detection
+/// - Stability testing (with a live audio excitation)
+/// - NaN/Inf output detection
+/// - NaN/Inf input recovery (feedback-state sanitization)
 pub struct ModuleTestHarness<M: GraphModule> {
     module: M,
     sample_rate: f64,
+}
+
+/// A moderate sine excitation used to drive audio-kind inputs in the stability
+/// and range checks. Feeding audio-processing modules (reverb, delay, chorus,
+/// distortion, ...) pure silence makes those checks vacuous — the module
+/// outputs ~0 regardless of whether its feedback path is stable — so we run a
+/// real tone through them instead.
+fn harness_test_tone(sample_index: usize, sample_rate: f64) -> f64 {
+    const TONE_HZ: f64 = 220.0;
+    const TONE_AMP: f64 = 0.5;
+    TONE_AMP * (core::f64::consts::TAU * TONE_HZ * sample_index as f64 / sample_rate).sin()
+}
+
+/// Typical steady value for a (non-audio) input of the given signal kind.
+/// Audio-kind inputs are driven with [`harness_test_tone`] instead.
+fn harness_typical_input(kind: SignalKind) -> f64 {
+    match kind {
+        SignalKind::VoltPerOctave => 0.0,
+        SignalKind::Gate | SignalKind::Trigger => 0.0,
+        SignalKind::CvUnipolar => 0.5,
+        SignalKind::CvBipolar => 0.0,
+        SignalKind::Audio => 0.0,
+        SignalKind::Clock => 0.0,
+    }
 }
 
 impl<M: GraphModule> ModuleTestHarness<M> {
@@ -689,6 +714,7 @@ impl<M: GraphModule> ModuleTestHarness<M> {
             self.test_zero_input(),
             self.test_stability(),
             self.test_nan_inf(),
+            self.test_nan_recovery(),
             self.test_output_range(),
         ];
 
@@ -831,7 +857,13 @@ impl<M: GraphModule> ModuleTestHarness<M> {
         result
     }
 
-    /// Test stability over many samples
+    /// Test stability over many samples.
+    ///
+    /// Audio-kind inputs are driven with a live test tone (not silence) so that
+    /// audio-processing effects actually run signal through their processing and
+    /// feedback paths — with silent input a reverb/delay/chorus outputs ~0 and
+    /// this check passes trivially regardless of feedback stability. Non-audio
+    /// inputs are held at typical steady values.
     pub fn test_stability(&mut self) -> TestResult {
         self.module.reset();
 
@@ -839,22 +871,22 @@ impl<M: GraphModule> ModuleTestHarness<M> {
         let mut inputs = PortValues::new();
         let mut outputs = PortValues::new();
 
-        // Set typical input values
+        // Seed non-audio inputs; audio inputs are refreshed with the tone each
+        // sample inside the loop below.
         for input in &spec.inputs {
-            let default = match input.kind {
-                SignalKind::VoltPerOctave => 0.0,
-                SignalKind::Gate | SignalKind::Trigger => 0.0,
-                SignalKind::CvUnipolar => 0.5,
-                SignalKind::CvBipolar => 0.0,
-                SignalKind::Audio => 0.0,
-                SignalKind::Clock => 0.0,
-            };
-            inputs.set(input.id, default);
+            inputs.set(input.id, harness_typical_input(input.kind));
         }
 
-        // Run for many samples
+        // Run for many samples with a live audio excitation.
         let mut max_output = 0.0_f64;
-        for _ in 0..44100 {
+        for n in 0..44100 {
+            let tone = harness_test_tone(n, self.sample_rate);
+            for input in &spec.inputs {
+                if input.kind == SignalKind::Audio {
+                    inputs.set(input.id, tone);
+                }
+            }
+
             self.module.tick(&inputs, &mut outputs);
 
             for output in &spec.outputs {
@@ -869,6 +901,75 @@ impl<M: GraphModule> ModuleTestHarness<M> {
         }
 
         TestResult::pass("stability").with_measurement("max_output", max_output)
+    }
+
+    /// Test that a non-finite (NaN/±Inf) sample on an audio input does not
+    /// permanently poison the module.
+    ///
+    /// The whole branch's input-sanitization work exists so that a single bad
+    /// input sample cannot latch a feedback state (filter/delay/envelope) to a
+    /// non-finite value that then circulates forever. This check injects
+    /// NaN/±Inf on every audio-kind input for a few samples, then feeds a clean
+    /// tone and asserts every output returns to finite. Modules with no
+    /// audio-kind input have nothing to inject and pass trivially.
+    pub fn test_nan_recovery(&mut self) -> TestResult {
+        let spec = self.module.port_spec().clone();
+
+        let audio_inputs = spec
+            .inputs
+            .iter()
+            .filter(|p| p.kind == SignalKind::Audio)
+            .count();
+        if audio_inputs == 0 {
+            return TestResult::pass("nan_recovery").with_measurement("audio_inputs", 0.0);
+        }
+
+        for &bad in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            self.module.reset();
+
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            for input in &spec.inputs {
+                inputs.set(input.id, harness_typical_input(input.kind));
+            }
+
+            // Inject the non-finite value on every audio input for a few samples.
+            for input in &spec.inputs {
+                if input.kind == SignalKind::Audio {
+                    inputs.set(input.id, bad);
+                }
+            }
+            for _ in 0..16 {
+                self.module.tick(&inputs, &mut outputs);
+            }
+
+            // Feed a clean tone long enough to flush any legitimate transient.
+            for n in 0..8192 {
+                let tone = harness_test_tone(n, self.sample_rate);
+                for input in &spec.inputs {
+                    if input.kind == SignalKind::Audio {
+                        inputs.set(input.id, tone);
+                    }
+                }
+                self.module.tick(&inputs, &mut outputs);
+            }
+
+            // After the clean signal every output must be finite again.
+            for output in &spec.outputs {
+                let value = outputs.get_or(output.id, 0.0);
+                if !value.is_finite() {
+                    return TestResult::fail(
+                        "nan_recovery",
+                        format!(
+                            "output {} still non-finite ({value}) after a {bad} input was cleared",
+                            output.name,
+                        ),
+                    );
+                }
+            }
+        }
+
+        TestResult::pass("nan_recovery").with_measurement("audio_inputs", audio_inputs as f64)
     }
 
     /// Test for NaN or Infinity in outputs
@@ -927,14 +1028,22 @@ impl<M: GraphModule> ModuleTestHarness<M> {
         let mut inputs = PortValues::new();
         let mut outputs = PortValues::new();
 
-        // Set some typical modulation
+        // Set some typical modulation; audio inputs are driven with a live tone
+        // (below) so audio-processing modules produce a real, non-silent signal.
         for input in &spec.inputs {
             inputs.set(input.id, input.default);
         }
 
         let mut violations = Vec::new();
 
-        for _ in 0..4410 {
+        for n in 0..4410 {
+            let tone = harness_test_tone(n, self.sample_rate);
+            for input in &spec.inputs {
+                if input.kind == SignalKind::Audio {
+                    inputs.set(input.id, tone);
+                }
+            }
+
             self.module.tick(&inputs, &mut outputs);
 
             for output in &spec.outputs {
@@ -1473,7 +1582,7 @@ mod tests {
         let results = harness.run_all();
 
         assert_eq!(results.module_type, "vco");
-        assert_eq!(results.results.len(), 7); // 7 standard tests
+        assert_eq!(results.results.len(), 8); // 8 standard tests
         assert!(results.passed_count() > 0);
     }
 
@@ -1792,6 +1901,29 @@ mod tests {
 
         let result = harness.test_nan_inf();
         assert!(result.passed);
+    }
+
+    #[test]
+    fn test_harness_nan_recovery_no_audio_input() {
+        // Vco has no audio-kind input, so there is nothing to inject and the
+        // check passes via the trivial early-return path.
+        let vco = Vco::new(44100.0);
+        let mut harness = ModuleTestHarness::new(vco, 44100.0);
+
+        let result = harness.test_nan_recovery();
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_harness_nan_recovery_sanitizing_filter() {
+        // Svf sanitizes its audio input, so after a NaN/±Inf sample it recovers
+        // to finite output — exercising the full inject-then-clean recovery path.
+        use crate::modules::Svf;
+        let svf = Svf::new(44100.0);
+        let mut harness = ModuleTestHarness::new(svf, 44100.0);
+
+        let result = harness.test_nan_recovery();
+        assert!(result.passed, "Svf should recover: {:?}", result.error);
     }
 
     #[test]
