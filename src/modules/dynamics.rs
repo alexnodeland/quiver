@@ -38,7 +38,7 @@ enum AdsrStage {
 /// The `shape` input selects the segment curve: `0V` (default) gives classic
 /// linear ramps; a high level (`> GATE_THRESHOLD_V`, e.g. `5V`) selects an
 /// exponential one-pole approach toward each stage's target (attack→1, decay→
-/// sustain, release→0) using [`env_coef`] with the stage time as the time
+/// sustain, release→0) using `env_coef` with the stage time as the time
 /// constant.
 ///
 /// # Retrigger semantics
@@ -392,16 +392,27 @@ impl GraphModule for Limiter {
         // silence instead of leaving a denormal tail.
         self.envelope = flush_denorm(self.envelope);
 
-        let gain = if self.envelope > threshold {
-            if soft_mode {
-                // Renormalized soft knee: the target output level is
-                // `threshold * tanh(env / threshold)`, which asymptotes to
-                // `threshold` from below (never the old 2*threshold overshoot).
-                // Dividing by the envelope turns that target into a gain.
-                threshold * Libm::<f64>::tanh(self.envelope / threshold) / self.envelope
+        let gain = if soft_mode {
+            // C0/C1-continuous soft knee. Unity gain until the envelope reaches
+            // `knee_start` (half the threshold), then a scaled `tanh` that
+            // leaves `knee_start` with unit slope and asymptotically approaches
+            // the `threshold` ceiling from below. The value *and* slope match at
+            // `knee_start`, so there is no output step as the envelope crosses
+            // the threshold — the old static curve was unity below threshold but
+            // jumped to `threshold * tanh(1) ≈ 0.762 * threshold` just above it,
+            // a ~24% instant drop. The knee still never reaches the threshold
+            // (`tanh < 1`), so the brick-wall guarantee holds.
+            let knee_start = 0.5 * threshold;
+            if self.envelope > knee_start {
+                let span = threshold - knee_start; // = 0.5 * threshold, > 0
+                let target =
+                    knee_start + span * Libm::<f64>::tanh((self.envelope - knee_start) / span);
+                target / self.envelope
             } else {
-                threshold / self.envelope
+                1.0
             }
+        } else if self.envelope > threshold {
+            threshold / self.envelope
         } else {
             1.0
         };
@@ -433,10 +444,10 @@ impl GraphModule for Limiter {
 /// # Gate ballistics
 ///
 /// The open/close decision uses hysteresis (a close threshold at `0.7×` the
-/// open threshold) plus a **hold time** ([`NoiseGate::HOLD_MS`], default 10 ms):
+/// open threshold) plus a **hold time** (`NoiseGate::HOLD_MS`, default 10 ms):
 /// the gate stays open for the hold time after the last supra-threshold sample,
 /// so a signal dithering around the threshold does not chatter. The gate's
-/// anti-click fade uses an **independent** fade time ([`NoiseGate::FADE_MS`],
+/// anti-click fade uses an **independent** fade time (`NoiseGate::FADE_MS`,
 /// default 5 ms) rather than the level-detector's attack/release coefficients,
 /// so the fade rate does not change with the detector ballistics. The fade
 /// state is flushed to zero (Q017) so it settles to exactly 0 rather than
@@ -1247,6 +1258,61 @@ mod tests {
                 x,
                 out
             );
+        }
+    }
+
+    // ---- Soft-knee limiter is C0-continuous across the threshold ----
+    //
+    // The old soft curve was unity gain below threshold but jumped to
+    // ~0.762*threshold just above it, a ~24% instant output drop. Sweep the
+    // input amplitude across the knee in small steps and assert the steady-state
+    // output never steps by more than the input amplitude step (the transfer
+    // curve is 1-Lipschitz), which fails hard on that discontinuity.
+    #[test]
+    fn test_limiter_soft_knee_c0_continuous() {
+        let mut lim = Limiter::new(48000.0);
+        let threshold = 0.8 * 5.0; // default threshold knob 0.8 -> 4.0 V
+        let step = 0.01_f64;
+
+        let steady_output = |lim: &mut Limiter, a: f64| -> f64 {
+            lim.reset();
+            let mut inputs = PortValues::new();
+            inputs.set(0, a); // in
+            inputs.set(1, 0.8); // threshold knob -> 4.0 V
+            inputs.set(2, 0.3); // release
+            inputs.set(3, 5.0); // soft mode on
+            let mut outputs = PortValues::new();
+            // The detector jumps up to |input| on the first tick, so a constant
+            // input reaches steady state immediately; tick a few times anyway.
+            for _ in 0..8 {
+                outputs = PortValues::new();
+                lim.tick(&inputs, &mut outputs);
+            }
+            outputs.get(10).unwrap()
+        };
+
+        let mut prev: Option<(f64, f64)> = None;
+        let mut a = 1.0_f64; // start below the knee (knee_start = 2.0 V)
+        while a <= 6.0 {
+            let out = steady_output(&mut lim, a);
+
+            // Brick-wall guarantee is preserved.
+            assert!(
+                out <= threshold + 1e-9,
+                "soft limiter output {out} exceeds threshold {threshold} at a={a}"
+            );
+
+            if let Some((pa, pout)) = prev {
+                let jump = (out - pout).abs();
+                assert!(
+                    jump <= (a - pa) + 1e-6,
+                    "soft-knee discontinuity: output stepped {jump} between \
+                     a={pa} and a={a} (amplitude step {})",
+                    a - pa
+                );
+            }
+            prev = Some((a, out));
+            a += step;
         }
     }
 

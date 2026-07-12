@@ -29,8 +29,10 @@ pub const WAV_HEADER_LEN: usize = 44;
 /// buffers.
 ///
 /// The number of frames is `round(seconds * patch.sample_rate())`. The patch is
-/// advanced with [`Patch::tick`], which lazily compiles it if needed, so a
-/// freshly-built patch renders without an explicit `compile()` call.
+/// advanced with [`Patch::tick_block`], which lazily compiles it if needed (so a
+/// freshly-built patch renders without an explicit `compile()` call) and drives
+/// the same per-sample engine as [`Patch::tick`] with no per-frame allocation.
+/// The rendered samples are therefore identical to ticking one sample at a time.
 pub fn render(patch: &mut Patch, seconds: f64) -> (Vec<f64>, Vec<f64>) {
     let sr = patch.sample_rate();
     let frames = if seconds > 0.0 && sr > 0.0 {
@@ -38,13 +40,9 @@ pub fn render(patch: &mut Patch, seconds: f64) -> (Vec<f64>, Vec<f64>) {
     } else {
         0
     };
-    let mut left = Vec::with_capacity(frames);
-    let mut right = Vec::with_capacity(frames);
-    for _ in 0..frames {
-        let (l, r) = patch.tick();
-        left.push(l);
-        right.push(r);
-    }
+    let mut left = vec![0.0; frames];
+    let mut right = vec![0.0; frames];
+    patch.tick_block(&mut left, &mut right);
     (left, right)
 }
 

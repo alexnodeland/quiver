@@ -573,7 +573,7 @@ impl RingBuffer {
     /// Read with fractional delay using linear interpolation.
     ///
     /// The interpolated result is passed through
-    /// [`flush_denorm`](crate::modules::common::flush_denorm): this is the
+    /// `flush_denorm`: this is the
     /// read side of feedback delay lines, where a decaying loop asymptotes to
     /// subnormals that incur large CPU penalties. Flushing sub-threshold values
     /// to exactly `0.0` keeps the feedback path real-time-safe.

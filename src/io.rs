@@ -7,7 +7,10 @@ use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
+// `AtomicU64` from `portable-atomic`, not `core`: the latter is absent on
+// targets with `max_atomic_width < 64` (e.g. `thumbv7em-none-eabihf`).
+use portable_atomic::AtomicU64;
 
 /// Atomic f64 for lock-free communication between threads
 ///

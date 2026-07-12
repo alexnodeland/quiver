@@ -438,7 +438,7 @@ impl StateObserver {
     /// `sample_rate / (2 * block_size)`). It is allocation-free: subscriptions
     /// are iterated by index (no clone), node ids are resolved once and cached,
     /// samples land in preallocated buffers, and formatting/serialization of any
-    /// filled buffer is deferred to [`Self::flush_ready`] / [`Self::drain_updates`]
+    /// filled buffer is deferred to `flush_ready` / [`Self::drain_updates`]
     /// on the consumer side.
     pub fn collect_sample(&mut self, patch: &crate::graph::Patch) {
         const THRESHOLD_ON: f32 = 2.5;
@@ -689,7 +689,7 @@ impl LevelMeterState {
     ///
     /// The held peak latches on a new maximum, is held for `peak_hold_samples`,
     /// and then **decays gradually** toward the current peak at
-    /// [`PEAK_HOLD_DECAY_DB_PER_SAMPLE`] rather than snapping to it. The hold
+    /// `PEAK_HOLD_DECAY_DB_PER_SAMPLE` rather than snapping to it. The hold
     /// window re-arms only when a new higher peak arrives; the counter is bounded
     /// so decay continues every update after the window (it never collapses into
     /// a plain follower).
