@@ -449,7 +449,10 @@ impl NodeExec {
             // else: normalled + unpatched -> resolved in pass 2 below.
         }
         // Pass 2: normalled-but-unpatched inputs read the *current-tick* value of the
-        // sibling INPUT they normal to (already resolved above), else fall back to default.
+        // terminal sibling INPUT they normal to. `resolve_normalled_chains` (at
+        // compile time) collapsed each chain so `normalled_to` points at a sibling
+        // pass 1 already resolved, making this pass order-independent; a cycle or
+        // dangling reference was collapsed to `None`, falling back to default.
         for plan in &self.inputs {
             if dst.has(plan.port_id) {
                 continue;
@@ -472,6 +475,58 @@ impl NodeExec {
                 out_buf[self.out_base + k] = flush_denorm(value);
             }
         }
+    }
+}
+
+/// Collapse each normalled chain to a compile-time terminal so the runtime
+/// [`NodeExec::gather`] pass 2 is **order-independent**.
+///
+/// `gather` pass 1 resolves every patched input (its edge sum) and every
+/// unpatched **non-normalled** input (its default); pass 2 then resolves each
+/// unpatched **normalled** input by reading its `normalled_to` sibling. The
+/// single-pass, fixed-spec-order pass 2 only works when that sibling is already
+/// resolved — which fails for a forward-ordered or transitive chain (input A
+/// normals to B, B is itself unpatched-and-normalled to a resolved C, with A
+/// before B in spec order): when A is processed B is not yet set.
+///
+/// Rewriting each unpatched normalled input's `normalled_to` to point directly
+/// at its **terminal** sibling — the first one along the chain that pass 1 will
+/// resolve (a patched input, or an unpatched non-normalled input) — makes pass 2
+/// read an always-resolved value regardless of PortSpec order. A cycle or a
+/// dangling reference collapses to `None`, so the input falls back to its own
+/// default. Done once at compile time; the zero-alloc `tick` path is untouched.
+fn resolve_normalled_chains(inputs: &mut [InputPlan]) {
+    let n = inputs.len();
+    // Snapshot the original chain targets so each input resolves against a
+    // consistent view — the walk is independent of the order in which inputs are
+    // rewritten (so, e.g., a cycle collapses every member to its own default
+    // rather than to whichever member happened to be rewritten first).
+    let original: Vec<Option<PortId>> = inputs.iter().map(|p| p.normalled_to).collect();
+    for i in 0..n {
+        // Only unpatched, normalled inputs are resolved in pass 2.
+        if inputs[i].has_connection || original[i].is_none() {
+            continue;
+        }
+        let mut terminal = None;
+        let mut cursor = original[i];
+        // Bounded by input count: guarantees termination even for a cycle.
+        for _ in 0..n {
+            let Some(pid) = cursor else { break };
+            match inputs.iter().position(|p| p.port_id == pid) {
+                // Dangling sibling reference -> fall back to own default.
+                None => break,
+                Some(idx) => {
+                    if inputs[idx].has_connection || original[idx].is_none() {
+                        // Pass-1-resolvable terminal reached.
+                        terminal = Some(pid);
+                        break;
+                    }
+                    // Sibling is itself unpatched + normalled: keep walking.
+                    cursor = original[idx];
+                }
+            }
+        }
+        inputs[i].normalled_to = terminal;
     }
 }
 
@@ -1078,6 +1133,9 @@ impl Patch {
                 });
                 scratch_in.set(input.id, 0.0);
             }
+            // Collapse each normalled chain to its pass-1-resolvable terminal so the
+            // runtime two-pass `gather` is order-independent (see the fn's docs).
+            resolve_normalled_chains(&mut inputs);
             for output in &spec.outputs {
                 scratch_out.set(output.id, 0.0);
             }
@@ -2277,6 +2335,97 @@ mod tests {
             assert!(l > 0.0);
             assert_eq!(l, r, "mono fallback must be current-sample, not delayed");
         }
+    }
+
+    // A module whose inputs form a forward-ordered + transitive normalled chain:
+    // input 0 normals to 1, input 1 normals to 2, input 2 is a plain patched input.
+    // Each tick echoes the three resolved input values to outputs 10/11/12 so a test
+    // can observe how normalling resolved. `cycle` swaps in a 0<->1 cycle to exercise
+    // the compile-time cycle guard (both collapse to their own defaults).
+    struct NormalChain {
+        spec: PortSpec,
+    }
+    impl NormalChain {
+        fn new(cycle: bool) -> Self {
+            let (n0, n1) = if cycle { (1, 0) } else { (1, 2) };
+            Self {
+                spec: PortSpec {
+                    inputs: vec![
+                        PortDef::new(0, "a", SignalKind::Audio)
+                            .with_default(0.1)
+                            .normalled_to(n0),
+                        PortDef::new(1, "b", SignalKind::Audio)
+                            .with_default(0.2)
+                            .normalled_to(n1),
+                        PortDef::new(2, "c", SignalKind::Audio).with_default(0.3),
+                    ],
+                    outputs: vec![
+                        PortDef::new(10, "oa", SignalKind::Audio),
+                        PortDef::new(11, "ob", SignalKind::Audio),
+                        PortDef::new(12, "oc", SignalKind::Audio),
+                    ],
+                },
+            }
+        }
+    }
+    impl GraphModule for NormalChain {
+        fn port_spec(&self) -> &PortSpec {
+            &self.spec
+        }
+        fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+            outputs.set(10, inputs.get_or(0, f64::NAN));
+            outputs.set(11, inputs.get_or(1, f64::NAN));
+            outputs.set(12, inputs.get_or(2, f64::NAN));
+        }
+        fn reset(&mut self) {}
+        fn set_sample_rate(&mut self, _: f64) {}
+    }
+
+    // Regression: a forward-ordered + transitive normalled chain must resolve
+    // order-independently. Input 0 normals to 1, 1 normals to 2, only 2 is
+    // patched -> all three inputs must read the patched source value, not the
+    // per-input default. Pre-fix, pass 2's single fixed-order pass left input 0
+    // (and 1) collapsing to the default because their sibling was not yet set.
+    #[test]
+    fn test_normalled_chain_resolves_transitively() {
+        let mut patch = Patch::new(44100.0);
+        let src = patch.add("src", ConstSource::new(0.75));
+        let node = patch.add("chain", NormalChain::new(false));
+        // Patch ONLY the deepest input (id 2, "c"); 0 and 1 fall back through it.
+        patch.connect(src.out("out"), node.in_("c")).unwrap();
+        patch.set_output(node.id());
+        patch.compile().unwrap();
+
+        // tick() reads outputs 10/11 (the output node's first two outputs) which
+        // echo resolved inputs 0 and 1; inspect input 2 via the raw output buffer.
+        let (oa, ob) = patch.tick();
+        assert!(
+            (oa - 0.75).abs() < 1e-9,
+            "forward-normalled input 0 must resolve to patched source, got {oa}"
+        );
+        assert!(
+            (ob - 0.75).abs() < 1e-9,
+            "transitively-normalled input 1 must resolve to patched source, got {ob}"
+        );
+    }
+
+    // Regression companion: a normalled *cycle* (0<->1, both unpatched) must not
+    // hang at compile time and each input falls back to its own default.
+    #[test]
+    fn test_normalled_cycle_falls_back_to_default() {
+        let mut patch = Patch::new(44100.0);
+        let node = patch.add("chain", NormalChain::new(true));
+        patch.set_output(node.id());
+        patch.compile().unwrap();
+        let (oa, ob) = patch.tick();
+        assert!(
+            (oa - 0.1).abs() < 1e-9,
+            "cycled input 0 -> own default, got {oa}"
+        );
+        assert!(
+            (ob - 0.2).abs() < 1e-9,
+            "cycled input 1 -> own default, got {ob}"
+        );
     }
 
     // Q080: compilation is deterministic — same patch built twice -> same execution_order.

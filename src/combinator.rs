@@ -847,6 +847,13 @@ impl<G: GraphModule> Module for GraphModuleAdapter<G> {
     #[inline]
     fn tick(&mut self, input: Self::In) -> Self::Out {
         self.inputs.set(self.input_port, input);
+        // Clear the output buffer before ticking so an output the wrapped module
+        // does NOT write this tick reads back as the `get_or` default (0.0),
+        // matching the graph engine's per-sample `scratch_out.clear()`
+        // (see `Patch::tick_step`). Without this, a module that conditionally
+        // omits writing its selected port (e.g. an event/trigger-driven module)
+        // would return a stale prior-tick value here but 0.0 inside a `Patch`.
+        self.outputs.clear();
         self.module.tick(&self.inputs, &mut self.outputs);
         self.outputs.get_or(self.output_port, 0.0)
     }
@@ -1380,6 +1387,54 @@ mod tests {
         // reset / set_sample_rate forward without panic.
         adapter.reset();
         adapter.set_sample_rate(48_000.0);
+    }
+
+    // A trigger-style GraphModule that writes its output ONLY when its input is
+    // high, exercising the conditionally-writing / event-driven contract: an
+    // unwritten output must read back as the default (0.0), not a stale value.
+    struct GatedEmit {
+        spec: PortSpec,
+    }
+    impl GatedEmit {
+        fn new() -> Self {
+            Self {
+                spec: PortSpec {
+                    inputs: vec![PortDef::new(0, "trig", SignalKind::Audio)],
+                    outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
+                },
+            }
+        }
+    }
+    impl GraphModule for GatedEmit {
+        fn port_spec(&self) -> &PortSpec {
+            &self.spec
+        }
+        fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+            // Only emit on a high trigger; otherwise write nothing this tick.
+            if inputs.get_or(0, 0.0) > 0.5 {
+                outputs.set(10, 1.0);
+            }
+        }
+        fn reset(&mut self) {}
+        fn set_sample_rate(&mut self, _sample_rate: f64) {}
+    }
+
+    // Regression: the adapter must clear its output buffer each tick so a module
+    // that omits writing its output this tick reads back as the default (0.0),
+    // matching the graph engine's per-sample `scratch_out.clear()`. Pre-fix the
+    // adapter retained the prior tick's value and returned a stale 1.0.
+    #[test]
+    fn test_graph_module_adapter_clears_stale_outputs() {
+        let mut adapter = GraphModuleAdapter::new(GatedEmit::new(), 0, 10);
+        // Trigger high -> module emits 1.0.
+        assert!((adapter.tick(1.0) - 1.0).abs() < 1e-12);
+        // Trigger low -> module writes nothing; adapter must report 0.0, not 1.0.
+        assert!(
+            adapter.tick(0.0).abs() < 1e-12,
+            "unwritten output must read as default 0.0, not the stale prior value"
+        );
+        // And it recovers when the trigger returns high.
+        assert!((adapter.tick(1.0) - 1.0).abs() < 1e-12);
     }
 
     #[test]

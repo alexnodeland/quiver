@@ -64,7 +64,8 @@ impl Clone for AtomicF64 {
 /// to the audio thread. Writing pitch and gate as two independent atomics with
 /// `Relaxed` ordering lets the audio thread observe a new gate paired with a
 /// stale pitch (a wrong-pitch transient on note changes). Packing both into one
-/// `AtomicU64` removes the tear entirely:
+/// `AtomicU64` and reading it in a single load removes the tear for consumers of
+/// this type (i.e. [`snapshot`](Self::snapshot) / [`MidiState::note_snapshot`]):
 ///
 /// - the high 32 bits hold `pitch` (V/Oct) as `f32` bits,
 /// - the low 32 bits hold `gate` (volts) as `f32` bits.
@@ -204,10 +205,21 @@ impl GraphModule for ExternalInput {
 /// Update from a MIDI callback thread, read from the audio thread.
 #[derive(Debug)]
 pub struct MidiState {
-    /// Pitch in V/Oct (0V = C4, MIDI note 60)
+    /// Pitch in V/Oct (0V = C4, MIDI note 60).
+    ///
+    /// Read per-field with `Relaxed` ([`AtomicF64::get`]). This is a convenience
+    /// mirror: reading `pitch` and [`gate`](Self::gate) as two separate atomics
+    /// is **torn-capable** — across a note change a reader can observe a new gate
+    /// paired with the previous pitch. For a coherent `(pitch, gate)` pair use
+    /// [`note_snapshot`](Self::note_snapshot), which reads the packed
+    /// [`AtomicNote`] and never tears.
     pub pitch: Arc<AtomicF64>,
 
-    /// Gate signal (0 or 5V)
+    /// Gate signal (0 or 5V).
+    ///
+    /// A `Relaxed` convenience mirror; see [`pitch`](Self::pitch) for why a
+    /// `(pitch, gate)` pair read from these two fields is torn-capable and why
+    /// [`note_snapshot`](Self::note_snapshot) is the coherent alternative.
     pub gate: Arc<AtomicF64>,
 
     /// Velocity (0-10V)
@@ -275,12 +287,15 @@ impl MidiState {
                 let voct = Self::note_to_voct(note);
 
                 self.held_notes.push(note);
-                // Write pitch before gate. The individual `gate` store uses
-                // `Release` so a reader that `Acquire`-loads the gate also sees
-                // the pitch written before it.
+                // The separate `pitch`/`gate` atomics are convenience mirrors read
+                // per-field with `Relaxed` (see `AtomicF64::get`); across two words
+                // they are inherently torn-capable, so the ordering here cannot make
+                // a `(pitch, gate)` pair read from them coherent. Callers needing a
+                // torn-free pair must use `note_snapshot()` (the packed `note` word
+                // published below), which is the sole coherence guarantee.
                 self.pitch.set(voct);
                 self.velocity.set(vel as f64 / 127.0 * 10.0);
-                self.gate.store(5.0, Ordering::Release);
+                self.gate.set(5.0);
                 // Publish the coherent (pitch, gate) pair in a single word.
                 self.note.publish(voct, 5.0);
             }
@@ -291,7 +306,7 @@ impl MidiState {
                 self.held_notes.retain(|&n| n != note);
 
                 if self.held_notes.is_empty() {
-                    self.gate.store(0.0, Ordering::Release);
+                    self.gate.set(0.0);
                     // Gate closes; keep the last pitch in the coherent word.
                     self.note.publish(self.pitch.get(), 0.0);
                 } else {
@@ -388,7 +403,7 @@ impl MidiState {
     /// All notes off
     pub fn all_notes_off(&mut self) {
         self.held_notes.clear();
-        self.gate.store(0.0, Ordering::Release);
+        self.gate.set(0.0);
         self.note.publish(self.pitch.get(), 0.0);
     }
 }
@@ -752,6 +767,43 @@ mod tests {
         midi.handle_message(&[0x80, 72, 0]);
         let (_pitch, gate) = midi.note_snapshot();
         assert!(gate.abs() < 1e-6);
+    }
+
+    // Regression: `note_snapshot` is the coherent `(pitch, gate)` read across a
+    // note change (legato). The separate `pitch`/`gate` fields are Relaxed
+    // convenience mirrors and are torn-capable across two words by design; the
+    // packed `note` word is the only guaranteed-coherent pair. This asserts the
+    // snapshot always pairs the *current* pitch with the *current* gate, never a
+    // mixed pair, through a held-note switch.
+    #[test]
+    fn test_midi_state_legato_snapshot_stays_coherent() {
+        let mut midi = MidiState::new();
+
+        // Hold C4 (0V), then legato to C5 (1V) without releasing C4.
+        midi.handle_message(&[0x90, 60, 100]);
+        let (p, g) = midi.note_snapshot();
+        assert!((p - 0.0).abs() < 1e-6 && (g - 5.0).abs() < 1e-6);
+
+        midi.handle_message(&[0x90, 72, 100]);
+        let (p, g) = midi.note_snapshot();
+        assert!(
+            (p - 1.0).abs() < 1e-6 && (g - 5.0).abs() < 1e-6,
+            "legato pitch change must pair the new pitch with a held gate, got ({p}, {g})"
+        );
+
+        // Release the newer note: gate stays high, pitch falls back to C4 (still
+        // held) as a coherent pair.
+        midi.handle_message(&[0x80, 72, 0]);
+        let (p, g) = midi.note_snapshot();
+        assert!(
+            (p - 0.0).abs() < 1e-6 && (g - 5.0).abs() < 1e-6,
+            "after releasing the top note the held note's pitch pairs with gate 5V, got ({p}, {g})"
+        );
+
+        // Release the last held note: gate closes coherently.
+        midi.handle_message(&[0x80, 60, 0]);
+        let (_p, g) = midi.note_snapshot();
+        assert!(g.abs() < 1e-6, "last note off closes the gate");
     }
 
     #[test]
