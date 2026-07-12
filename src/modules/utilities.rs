@@ -404,6 +404,38 @@ impl GraphModule for ScaleQuantizer {
     fn type_id(&self) -> &'static str {
         "scale_quantizer"
     }
+
+    /// Persist the microtuning table (Q146) so a loaded Scala/custom scale survives
+    /// `to_def` -> `from_def`. It is not a scalar `ModuleIntrospection` parameter, so it
+    /// travels through the reserved `ModuleDef.state` channel instead of `parameters`. A
+    /// plain (12-TET) quantizer has no custom cents and returns `None`, keeping state null.
+    #[cfg(feature = "alloc")]
+    fn serialize_state(&self) -> Option<serde_json::Value> {
+        if self.custom_cents.is_empty() {
+            return None;
+        }
+        let cents = serde_json::to_value(&self.custom_cents).ok()?;
+        let mut map = serde_json::Map::new();
+        map.insert(alloc::string::String::from("custom_cents"), cents);
+        Some(serde_json::Value::Object(map))
+    }
+
+    /// Restore the microtuning table saved by [`serialize_state`](Self::serialize_state).
+    /// An absent/empty table is a no-op (stays 12-TET); malformed cents surface a
+    /// descriptive error to the loader.
+    #[cfg(feature = "alloc")]
+    fn deserialize_state(
+        &mut self,
+        state: &serde_json::Value,
+    ) -> Result<(), alloc::string::String> {
+        let Some(cents_val) = state.get("custom_cents") else {
+            return Ok(());
+        };
+        let cents: Vec<f64> = serde_json::from_value(cents_val.clone())
+            .map_err(|e| format!("ScaleQuantizer custom_cents: {e}"))?;
+        self.set_custom_scale(&cents);
+        Ok(())
+    }
 }
 
 /// Euclidean Rhythm Generator
