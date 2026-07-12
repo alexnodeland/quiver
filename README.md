@@ -10,6 +10,7 @@ A modular audio synthesis library using Arrow-style combinators and graph-based 
 
 ## Table of Contents
 
+- [Project Status](#-project-status)
 - [Why Quiver?](#-why-quiver)
 - [Features](#-features)
 - [Architecture](#-architecture)
@@ -19,6 +20,14 @@ A modular audio synthesis library using Arrow-style combinators and graph-based 
 - [Development](#-development)
 - [Contributing](#-contributing)
 - [License](#-license)
+
+## 🚧 Project Status
+
+Quiver is **pre-1.0 and under active development**. There are no published releases
+yet — depend on it via git if you want to experiment. The three-layer architecture is
+in place and the module set is broad, but the **public API is still evolving** and may
+change between commits without notice. Expect rough edges; feedback and contributions
+are very welcome.
 
 ## 🤔 Why Quiver?
 
@@ -36,12 +45,30 @@ Quiver gives you both. Inspired by category theory and modular synthesizers, it 
 | ⚡ **Zero Allocation** | Real-time safe with predictable performance |
 
 ```rust
-// Compose modules functionally
+// Compose modules functionally with Arrow-style combinators
 let synth = oscillator >>> filter >>> amplifier;
 
-// Or patch them like hardware
-patch.connect(vco, "out", vcf, "input");
+// Or patch them like hardware, jack to jack
+patch.connect(vco.out("saw"), vcf.in_("in")).unwrap();
 ```
+
+### How Quiver Compares
+
+Quiver's niche is an **embeddable, Rust-first modular-synth graph with hardware-style
+semantics** — a `no_std` core plus first-class WebAssembly bindings.
+
+| | Quiver | [FunDSP](https://github.com/SamiPerttu/fundsp) | [VCV Rack](https://vcvrack.com/) | [Glicol](https://glicol.org/) / Web Audio |
+|---|--------|--------|----------|--------------------|
+| Form | Rust **library** | Rust **library** | Desktop **application** | DSL / browser graph |
+| Model | Modular graph **+** Arrow combinators | Combinator DSP graphs | Patchable rack of plugins | Live-coding / node graph |
+| Semantics | Hardware-style ports (V/Oct, gate, CV, normalled jacks) | Signal-flow operators | Eurorack-style modules | Audio nodes / DSL |
+| `no_std` core | ✅ | partial | ❌ | ❌ |
+| WASM bindings | ✅ (first-class) | via wasm-pack | ❌ | ✅ (browser-native) |
+| Zero-alloc audio path | ✅ | ✅ | n/a | n/a |
+
+If you want a signal-flow combinator DSP library, FunDSP is excellent and an inspiration.
+If you want a finished desktop instrument, use VCV Rack. Quiver is for **building** modular
+instruments and tools — in native apps, plugins, or the browser — from Rust.
 
 ## ✨ Features
 
@@ -100,6 +127,7 @@ quiver = "0.1"
 | `std` | Yes | Full functionality including OSC, plugins, visualization (implies `alloc`) |
 | `alloc` | No | Serialization, presets, and I/O for `no_std` + heap environments |
 | `simd` | No | SIMD vectorization for block processing (works with any tier) |
+| `wasm` | No | WebAssembly bindings (`wasm-bindgen`) + TypeScript types (`tsify`); implies `alloc`. Powers [`packages/@quiver/wasm`](./packages/@quiver/wasm) and the [browser synth demo](./demos/browser) |
 
 ### `no_std` Support
 
@@ -122,28 +150,42 @@ quiver = "0.1"
 | `alloc` | ✓ | ✓ | ✓ | ✓ | | |
 | `std` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-Build a simple synthesizer patch:
+Build a subtractive synthesizer voice — VCO → VCF → VCA, shaped by an ADSR envelope:
 
 ```rust
 use quiver::prelude::*;
 
 fn main() {
-    // Create a patch
-    let mut patch = Patch::new();
+    // Create a patch at CD-quality sample rate.
+    let sr = 44_100.0;
+    let mut patch = Patch::new(sr);
 
-    // Add modules
-    let vco = patch.add_module(Vco::new());
-    let vcf = patch.add_module(Svf::new());
-    let vca = patch.add_module(Vca::new());
-    let output = patch.add_module(StereoOutput::new());
+    // Add modules — each `add` takes a name and returns a `NodeHandle`
+    // used to reference that module's ports.
+    let vco = patch.add("vco", Vco::new(sr));
+    let vcf = patch.add("vcf", Svf::new(sr));
+    let vca = patch.add("vca", Vca::new());
+    let env = patch.add("env", Adsr::new(sr));
+    let out = patch.add("out", StereoOutput::new());
 
-    // Connect them
-    patch.connect(vco, "out", vcf, "input");
-    patch.connect(vcf, "lowpass", vca, "input");
-    patch.connect(vca, "out", output, "left");
+    // Patch cables jack-to-jack: VCO → VCF → VCA → stereo out.
+    // `in_()` is spelled with a trailing underscore because `in` is a Rust keyword.
+    patch.connect(vco.out("saw"), vcf.in_("in")).unwrap();
+    patch.connect(vcf.out("lp"), vca.in_("in")).unwrap();
+    patch.connect(vca.out("out"), out.in_("left")).unwrap();
+    patch.connect(vca.out("out"), out.in_("right")).unwrap();
 
-    // Process audio
-    patch.tick();
+    // The envelope modulates both the filter cutoff and the amplitude.
+    patch.connect(env.out("env"), vcf.in_("cutoff")).unwrap();
+    patch.connect(env.out("env"), vca.in_("cv")).unwrap();
+
+    // Select the output module, then compile before processing (required).
+    patch.set_output(out.id());
+    patch.compile().unwrap();
+
+    // Advance the patch one sample at a time; each `tick()` returns stereo audio.
+    let (left, right) = patch.tick();
+    println!("first sample: {left}, {right}");
 }
 ```
 

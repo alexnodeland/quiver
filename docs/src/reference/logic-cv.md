@@ -277,3 +277,95 @@ $$\cos(f_1 t) \cdot \cos(f_2 t) = \frac{1}{2}[\cos((f_1-f_2)t) + \cos((f_1+f_2)t
 - Bell-like tones with related frequencies
 - Metallic, robotic sounds with unrelated frequencies
 - Classic AM radio sound
+
+---
+
+## Sequencing
+
+### Arpeggiator
+
+Captures held notes on gate edges and replays them across selectable octaves and patterns
+on each clock pulse. `type_id`: `arpeggiator`.
+
+```rust,ignore
+let arp = patch.add("arp", Arpeggiator::new(44100.0));
+```
+
+#### Inputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `v_oct` | V/Oct | Input note to capture |
+| `gate` | Gate | Captures/releases the note on rising/falling edge |
+| `clock` | Clock | Advances the sequence |
+| `pattern` | Unipolar CV | Pattern select (Up / Down / UpDown / Random) |
+| `octaves` | Unipolar CV | Octave range (1–4) |
+| `reset` | Gate | Resets the sequence and clears held notes |
+
+#### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `v_oct_out` | V/Oct | Arpeggiated pitch |
+| `gate_out` | Gate | Gate output (follows the clock) |
+| `trigger` | Trigger | Pulse on each step |
+
+---
+
+### Chord Memory
+
+Generates four V/Oct voices from a root note across nine chord types, with inversion and
+octave spread. `type_id`: `chord_memory`.
+
+```rust,ignore
+let chord = patch.add("chord", ChordMemory::new());
+```
+
+#### Inputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `root` | V/Oct | Root note of the chord |
+| `chord` | Unipolar CV | Chord-type select (9 types) |
+| `inversion` | Unipolar CV | Inversion (rotates the bass note) |
+| `spread` | Unipolar CV | Spreads voices across octaves |
+
+#### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `voice1` | V/Oct | Chord voice 1 |
+| `voice2` | V/Oct | Chord voice 2 |
+| `voice3` | V/Oct | Chord voice 3 |
+| `voice4` | V/Oct | Chord voice 4 |
+
+Chord types: Major, Minor, Seventh, MajorSeventh, MinorSeventh, Diminished, Augmented,
+Sus2, Sus4.
+
+---
+
+### Euclidean
+
+Euclidean rhythm generator: evenly distributes a pulse count across a step count, with
+rotation and a per-cycle accent. `type_id`: `euclidean`.
+
+```rust,ignore
+let euclid = patch.add("euclid", Euclidean::new(44100.0));
+```
+
+#### Inputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `clock` | Trigger | Advances the pattern on rising edge |
+| `steps` | Unipolar CV | Step count (2–16), default 0.5 |
+| `pulses` | Unipolar CV | Pulse (fill) count, default 0.25 |
+| `rotation` | Unipolar CV | Rotates the pattern |
+| `reset` | Trigger | Resets the step counter |
+
+#### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `out` | Trigger | Pulse output for active steps |
+| `accent` | Trigger | Accent on the first pulse of each cycle |

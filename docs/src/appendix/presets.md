@@ -9,19 +9,21 @@ use quiver::prelude::*;
 
 let library = PresetLibrary::new();
 
-// List all presets
-for preset in library.list() {
+// List all presets (`list` / `by_category` are associated functions)
+for preset in PresetLibrary::list() {
     println!("{}: {}", preset.name, preset.description);
 }
 
 // Get by category
-let basses = library.by_category(PresetCategory::Bass);
+let basses = PresetLibrary::by_category(PresetCategory::Bass);
 
 // Search by tag
 let acid = library.search_tags(&["acid"]);
 
-// Build a preset
-let patch = library.get("Moog Bass")?.build(44100.0)?;
+// Build a preset (`get` returns Option, `build` returns Result)
+if let Some(preset) = library.get("Moog Bass") {
+    let patch = preset.build(44100.0)?;
+}
 ```
 
 ## Categories

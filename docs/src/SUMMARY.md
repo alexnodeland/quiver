@@ -54,6 +54,7 @@
 - [Oscillators](./reference/oscillators.md)
 - [Filters](./reference/filters.md)
 - [Envelopes & Modulators](./reference/modulators.md)
+- [Dynamics](./reference/dynamics.md)
 - [Utilities](./reference/utilities.md)
 - [Logic & CV](./reference/logic-cv.md)
 - [Effects](./reference/effects.md)

@@ -1027,8 +1027,9 @@ pub struct ProcessContext<'a> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use quiver::extended_io::*;
+/// ```no_run
+/// use quiver::prelude::*;
+/// use quiver::extended_io::{PluginProcessor, ProcessContext};
 ///
 /// struct MySynth {
 ///     patch: Patch,
@@ -1036,21 +1037,20 @@ pub struct ProcessContext<'a> {
 /// }
 ///
 /// impl PluginProcessor for MySynth {
-///     fn initialize(&mut self, sample_rate: f64, max_block_size: usize) {
+///     fn initialize(&mut self, sample_rate: f64, _max_block_size: usize) {
 ///         self.sample_rate = sample_rate;
-///         self.patch.set_sample_rate(sample_rate);
 ///     }
 ///
 ///     fn process(
 ///         &mut self,
-///         inputs: &[&[f32]],
+///         _inputs: &[&[f32]],
 ///         outputs: &mut [&mut [f32]],
 ///         context: &mut ProcessContext,
 ///     ) {
 ///         // Handle MIDI
 ///         for event in context.midi_in.iter() {
 ///             if event.is_note_on() {
-///                 // Trigger note...
+///                 // Trigger a note...
 ///             }
 ///         }
 ///
@@ -1065,6 +1065,9 @@ pub struct ProcessContext<'a> {
 ///     fn reset(&mut self) {
 ///         self.patch.reset();
 ///     }
+///
+///     fn set_parameter(&mut self, _id: u32, _value: f64) {}
+///     fn get_parameter(&self, _id: u32) -> f64 { 0.0 }
 /// }
 /// ```
 pub trait PluginProcessor: Send {

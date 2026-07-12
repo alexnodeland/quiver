@@ -4,7 +4,7 @@ Getting Quiver into your project is straightforward. The library is pure Rust wi
 
 ## Prerequisites
 
-- **Rust 1.70+** (2021 edition)
+- **Rust 1.78+** (2021 edition) — this is Quiver's MSRV (Minimum Supported Rust Version)
 - **Cargo** (comes with Rust)
 
 Verify your installation:
@@ -39,6 +39,7 @@ quiver = { git = "https://github.com/alexnodeland/quiver", features = ["simd"] }
 | `std` | Yes | Full functionality including OSC, visualization (implies `alloc`) |
 | `alloc` | No | Serialization, presets, and I/O for `no_std` + heap environments |
 | `simd` | No | SIMD vectorization for block processing (works with any tier) |
+| `wasm` | No | WebAssembly bindings via `wasm-bindgen` + TypeScript types via `tsify` (implies `alloc`). See [Browser & App Integration](../how-to/browser-integration.md). |
 
 ### Feature Tiers
 
