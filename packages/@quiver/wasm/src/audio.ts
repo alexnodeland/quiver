@@ -112,19 +112,67 @@ export async function createQuiverAudioNode(
 
   node.port.start();
 
+  // Request/response correlation. Every message we post carries a monotonic
+  // `requestId`; the worklet echoes it on the matching ack or error. A single
+  // persistent listener routes each response to only the promise that issued it, so
+  // an unrelated error (e.g. a fire-and-forget `setParam` that fails) or two
+  // concurrent same-type ops can no longer poison or cross-resolve each other.
+  const RESPONSE_TIMEOUT_MS = 10000;
+  let nextRequestId = 1;
+  interface PendingRequest {
+    okType: string;
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    extract?: (data: Record<string, unknown>) => unknown;
+    timer: ReturnType<typeof setTimeout>;
+  }
+  const pending = new Map<number, PendingRequest>();
+
+  node.port.addEventListener('message', (event: MessageEvent) => {
+    const data = event.data as Record<string, unknown> | undefined;
+    // Uncorrelated messages (the init 'ready'/'error' handshake) are handled
+    // elsewhere; ignore them here.
+    if (!data || typeof data.requestId !== 'number') return;
+    const entry = pending.get(data.requestId);
+    if (!entry) {
+      // No awaiting promise for this id: a fire-and-forget op failed. Surface it
+      // for diagnostics without rejecting any unrelated in-flight request.
+      if (data.type === 'error') {
+        // eslint-disable-next-line no-console
+        console.error('Quiver worklet error:', data.error);
+      }
+      return;
+    }
+    if (data.type === entry.okType) {
+      clearTimeout(entry.timer);
+      pending.delete(data.requestId);
+      entry.resolve(entry.extract ? entry.extract(data) : undefined);
+    } else if (data.type === 'error') {
+      clearTimeout(entry.timer);
+      pending.delete(data.requestId);
+      entry.reject(new Error(String(data.error)));
+    }
+  });
+
+  // Post a fire-and-forget control message with a correlation id (so a failure is
+  // reported against its own id, never an unrelated pending promise).
+  const post = (message: Record<string, unknown>): void => {
+    node.port.postMessage({ ...message, requestId: nextRequestId++ });
+  };
+
   // Await the worklet's readiness (after it initSync's the wasm and creates the
   // engine). We transfer the ArrayBuffer to avoid a copy.
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(
       () => reject(new Error('Quiver worklet initialization timeout')),
-      10000
+      RESPONSE_TIMEOUT_MS
     );
     const handler = (event: MessageEvent) => {
       if (event.data?.type === 'ready') {
         clearTimeout(timeout);
         node.port.removeEventListener('message', handler);
         resolve();
-      } else if (event.data?.type === 'error') {
+      } else if (event.data?.type === 'error' && event.data?.requestId === undefined) {
         clearTimeout(timeout);
         node.port.removeEventListener('message', handler);
         reject(new Error(event.data.error));
@@ -137,62 +185,57 @@ export async function createQuiverAudioNode(
     );
   });
 
-  // Await a specific acknowledgement message type once.
+  // Post a message and await its correlated ack (`okType`) or error, with a timeout
+  // safety net so a lost response can never leak a permanently-pending promise.
   const awaitResponse = <T = void>(
-    trigger: () => void,
+    message: Record<string, unknown>,
     okType: string,
     extract?: (data: Record<string, unknown>) => T
   ): Promise<T> =>
     new Promise<T>((resolve, reject) => {
-      const handler = (event: MessageEvent) => {
-        if (event.data?.type === okType) {
-          node.port.removeEventListener('message', handler);
-          resolve(extract ? extract(event.data) : (undefined as T));
-        } else if (event.data?.type === 'error') {
-          node.port.removeEventListener('message', handler);
-          reject(new Error(event.data.error));
-        }
-      };
-      node.port.addEventListener('message', handler);
-      trigger();
+      const requestId = nextRequestId++;
+      const timer = setTimeout(() => {
+        pending.delete(requestId);
+        reject(
+          new Error(
+            `Quiver worklet request '${String(message.type)}' (#${requestId}) timed out`
+          )
+        );
+      }, RESPONSE_TIMEOUT_MS);
+      pending.set(requestId, {
+        okType,
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        extract: extract as ((data: Record<string, unknown>) => unknown) | undefined,
+        timer,
+      });
+      node.port.postMessage({ ...message, requestId });
     });
 
   return {
     node,
     context: audioContext,
-    loadPatch: (patch) =>
-      awaitResponse(
-        () => node.port.postMessage({ type: 'load_patch', patch }),
-        'patch_loaded'
-      ),
+    loadPatch: (patch) => awaitResponse({ type: 'load_patch', patch }, 'patch_loaded'),
     savePatch: (name) =>
-      awaitResponse<unknown>(
-        () => node.port.postMessage({ type: 'save_patch', name }),
-        'patch_saved',
-        (data) => data.patch
-      ),
+      awaitResponse<unknown>({ type: 'save_patch', name }, 'patch_saved', (data) => data.patch),
     setParam: (nodeId, paramIndex, value) =>
-      node.port.postMessage({ type: 'set_param', nodeId, paramIndex, value }),
-    addModule: (typeId, name) =>
-      node.port.postMessage({ type: 'add_module', typeId, name }),
-    removeModule: (name) => node.port.postMessage({ type: 'remove_module', name }),
+      post({ type: 'set_param', nodeId, paramIndex, value }),
+    addModule: (typeId, name) => post({ type: 'add_module', typeId, name }),
+    removeModule: (name) => post({ type: 'remove_module', name }),
     connect: (from, to, attenuation, offset) =>
-      node.port.postMessage({ type: 'connect', from, to, attenuation, offset }),
-    disconnect: (from, to) => node.port.postMessage({ type: 'disconnect', from, to }),
-    setOutput: (name) => node.port.postMessage({ type: 'set_output', name }),
-    addMidiInputs: () => node.port.postMessage({ type: 'add_midi_inputs' }),
-    midiNoteOn: (note, velocity) =>
-      node.port.postMessage({ type: 'midi_note_on', note, velocity }),
-    midiNoteOff: (note, velocity) =>
-      node.port.postMessage({ type: 'midi_note_off', note, velocity }),
-    midiCc: (cc, value) => node.port.postMessage({ type: 'midi_cc', cc, value }),
-    midiPitchBend: (value) => node.port.postMessage({ type: 'midi_pitch_bend', value }),
-    compile: () =>
-      awaitResponse(() => node.port.postMessage({ type: 'compile' }), 'compiled'),
-    reset: () => node.port.postMessage({ type: 'reset' }),
+      post({ type: 'connect', from, to, attenuation, offset }),
+    disconnect: (from, to) => post({ type: 'disconnect', from, to }),
+    setOutput: (name) => post({ type: 'set_output', name }),
+    addMidiInputs: () => post({ type: 'add_midi_inputs' }),
+    midiNoteOn: (note, velocity) => post({ type: 'midi_note_on', note, velocity }),
+    midiNoteOff: (note, velocity) => post({ type: 'midi_note_off', note, velocity }),
+    midiCc: (cc, value) => post({ type: 'midi_cc', cc, value }),
+    midiPitchBend: (value) => post({ type: 'midi_pitch_bend', value }),
+    compile: () => awaitResponse({ type: 'compile' }, 'compiled'),
+    reset: () => post({ type: 'reset' }),
     dispose: () => {
       // Tell the worklet to free its engine and stop; then detach the node.
-      node.port.postMessage({ type: 'destroy' });
+      post({ type: 'destroy' });
       node.disconnect();
     },
   };
