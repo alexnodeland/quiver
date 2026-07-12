@@ -56,9 +56,12 @@ leaf math:
 7. **Onboarding fails its one job** — no example produces audible or file audio (Q167), and
    the README quick start doesn't compile (Q151).
 
-**Remediation.** Every finding in this document is being addressed (see the Remediation
-field per finding). The one refuted finding is recorded for honesty. Items requiring
-owner credentials (npm/crates.io publish) are prepared to the point of a single command.
+**Remediation — COMPLETE (2026-07-11).** All 180 findings are resolved (see the
+Remediation field per finding): 166 fixed, 6 implemented (new capability), 8 documented
+as intended behavior. The one refuted finding is recorded for honesty. The remediation
+was itself adversarially reviewed (10 domain reviewers + per-finding verification); the
+25 defects that review confirmed were fixed in the same branch. Items requiring owner
+credentials (npm/crates.io publish) are prepared to the point of a single command.
 
 ## Finding counts
 
@@ -368,7 +371,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q083 — 10 of 12 built-in presets panic on build(); 2 more error — nearly the entire preset library is unusable
 
 - **Severity:** critical  |  **Status:** confirmed  |  **Dimension:** `correct-serialize`  |  **Location:** `src/presets.rs:383`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — All 12 presets now build (preset cable port names/type_ids corrected) and a test builds every preset (wave-e/serialize, presets.rs).
 
 **Finding.** Verified by building every preset via Patch::from_def: only "Basic Subtractive" succeeds. Every envelope preset panics because ADSR's output port is named "env" (modules.rs:~577, PortDef id 10 "env"), but presets cable `env.out`/`env_amp.out`/`env_filter.out` (e.g. line 383,428,481,533,808,852,901). Mixer inputs are "ch0".."ch3" (modules.rs:700 format!("ch{}",i)), but moog_bass/pwm_strings use `mixer.in1`/`mixer.in2` (370-372,585-586). Wavefolder input is "threshold" (analog.rs:132) but wavefold_growl uses `folder.amount` (718). Observed panics: 'Unknown output port: out', 'Unknown input port: in1', 'Unknown input port: amount'.
 
@@ -379,7 +382,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q002 — Karplus-Strong re-excites every sample while the trigger gate is high (no edge detection)
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `math-oscillators`  |  **Location:** `src/modules.rs:2357`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — KarplusStrong excites only on the trigger rising edge via EdgeDetector, no longer refilling noise every sample held high (wave-b/oscillators, modules/oscillators.rs).
 
 **Finding.** tick() uses `if trigger > 0.5` (line 2357) with no stored previous-trigger state (struct has no last_trigger field). A Trigger/gate that stays >0.5 for N samples (a 1ms pulse ≈ 44 samples at 44.1k) refills the whole buffer with fresh noise and resets write_pos every one of those samples, so the string cannot ring during the pulse and only sounds on the falling edge — output is just filtered noise while held high. Vco (line 73) and Euclidean (line 2627) correctly edge-detect; KS does not.
 
@@ -390,7 +393,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q009 — SVF self-oscillation drives internal state to infinity/NaN (clip never fed back into state)
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `math-filters`  |  **Location:** `src/modules.rs:294`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Chamberlin SVF replaced by a Zavalishin TPT/ZDF core that stays bounded at resonance=1, eliminating the inf/NaN self-oscillation blow-up (wave-b/filters, modules/filters.rs).
 
 **Finding.** Chamberlin SVF state: band+=f*high; low+=f*band with high=in-low-q*band. State matrix det = 1 - f*q, trace = 2-fq-f^2. For res>0.95 the code sets q from 0.1 down to -0.05 (line 288). q=0 occurs at res≈0.983; above that q<0 so det=1-f*q>1 → poles outside unit circle → exponential growth of self.low/self.band. The safe_clip at lines 316-319 is applied only to the OUTPUT copies; self.low/self.band (updated at 295-296) are never bounded. At f≈0.99, q=-0.05, growth ≈2.4%/sample reaches f64 max (~1e308) in ~0.7s → inf-inf → NaN, which then persists forever. Worse, for 0<q<0.1 (res 0.95-0.983) det<1 so it merely decays: there is NO regime of stable sustained oscillation.
 
@@ -401,7 +404,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q034 — ScaleQuantizer maps top-of-octave notes ~11 semitones down (octave-wrap bug)
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `math-utilities`  |  **Location:** `src/modules.rs:2448`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — ScaleQuantizer carries +12 when the over-the-top note wraps, fixing the ~11-semitone octave-wrap error (wave-b/utilities, modules/utilities.rs).
 
 **Finding.** quantize_to_scale computes wrap_dist = min(dist,12-dist) to pick the nearest scale note, but sets closest = s (the raw semitone) without adding 12 when the nearest note is the root of the NEXT octave. Output is octave*12 + closest. Example: MINOR=[0,2,3,5,7,8,10], input semitone 11. Nearest are 10 (down 1) and 0-of-next-octave (up 1); wrap_dist for s=0 is min(11,1)=1, chosen first, so closest=0 and output = octave*12+0 — an 11-semitone DROP instead of +1 semitone. PENT_MAJOR/BLUES etc. hit this non-tie whenever the top note is closest to root. A chromatic sweep produces an audible wrong note nearly an octave off.
 
@@ -412,7 +415,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q043 — AnalogVco sin output diverges to infinity: HF rolloff one-pole coefficient exceeds stability bound
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `math-analog`  |  **Location:** `src/analog.rs:444`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — HighFrequencyRolloff coefficient kept within the one-pole stability bound (effective-cutoff form), stopping the AnalogVco sin divergence to inf (wave-b/analog, analog.rs).
 
 **Finding.** apply() computes effective_coef = self.coef / freq_factor, freq_factor=(frequency/cutoff).max(0.1). base coef at 12kHz/44.1k = 0.631. The one-pole y+=a*(x-y) has pole (1-a); stable only for a<2. For any note below ~3.8kHz, freq_factor floors near 0.1, giving effective_coef=6.31, pole=-5.31. tick() calls hf_rolloff.apply(sin,freq) every sample (line 587). Simulated at C4 (261.63Hz): state reaches 1e142 after 200 samples and goes to inf/NaN within ~450. All normal notes are affected. Tests miss it (single-tick, or inf<=inf passes).
 
@@ -423,7 +426,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q063 — Per-voice control signals never reach the voice patches (PolyPatch produces uncontrolled audio)
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `math-polyphony`  |  **Location:** `src/polyphony.rs:619`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — VoiceController nodes are wired into each voice graph so per-voice V/Oct/gate/trigger/velocity actually drive the DSP (wave-d/polyphony, polyphony.rs).
 
 **Finding.** PolyPatch owns voice_inputs: Vec<VoiceInput> (l.472,487) separate from voice_patches: Vec<Patch> (l.470). In tick() the allocator state is written into these VoiceInput structs via input.set_from_voice (l.601) and input.set_voct(base_voct+detune) (l.621), but nothing ever adds those VoiceInput modules into the corresponding Patch graph (no `.add(` of voice_inputs anywhere). patch.tick() at l.626 therefore processes a graph that never sees voct/gate/trigger/velocity/detune. Result: which note is played, its pitch, gate and unison detune are all dropped; PolyPatch cannot function as a polyphonic synth. voice_input_mut() returns PolyPatch's private copy, not a graph node, so users cannot wire it either.
 
@@ -434,7 +437,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q064 — Release tails truncated: releasing voices freed one sample after note-off
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `math-polyphony`  |  **Location:** `src/polyphony.rs:124`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Releasing voices are freed by an amplitude-follower gate with a grace period, so release tails complete instead of truncating (wave-d/polyphony, polyphony.rs).
 
 **Finding.** Voice::tick auto-frees a voice when state==Releasing && envelope_level < 0.0001 (l.124). envelope_level defaults to 0.0 (l.85) and is only ever set by set_envelope_level (l.292), which PolyPatch::tick never calls. After note_off sets Releasing (l.101-105), the very next PolyPatch::tick runs allocator.tick() first (l.593), so voice.tick() sees envelope_level 0.0 < 0.0001 and immediately calls free(). The processing loop then skips Free voices (l.607). The patch's release phase is therefore never processed - the voice is cut dead one sample after gate-off, producing an abrupt click and no release.
 
@@ -445,7 +448,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q075 — CableId is an unstable Vec index; disconnect/remove shift indices and silently invalidate held IDs
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `correct-graph`  |  **Location:** `src/graph.rs:382`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — CableIds made stable (slotmap-style) so they survive disconnect/remove instead of being unstable Vec indices (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** connect() returns `self.cables.len()-1` as the CableId (line 382), i.e. the positional index into `cables: Vec<Cable>`. disconnect() does `self.cables.remove(cable_id)` (line 508) and remove()/disconnect_ports() also use Vec retain/remove — all of which shift every later element down one. After disconnecting an earlier cable, all previously-returned CableIds now point to the wrong cable (or past-the-end). A caller storing cable ids and later calling `disconnect(id)` silently removes an unrelated connection. No generation/version guards this.
 
@@ -456,7 +459,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q084 — Two presets reference non-existent module type_ids (ring_modulator, noise_generator)
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `correct-serialize`  |  **Location:** `src/presets.rs:627`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Preset type_ids corrected to registered names (ring_mod, noise), fixing references to non-existent ring_modulator/noise_generator (wave-e/serialize, presets.rs).
 
 **Finding.** metallic_ring uses ModuleDef type "ring_modulator" (line 627) and noise_sweep uses "noise_generator" (line 664). The registry registers these as "ring_mod" (serialize.rs:802) and "noise" (serialize.rs:726). registry.instantiate returns None → from_def returns Err("Unknown module type: ring_modulator"/"noise_generator"). Verified at runtime. The port names (carrier/modulator/out, white) are actually correct; only the type_id strings are wrong.
 
@@ -467,7 +470,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q086 — Round-trip loses ALL module parameter state: serialize_state always None and from_def ignores state + parameters
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `correct-serialize`  |  **Location:** `src/serialize.rs:1230`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Round-trip now serializes module parameters via introspection and reapplies them on load, so knob/waveform/step state survives (wave-e/serialize, serialize.rs).
 
 **Finding.** to_def stores state: module.serialize_state() (line 1230), but NO module overrides serialize_state — grep shows only the trait defaults (port.rs:554 returns None; 560 deserialize_state is a no-op) and this single call site. So state is always None. from_def (1282-1368) never calls deserialize_state and never reads def.parameters at all (grep for def.parameters: no hits). Thus a Vco with changed waveform/PWM, Svf cutoff, Reverb size, StepSequencer steps — none survive save/load; they reset to factory defaults. The PatchDef.parameters map (populated by every preset) is dead data on both write (to_def writes empty map, 1277) and read.
 
@@ -478,7 +481,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q091 — SignalKind serializes PascalCase in Rust but all TS expects snake_case
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `correct-wasm`  |  **Location:** `src/port.rs:22`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — SignalKind now serializes snake_case (e.g. cv_bipolar, volt_per_octave), matching the TypeScript expectation (wave-b graph/port overhaul, port.rs).
 
 **Finding.** `enum SignalKind` (src/port.rs:22-24) has derives but NO `#[serde(rename_all = "snake_case")]`, so serde/tsify emit unit-variant strings as-is: quiver.d.ts:117 generates `type SignalKind = "Audio" | "CvBipolar" | ...`. But @quiver/types/src/index.ts:91 declares `'audio' | 'cv_bipolar' | ...`, DEFAULT_SIGNAL_COLORS keys are lowercase (index.ts:721), and engine.rs parse_signal_kind (line 607-617) only accepts lowercase. A PortDef.kind returned by get_catalog/get_port_spec is "Audio"; `getSignalColor(kind)` (react/index.ts:158) indexes colors["Audio"] → undefined, and passing it back to check_compatibility returns Err "Unknown signal kind: Audio".
 
@@ -489,7 +492,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q107 — gather_inputs rescans all cables for every input port every sample
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `perf-tickpath`  |  **Location:** `src/graph.rs:692`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Per-input adjacency (InEdge) precomputed at compile, replacing the per-sample O(modules x cables) cable rescan in gather_inputs (wave-c/perf, graph.rs).
 
 **Finding.** For each input port of each module, the inner loop `for cable in &self.cables { if cable.to == port_ref ... }` (graph.rs:702-712) linearly scans the full cable list. Total cost per sample is O(modules × inputs_per_module × total_cables) — effectively quadratic in patch size. A 40-module patch with 100 cables does thousands of PortRef comparisons per sample purely for routing bookkeeping.
 
@@ -500,7 +503,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q112 — Polyphony benchmarks run EMPTY voice patches — the entire polyphony/max-voices story measures nothing
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `perf-bench`  |  **Location:** `benches/audio_performance.rs:434`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Polyphony benchmarks now run populated voice patches with non-silence assertions instead of empty voices (wave-e/benches, benches/audio_performance.rs).
 
 **Finding.** PolyPatch::new (polyphony.rs:486) fills voice_patches with bare Patch::new(sr) — no VCO/VCF/ADSR added. Every polyphony bench (bench_polyphony_scaling:434, bench_high_polyphony:880, bench_polyphonic_realtime:757, bench_max_throughput:1156) calls PolyPatch::new+compile+note_on but never populates a voice with modules. So per-voice patch.tick() has an empty execution_order and returns (0,0) (graph.rs:679). The '128-voice @ 48kHz' and 'max sustainable polyphony' numbers measure only allocator.tick + empty-graph overhead, i.e. zero DSP. The headline real-time-polyphony validation is meaningless.
 
@@ -511,7 +514,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q136 — no_std / alloc-only build documented in lib.rs does not compile
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `elegance-features`  |  **Location:** `src/modules.rs:2368`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — 12 std-only f64 call sites routed through libm so the documented no_std and alloc-only tiers compile again (B-0 modules.rs split, verified by thumbv7em CI).
 
 **Finding.** src/lib.rs:12-19 and CLAUDE.md claim 'Without any features, the library operates in no_std mode with alloc, providing core DSP modules for embedded systems.' Verified: `cargo check --no-default-features` fails with 10 errors; `cargo check --no-default-features --features alloc` fails with 14 errors (both reproduced with isolated --target-dir). Root cause: 11 call sites use std-only inherent f64 methods (.fract/.round/.floor/.rem_euclid/.sqrt) instead of the `libm::Libm` shim used everywhere else (7 files `use libm::Libm`): modules.rs:2368,2493,4913,5249,5325,6072,6371; introspection.rs:75,141,176; observer.rs:652. Confirmed via a minimal standalone `#![no_std]` probe crate that these exact methods are unavailable without std.
 
@@ -522,7 +525,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q137 — CI and Makefile never exercise the documented no_std/alloc-only feature tiers
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `elegance-features`  |  **Location:** `.github/workflows/ci.yml:114`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added a no_std/alloc-only CI job on thumbv7em-none-eabihf so the documented feature tiers are exercised (wave-f/hygiene, .github + Makefile).
 
 **Finding.** grep of ci.yml shows every job uses `--all-features` (fmt/clippy line 30, test line 41, build line 53, doc line 70, check line 114, llvm-cov line 143) or default features; the MSRV job (lines 104-114, pinned to 1.78) also only runs `cargo check --all-features`. Makefile mirrors this (`check`, `test`, `build`, `lint`, `coverage` all pass `--all-features`); the only non-default-feature invocations are `--no-default-features --features wasm` (wasm/wasm-dev/wasm-check targets, Makefile lines 146,152,158). CLAUDE.md itself instructs 'Testing and building should use --all-features.' Consequently the finding above (broken no_std build) has no CI signal and can silently regress indefinitely.
 
@@ -534,7 +537,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `complete-docs`  |  **Location:** `README.md:132`
 - **Independently found by** 3 auditors
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — README Quick Start rewritten against the real Patch API and is now a tested crate-level doctest (wave-f/docs, README.md/lib.rs).
 
 **Finding.** README.md:134 `Patch::new()` (no args) vs src/graph.rs:278 `pub fn new(sample_rate: f64)`. README.md:137 `patch.add_module(Vco::new())` — no `add_module` method exists and `Vco::new()` takes no sample_rate; real API is `patch.add("vco", Vco::new(sample_rate))` (src/graph.rs:317, src/modules.rs:26 `Vco::new(sample_rate: f64)`). README.md:141-143 `patch.connect(vco, "out", vcf, "input")` (4 positional args) vs actual `connect(&mut self, from: PortRef, to: PortRef)` (src/graph.rs:369) used as `patch.connect(vco.out("saw"), vcf.in_("in")).unwrap()`. The snippet also omits the required `patch.compile()` (src/graph.rs:600) before `tick()`. This code will not compile as written, while docs/src/getting-started/first-patch.md:26-67 shows the correct current API.
 
@@ -545,7 +548,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q172 — @quiver/wasm's documented helper API (createEngine/createAudioContext) is never built or wired into the package entry
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `usable-ts`  |  **Location:** `packages/@quiver/wasm/package.json:5`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — @quiver/wasm entry rebuilt with tsup so it exports the real API (createQuiverAudioNode) instead of an unbuilt helper (wave-e/wasm-ts, packages/@quiver/wasm).
 
 **Finding.** package.json main/module/types (lines 5-7) point at quiver.js/quiver.d.ts — the raw wasm-bindgen 'web' target glue (verified: quiver.js exports only `initSync`/default init, no createEngine/createAudioContext). The hand-written helpers (createEngine, createAudioContext, initWasm) live in src/index.ts and src/audio.ts, but the package's only 'build' script (`cd ../../.. && make wasm`) just copies 4 wasm-bindgen files (Makefile:145-148); nothing compiles src/*.ts. `@quiver/react/src/hooks.ts:356` does `const { createEngine } = await import('@quiver/wasm')` — this will be `undefined`, throwing a TypeError at runtime for the project's own consumer.
 
@@ -557,7 +560,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `usable-ts`  |  **Location:** `packages/@quiver/wasm/src/index.ts:85`
 - **Independently found by** 2 auditors
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — createAudioContext replaced by worklet-routed createQuiverAudioNode that wires the correct engine instance and produces sound (wave-e/wasm-ts, packages/@quiver/wasm).
 
 **Finding.** createAudioContext (lines 85-132) creates a QuiverEngine on the main thread (line 95) and binds the returned loadPatch/setParam (lines 120-126) to that instance. The actual audio-producing engine is a separate instance created inside AudioWorkletProcessor.handleInit (worklet.ts:148-159). loadPatch/setParam never postMessage to the worklet, so the worklet's engine (the one process() reads from, worklet.ts:264) is never configured — process() runs forever on an empty engine, i.e. calling this documented API yields permanent silence.
 
@@ -568,7 +571,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q174 — Zero packages ever published; the publish CI is itself broken
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `usable-ts`  |  **Location:** `.github/workflows/publish-npm.yml:54`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Publish CI fixed: root package-lock.json committed and the npm workflow corrected so npm ci succeeds; cutting the v0.1.0 tag is the owner action (wave-e/wasm-ts, .github).
 
 **Finding.** `git tag -l` returns 0 tags and the npm registry returns 404 for @quiver/wasm and @quiver/types — nothing has shipped. Even if a `v*` tag were pushed, publish-npm.yml:54 runs `npm ci` at the repo root, but no root package-lock.json is tracked in git (only demos/browser/package-lock.json exists) — `npm ci` hard-fails without an existing lockfile, so the workflow would break before reaching any `npm publish` step. Today an outside JS developer has no `npm install @quiver/*` path at all; they must clone the whole Rust monorepo, install wasm-pack, and run `make wasm` since the built artifacts are gitignored (confirmed via `git status --ignored`).
 
@@ -580,7 +583,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 
 - **Severity:** high  |  **Status:** confirmed  |  **Dimension:** `usable-errors`  |  **Location:** `src/serialize.rs:1327`
 - **Independently found by** 2 auditors
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — from_def returns Err with port context instead of panicking on malformed patch JSON (wave-b graph/port overhaul + wave-e serialize, graph.rs/serialize.rs).
 
 **Finding.** from_def() (declared `-> Result<Self, PatchError>`) calls `from_handle.out(from_port)` / `to_handle.in_(to_port)` at lines 1327-1349. NodeHandle::out()/in_() (src/graph.rs:227-248) do `.unwrap_or_else(|| panic!("Unknown output/input port: {}", name))`. A patch JSON with a valid module type but a mistyped port name in a cable (e.g. `"vco.sawtooth"` instead of `"vco.saw"`) is exactly the kind of untrusted/hand-edited input from_def exists to validate, yet it crashes the process instead of returning `Err(PatchError::CompilationFailed(...))` like the module/name-lookup errors just above it do.
 
@@ -591,7 +594,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q000 — Vco produces fully naive, aliasing saw/square/triangle (no PolyBLEP)
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `math-oscillators`  |  **Location:** `src/modules.rs:81`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Vco saw/square/pulse/sub now band-limited with PolyBLEP and triangle with PolyBLAMP, replacing naive aliasing waveforms (wave-b/oscillators, modules/oscillators.rs).
 
 **Finding.** The library's primary oscillator generates saw=(2·phase−1)·5, sqr=(phase<pw?5:−5), tri=(1−4|phase−0.5|)·5 with zero anti-aliasing (lines 79-82). A hard-edged saw/pulse has harmonics to infinity; at C4 with fs=44.1k every harmonic above the 84th folds back, and at higher notes aliasing dominates. This is inconsistent: Supersaw (line 2239) uses PolyBLEP and Wavetable (line 4835) is band-limited, yet the flagship Vco — advertised with FM and hard sync — is not. Hard sync (line 74) resets phase with no BLEP correction either, worsening it.
 
@@ -602,7 +605,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q001 — Supersaw sub-oscillator is not an octave down; it is the fundamental with a DC-offset half-range ramp
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `math-oscillators`  |  **Location:** `src/modules.rs:2259`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Supersaw sub output is now a true octave-down band-limited saw instead of a DC-offset fundamental ramp (wave-b/oscillators, modules/oscillators.rs).
 
 **Finding.** sub_phase = (phases[3]·0.5) % 1.0 (line 2259). phases[3] already lives in [0,1) and wraps to 0 each fundamental period, so phases[3]·0.5 ∈ [0,0.5) and the %1.0 never triggers. The sub therefore sweeps sub=2·sub_phase−1 over [−1,0) only, resetting at the SAME frequency as the center oscillator — not an octave down as documented (line 2258). Its mean is −0.5 (DC offset), and it never completes a full ramp. A true sub needs an independent accumulator advancing by dt/2 and wrapping at 1.0.
 
@@ -613,7 +616,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q014 — Limiter soft mode (the default) is not brick-wall: output asymptotes to 2×threshold
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `math-dynamics`  |  **Location:** `src/modules.rs:1213`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Limiter soft mode renormalized to asymptote to threshold (brick-wall), later given a C0-continuous knee in wave-g/fixups (wave-b/dynamics, modules/dynamics.rs).
 
 **Finding.** Soft mode is default-on (port 3 default 5.0 > 2.5, lines 1171/1197). For envelope>threshold with over=env/threshold, gain = (threshold/env)·tanh(over−1) + 1/over = (1/over)(tanh(over−1)+1). Output peak = env·gain = threshold·(tanh(over−1)+1), which → 2·threshold as over→∞. So the ‘brick-wall limiter’ (CLAUDE.md) actually permits +6 dB above threshold. With default threshold 0.8·5=4V and a summed input (mixers reach ±20V), over≈5 gives output≈4·(tanh(4)+1)≈8.0V — exceeding both the 4V threshold and the ±5V audio range. test_limiter_prevents_spikes passes only because it uses threshold 1.5V (2×=3V<5V).
 
@@ -624,7 +627,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q020 — Phaser "allpass" stage is not an allpass (magnitude not flat)
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `math-timefx`  |  **Location:** `src/modules.rs:1745`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Phaser stage replaced with a true first-order allpass (x1/y1 state, flat magnitude) producing real notches (wave-b/timefx, modules/timefx.rs).
 
 **Finding.** The helper (1745-1749): output = state + coef*(input-state); state = input + coef*(output-input). Solving the recursion gives H(z) = [coef + (1-coef)^2 z^-1] / [1 - coef(1-coef) z^-1]. For an allpass we need num = [a1, 1] mirroring den [1, a1]; here b0=coef, b1=(1-coef)^2, a1=-coef(1-coef) — no mirror. Numeric check (coef=0.5): DC gain 1.0 but Nyquist gain 0.2. So each stage is a one-pole lowpass-ish filter, not a unit-magnitude allpass. Cascading them and mixing with dry (1794-1800) yields moving lowpass coloration, not the frequency-swept notches a phaser requires. The coefficient formula (1-tan)/(1+tan) is fine; the filter topology is wrong.
 
@@ -635,7 +638,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q021 — Chorus modulation depth exceeds base delay → negative delay hard-clamped at default settings
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `math-timefx`  |  **Location:** `src/modules.rs:1074`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Chorus modulated delay made unipolar over [base, base+depth] so it never goes negative/hard-clamped at default depth (wave-b/timefx, modules/timefx.rs).
 
 **Finding.** BASE_DELAY_MS=7 (989), MAX_MOD_DELAY_MS=25 (987). delay_samples = base + lfo*mod_depth with lfo=sin in [-1,1] (1073-1074). mod_depth_ms = depth_cv*25. At the DEFAULT depth_cv=0.5, mod_depth=12.5 ms > 7 ms base, so min delay = 7-12.5 = -5.5 ms; at depth_cv=1 it is 7-25 = -18 ms. Line 1075 clamps to 1.0 sample, so whenever sin < -7/12.5 = -0.56 the delay pins to 1 sample for a large fraction of each LFO cycle. The sweep is asymmetrically flattened/clipped, producing a distorted, one-sided chorus rather than a smooth ± pitch modulation — audible at stock settings.
 
@@ -646,7 +649,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q025 — Distortion "tone" control is a static gain, not a filter
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `math-nonlinear`  |  **Location:** `src/modules.rs:2123`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Distortion tone control is now a real one-pole low-pass filter instead of a static gain (wave-b/nonlinear, modules/nonlinear.rs).
 
 **Finding.** Line 2123: `filtered = distorted*tone + distorted*(1-tone)*0.7`. Algebraically this equals `distorted*(0.7 + 0.3*tone)`, a frequency-independent scalar in [0.7,1.0]. There is no state, no cutoff, no filter of any kind, yet the comment claims 'blend between original and low-passed' and the port is documented as a tone control. The user-facing tone parameter does nothing tonal; it only trims level by up to 3 dB. A tone control is a documented feature that is effectively missing.
 
@@ -657,7 +660,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q026 — soft_clip is unbounded and input is never normalized (level staging)
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `math-nonlinear`  |  **Location:** `src/modules.rs:2053`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Distortion shapers normalized by ±5V (Audio convention) and bounded, fixing level staging (wave-b/nonlinear, modules/nonlinear.rs).
 
 **Finding.** soft_clip (2053-2058) uses the Padé tanh x(27+x²)/(27+9x²). Its derivative is 9(x²-9)²/D²≥0 (monotonic) but for |x|>3 it exceeds 1 and grows like x/9 unbounded (real tanh saturates at 1). tick() never normalizes input, while RingModulator (3652) and Bitcrusher (1581) treat Audio as ±5V. With ±5V input and drive→1, gained≈55, soft_clip≈6.1V — no saturation, exceeds Audio range. hard_clip (2063) instead clamps to ±1, a 5× level drop vs surrounding ±5V modules. Staging is internally inconsistent and output is not bounded.
 
@@ -668,7 +671,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q035 — Clock div2/div4 outputs do not actually divide the clock
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `math-utilities`  |  **Location:** `src/modules.rs:3478`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Clock div2/div4 derive from an integer cycle counter so they actually divide the main clock (wave-b/utilities, modules/sequencing.rs).
 
 **Finding.** self.phase is wrapped to [0,1) every main cycle (line 3491). div2_raw = phase*0.5 therefore only ever ranges 0..0.5 within a cycle, so floor(div2_raw)=0 always and div2_phase = phase*0.5. div2_out fires when phase*0.5 < 0.1 i.e. phase < 0.2 — once per MAIN cycle (just a 20% pulse), not at half rate. div4 similarly fires every main cycle (phase<0.4). The /2 and /4 divided clock outputs run at the same tempo as the main clock, producing wrong rhythms.
 
@@ -679,7 +682,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q036 — BernoulliGate latched gate outputs never latch
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `math-utilities`  |  **Location:** `src/modules.rs:4237`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — BernoulliGate latched gate outputs now persist in struct fields instead of a fresh per-tick buffer, so they truly latch (wave-b/utilities, modules/logic.rs).
 
 **Finding.** gate_a/gate_b are meant to latch ("until the other side is triggered") by reading the previous state via outputs.get_or(12/13, 0.0). But graph.rs:670 allocates a fresh PortValues::new() every tick and never seeds it with prior outputs, so get_or always returns 0.0. Result: gate_a is 5V only on the single sample where trig_a fires, then 0V — identical to the momentary trigger outputs. The documented latched-gate behavior is completely non-functional.
 
@@ -691,7 +694,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `math-combinators`  |  **Location:** `src/combinator.rs:103`
 - **Independently found by** 3 auditors
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Bridged combinator::Module and engine GraphModule via GraphModuleAdapter/ModuleGraphAdapter so Arrow Layer-1 composition works with real DSP modules (wave-b/combinator).
 
 **Finding.** The combinator `Module` trait (single typed `In`/`Out`, src/combinator.rs:103) is a separate world from the `GraphModule` trait every DSP module actually implements (multi-port untyped `PortValues`, src/port.rs:506). Verified: 58 `impl GraphModule` in modules.rs, 0 `impl Module`. `Vco` implements only `GraphModule` (modules.rs:57). No adapter bridges the two. Grep of src/ and examples/ finds zero uses of `.then/.parallel/.fanout/Chain/Feedback` outside combinator.rs itself. So the documented example `vco.then(vcf).then(vca)` (combinator.rs:37,51) cannot compile with real modules, and CLAUDE.md's "three composable layers" that signal "flows through" is false — the layers are disjoint. The category-theory framing is decorative, not load-bearing.
 
@@ -702,7 +705,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q093 — process_block allocates a Float32Array every render quantum (violates zero-alloc guarantee)
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `correct-wasm`  |  **Location:** `src/wasm/engine.rs:469`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — process_block writes into a preallocated block output with a zero-copy Float32Array view (tick_block + decimated observer), ending the per-quantum allocation (wave-e/wasm-ts, wasm/engine.rs).
 
 **Finding.** process_block does `js_sys::Float32Array::new_with_length((num_samples*2) as u32)` (line 469) on every call. The worklet calls this once per 128-sample quantum (worklet.ts:264), i.e. ~344 times/sec at 44.1kHz, each allocating a fresh JS-heap typed array on the audio thread. Plus observer.collect_from_patch(&patch) runs every block (line 481). CLAUDE.md and the wasm/CLAUDE.md both promise 'zero allocation in the audio path'; this breaks it and creates GC pressure that can cause audible xruns.
 
@@ -713,7 +716,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q099 — Observer decimates scope/spectrum to one sample per block, aliasing all audio-rate signals
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `correct-rtio`  |  **Location:** `src/observer.rs:426`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Observer no longer decimates to one sample per block; it captures the full block so Scope/Spectrum stop aliasing audio-rate signals (wave-b/rtio, observer.rs).
 
 **Finding.** collect_from_patch reads each subscribed port exactly ONCE per call via get_output_value (lines 478-480, 565-567, 601-603). In the worklet path it is invoked once per process_block (wasm/engine.rs:481), after the whole num_samples loop — never per sample. So Scope/Spectrum accumulate 1 sample every block (typically 128), i.e. an effective capture rate of sample_rate/block_size (~344 Hz at 44.1k/128) with NO anti-alias filtering. Any signal above ~172 Hz folds into garbage. Worse, collect_spectrum sets freq_range=(0, sample_rate/2)=(0,22050) (line 614) which is off by the block-size factor and mislabels every bin. Level RMS is likewise computed over decimated samples.
 
@@ -724,7 +727,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q100 — collect_from_patch allocates on the audio worklet thread, violating zero-alloc guarantee
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `correct-rtio`  |  **Location:** `src/observer.rs:428`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — collect_from_patch capture path rewritten to iterate without heap allocation on the audio thread (wave-b/rtio, observer.rs).
 
 **Finding.** process_block (wasm/engine.rs:466-484) is the AudioWorklet render call; it invokes collect_from_patch every block on the audio thread. That path allocates: line 428 `self.subscriptions.clone()` clones a Vec of SubscriptionTarget (each holding Strings) every block; collect_* build ObservableValue with `node_id.into()` String allocations (e.g. 460-464, 492-497); collect_scope clones the whole samples Vec (line 575); push_update runs `retain` O(n) plus `remove(0)` O(n) shifts (lines 389,396). This directly contradicts the documented "zero allocation in the audio path" / "Avoid allocations in the audio path (tick())" guarantee (wasm/CLAUDE.md).
 
@@ -736,7 +739,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `perf-tickpath`  |  **Location:** `src/graph.rs:668`
 - **Independently found by** 6 auditors
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Patch::tick no longer clones the execution-order Vec each sample; it uses a precompiled Routing struct (wave-c/perf, graph.rs).
 
 **Finding.** `for &node_id in &self.execution_order.clone()` heap-allocates and frees a Vec<NodeId> on every tick to sidestep the borrow checker. At 44.1kHz that is 44,100 alloc/free pairs per second per patch, directly violating the zero-allocation guarantee (README.md:36). Under PolyPatch this multiplies by voices×unison.
 
@@ -748,7 +751,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `perf-tickpath`  |  **Location:** `src/modules.rs:295`
 - **Independently found by** 2 auditors
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Denormal flush applied at output scatter, adding denormal protection to feedback DSP paths (wave-c/perf, graph.rs).
 
 **Finding.** grep finds no FTZ, flush-to-zero, or anti-denormal DC injection anywhere in modules.rs/graph.rs/simd.rs. Feedback state such as the SVF integrators (`self.band += f*high; self.low += f*self.band;`, modules.rs:299-301) and reverb/delay feedback lines decay toward subnormal magnitudes on silence. On x86 subnormal arithmetic stalls 10-100x, causing CPU spikes precisely when the signal goes quiet — a classic real-time hazard.
 
@@ -759,7 +762,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q114 — Real-time compliance is only printed, never asserted; CI never measures or stores timings
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `perf-bench`  |  **Location:** `.github/workflows/ci.yml:126`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added a release-gated real-time compliance test (tests/realtime_compliance.rs) that asserts <80% budget, plus CI criterion baseline artifacts (wave-e/benches).
 
 **Finding.** Benches compute time_budget and eprintln it (e.g. lines 382, 710, 727) but no assertion fails when tick time exceeds budget — nothing gates on 'N× faster than real-time'. CI bench job runs only `cargo bench --no-run && cargo bench -- --test` (ci.yml:126): --test does a single non-measuring iteration, so no timing is ever produced, compared, or stored — contradicting benches/CLAUDE.md ('Full benchmark run stored for comparison'). There is no real-time regression gate anywhere; performance can silently regress past the deadline.
 
@@ -770,7 +773,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q116 — SIMD benchmarks never enable the simd feature, and the impl is fake SIMD
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `perf-bench`  |  **Location:** `benches/audio_performance.rs:625`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — SIMD benchmarks now enable the simd feature with a scalar-vs-simd A/B flow against the real (wide-backed) SIMD impl (wave-e/benches).
 
 **Finding.** make bench runs `cargo bench` (Makefile:72) and CI runs it with default features only; nothing passes `--features simd`. So simd_benches/bench_audio_block_operations (625) always compiles the #[cfg(not(feature="simd"))] scalar variants (simd.rs:108-139). No A/B comparison of simd vs scalar exists. Moreover the 'SIMD' impl (simd.rs:143-216) is just manual 4× unrolling of scalar f64 ops with no core::simd/std::arch intrinsics and no wasm simd128 — the plain loop autovectorizes identically, so the feature likely yields no speedup, and the benchmark could never show it.
 
@@ -782,7 +785,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `elegance-api`  |  **Location:** `src/graph.rs:746`
 - **Independently found by** 2 auditors
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — read_output/set_output use PortSpec order with a validating try_set_output, dropping the hardcoded ports 0/1 (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** `read_output` reads `PortRef{node, port:0}` as left and `port:1` as right. But the library's convention is inputs=0,1,2… and outputs=10,11… (Passthrough out=10, BitCrusher out=10, Offset out=10). StereoOutput is the sole module that renumbers outputs to 0/1 specifically to satisfy this. `set_output(node)` accepts any NodeId with no check. Point it at a Vco or any normal module and `tick()` reads nonexistent ports 0/1 → silent `(0.0, 0.0)` with no error. This magic-number contract is undocumented and unenforced.
 
@@ -794,7 +797,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `elegance-internals`  |  **Location:** `src/modules.rs:2627`
 - **Independently found by** 2 auditors
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Gate/trigger consumers standardized on the shared GATE_THRESHOLD_V (2.5V) rising-edge helper across modules (wave-b/utilities + B-0 helpers).
 
 **Finding.** port.rs:76-78 defines SignalKind::gate_threshold() → Some(2.5) for Gate/Trigger/Clock, but modules.rs never calls it. Most modules hardcode `> 2.5` (73 matches), yet KarplusStrong (2357: `trigger > 0.5`, port at 2305 is Trigger) and Euclidean (2622 `reset > 0.5`, 2627 `clock > 0.5 && last_clock <= 0.5`, ports at 2552/2562 are Trigger) use 0.5. A trigger/clock source producing a slow ramp, an attenuated <5V pulse, or CV bleed in the 0.5–2.5V band fires KarplusStrong/Euclidean early or repeatedly while Adsr(564)/StepSequencer(3052)/Clock use 2.5 and stay silent — cross-module behavioral divergence on the same signal.
 
@@ -806,7 +809,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `usable-examples`  |  **Location:** `examples/quick_taste.rs:32`
 - **Independently found by** 2 auditors
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Examples now produce audio: quick_taste/tutorial_subtractive write WAV and a new render_wav.rs flagship renders a sequenced phrase (wave-f/examples).
 
 **Finding.** quick_taste.rs:32-35 computes peak amplitude and prints 'Generated 44100 samples / Peak amplitude: 5.00V' - verified by running it. tutorial_subtractive.rs and every other tutorial (grep across examples/*.rs) only ever print peak/RMS text stats; none call a wav writer or an audio-out crate. Cargo.toml has no hound/cpal/rodio dependency at all. So the entire cargo-run learning path (all 13 examples) never emits an audible or file-based signal - a newcomer following the docs cannot hear Quiver produce sound without leaving Rust for the separate demos/browser Node project.
 
@@ -817,7 +820,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q051 — Combinators claim compile-time signal-type safety but carry no SignalKind
 
 - **Severity:** low  |  **Status:** confirmed  |  **Dimension:** `math-combinators`  |  **Location:** `src/combinator.rs:4`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Combinator 'compile-time signal-type safety' claim softened to honest structural (arity/shape) safety in docs (wave-b/combinator, combinator.rs).
 
 **Finding.** Docs assert "compile-time type checking" and "type-safe signal flow" (combinator.rs:4-5, 64-68). But `Module::In`/`Out` are raw Rust types — in every real case `f64`. `Chain<A,B>` only requires `B: Module<In = A::Out>` (line 232), i.e. `f64 == f64`. Since `SignalKind::Audio`, `CvBipolar`, and `VoltPerOctave` are all represented as bare `f64`, `>>>` will silently feed an Audio output into a V/Oct pitch input with no error. `SignalKind` (port.rs:24) exists only in the port/graph layer, which the combinators never touch. The "typed combinators" only prevent tuple-shape mismatches, not the semantic mixing the prose promises.
 
@@ -829,7 +832,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 
 - **Severity:** low  |  **Status:** confirmed  |  **Dimension:** `math-simd-rng`  |  **Location:** `src/simd.rs:142`
 - **Independently found by** 2 auditors
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — AudioBlock add/mul and block ops now use real SIMD via the wide crate (f64x4), replacing the fake 4x-unrolled scalar loops (wave-b/simd-rng, simd.rs).
 
 **Finding.** Cargo.toml line 44 declares `simd = []` (empty). Under `#[cfg(feature="simd")]`, add_scalar/mul_scalar/add_block/mul_block (lines 142-216) are 4x manually-unrolled scalar loops over `self.samples[base+k]` — every access is a bounds-checked `Vec` index, with a scalar remainder loop. grep for `core::arch`, `std::simd`, `portable_simd`, `_mm_*`, `f64x*`, `target_feature` returns nothing. There is no vectorization, no dependency (e.g. `wide`/`packed_simd`), no `#[target_feature]`. The feature table documents 'SIMD vectorization for block processing'; the code delivers none. Numerically identical to the non-simd path, so audio is correct, but the documented performance guarantee is unmet.
 
@@ -840,7 +843,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q065 — Unison detune spread is double the documented cents value
 
 - **Severity:** low  |  **Status:** confirmed  |  **Dimension:** `math-polyphony`  |  **Location:** `src/polyphony.rs:399`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Unison detune now spans the documented total cents (half each side of center), fixing the 2x spread (wave-d/polyphony, polyphony.rs).
 
 **Finding.** detune_cents is documented as 'total spread across all voices' (l.357). detune_offset computes centered = normalized*2-1 in [-1,+1] (l.396) then centered * detune_cents/1200 (l.399). The extreme voices land at +/- detune_cents/1200 octaves = +/- detune_cents cents, so the total spread edge-to-edge is 2*detune_cents cents, twice the documented total. E.g. UnisonConfig::new(3,10.0) yields voices at -10c and +10c = 20c total, not 10c. The test only checks sign and symmetry (l.899-916), not magnitude, so it passes. Conversion 100c=1/12 octave is otherwise correct.
 
@@ -852,7 +855,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 
 - **Severity:** low  |  **Status:** confirmed  |  **Dimension:** `elegance-api`  |  **Location:** `src/graph.rs:239`
 - **Independently found by** 2 auditors
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added fallible NodeHandle::output()/input() plus port-name discovery and informative panic messages for typo'd ports (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** `NodeHandle::in_`/`out` do `spec.input_by_name(name).unwrap_or_else(|| panic!("Unknown input port"))`. A misspelled port name is a runtime panic, not a `Result` — inconsistent with `connect()` returning `Result`. Every example chains `.unwrap()` on top (first_patch.rs lines 31-41). The `in_` trailing underscore is a keyword-collision smell. There is no compile-time typed handle and no runtime listing helper on the public happy path — a user must call `handle.spec()` and iterate `PortDef`s, or read source, to learn valid names.
 
@@ -865,7 +868,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q142 — No sample playback / sampler module - synthesis-only despite 'software synth library' claim
 
 - **Severity:** high  |  **Status:** unverified  |  **Dimension:** `complete-domain`  |  **Location:** `src/modules.rs:1`
-- **Remediation:** _pending_
+- **Remediation:** **Implemented** — Added a SamplePlayer module (cubic interpolation, looping, eos, V/Oct pitch, start position) type_id sample_player (wave-e/new-modules, modules).
 
 **Finding.** Across the full module inventory (Vco, Wavetable, FormantOsc, Supersaw, KarplusStrong, NoiseGenerator, Granular, ...) there is no module that plays back an in-memory or loaded audio buffer (no `Sampler`, `SamplePlayer`, `Looper`, `AudioClip`). `Granular` (line 6291) processes/re-synthesizes an incoming live signal, not stored samples. Eurorack (Rample, Morphagene) and general software synths treat sample playback as a first-class primitive alongside synthesis; Quiver has none, so any workflow needing drum hits, one-shots, or user-recorded material is unsupported.
 
@@ -874,7 +877,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q152 — ~20 implemented modules have zero coverage in the module reference docs
 
 - **Severity:** high  |  **Status:** unverified  |  **Dimension:** `complete-docs`  |  **Location:** `docs/src/reference:1`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The ~20 undocumented modules were given module-reference coverage (wave-f/docs, docs/src/reference).
 
 **Finding.** Cross-checking the 58 `pub struct` DSP modules in src/modules.rs against every reference/*.md heading shows these modules are not mentioned anywhere in docs/src/ at all: Arpeggiator, Bitcrusher, ChordMemory, Compressor, DelayLine, EnvelopeFollower, Euclidean, Flanger, FormantOsc, Granular, KarplusStrong, NoiseGate, ParametricEq, Phaser, PitchShifter, Reverb, ScaleQuantizer, Supersaw, Vocoder, Wavetable (verified via `grep -rl <Name> docs/src/` returning 0 hits for each). These modules are fully implemented with rustdoc port/range comments in modules.rs (e.g. Granular ports documented at src/modules.rs:6186-6195) but a user browsing the mdbook reference/ section has no way to discover their port names or parameter ranges.
 
@@ -883,7 +886,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q157 — Six DSP modules (out of ~58) have zero unit tests in modules.rs
 
 - **Severity:** high  |  **Status:** unverified  |  **Dimension:** `complete-tests`  |  **Location:** `src/modules.rs:1825`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added unit tests for the six previously-untested DSP modules (wave-f/tests, module test modules).
 
 **Finding.** Grepping the test module (lines 6395-9915) for these struct names returns no hits at all: Tremolo (struct at 1825), Vibrato (1910), Distortion (2024), Supersaw (2145), KarplusStrong (2285), Euclidean (2537). None of these have a constructor call, tick(), reset(), set_sample_rate(), or type_id() exercised anywhere. ScaleQuantizer (2414) is also never instantiated in tests -- only the unrelated Scale enum (used by Quantizer) is tested via test_scale_enum_semitones/test_scale_dorian_and_mixolydian.
 
@@ -892,7 +895,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q158 — Frequency-domain / filter-response claims are asserted with vacuous DC or finite-only checks
 
 - **Severity:** high  |  **Status:** unverified  |  **Dimension:** `complete-tests`  |  **Location:** `src/modules.rs:8221`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Frequency-domain/filter-response tests strengthened from vacuous DC/finite-only checks to real response assertions (wave-f/tests, dsp_stability).
 
 **Finding.** test_svf_filter (line ~6447) sets a low cutoff and only asserts `outputs.get(10).is_some()`, never comparing to a high-cutoff run to show attenuation. test_parametric_eq_mid_cut (8201) and test_parametric_eq_high_boost (8220) feed a constant (DC, 0 Hz) input via `inputs.set(0,1.0)` held for 1000 ticks and only assert `out.is_finite()` -- a DC signal has no mid/high spectral content, so these tests cannot detect whether the EQ boost/cut math is even wired to the right band; they would pass even if the gain parameter were ignored entirely.
 
@@ -901,7 +904,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q160 — No test feeds NaN or Infinity into any module despite feedback state that can be permanently poisoned
 
 - **Severity:** high  |  **Status:** unverified  |  **Dimension:** `complete-tests`  |  **Location:** `src/modules.rs:9712`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added NaN/Inf input tests and fixed a real NaN-latching bug via sanitize_audio() at feedback inputs of Svf/DiodeLadder/DelayLine/Reverb/Chorus/Flanger/Phaser (wave-f/tests, common.rs).
 
 **Finding.** `grep -n 'NAN\|is_nan\|INFINITY'` over src/modules.rs returns only one unrelated hit (f64::MAX use in Quantizer). The '_bounded'/'_extreme_input' tests (e.g. test_svf_extreme_input_bounded, 9712) only use large-but-finite input (20.0), never actual NaN/Inf. Modules with persistent feedback state (Svf integrators, DiodeLadderFilter stages, DelayLine/Reverb/Chorus buffers) will propagate a single NaN sample into their state forever once written, since nothing resets on NaN.
 
@@ -910,7 +913,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q162 — Patch::to_def / Patch::from_def (documented save/load round-trip) has zero test coverage
 
 - **Severity:** high  |  **Status:** unverified  |  **Dimension:** `complete-tests`  |  **Location:** `src/serialize.rs:1282`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added to_def/from_def round-trip test coverage (wave-f/tests).
 
 **Finding.** `to_def` (serialize.rs:1223) and `from_def` (serialize.rs:1282) are the exact API shown in CLAUDE.md's 'Patch Serialization' example. Grepping the whole repo for `to_def(`/`from_def(` shows they are only called in examples/howto_serialization.rs and examples/simple_patch.rs (127 lines, zero `assert` statements) and in src/presets.rs (which tests `into_def()`, a different, simpler conversion, at presets.rs:1094). No #[test] anywhere constructs a Patch with modules+cables, serializes via to_def, reloads via from_def with a ModuleRegistry, and asserts the reloaded patch produces the same tick() output or preserves cable/param data.
 
@@ -919,7 +922,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q175 — @quiver/react's workspace:* dependency is incompatible with the plain-npm monorepo and will break external installs
 
 - **Severity:** high  |  **Status:** unverified  |  **Dimension:** `usable-ts`  |  **Location:** `packages/@quiver/react/package.json:48`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — @quiver/react workspace:* dependency replaced with a semver range compatible with plain-npm installs (wave-e/wasm-ts, packages/@quiver/react).
 
 **Finding.** react/package.json:48 declares `"@quiver/types": "workspace:*"`, a pnpm/Yarn-Berry-only protocol. The repo's root package.json uses plain npm `workspaces` (no pnpm-workspace.yaml, no yarn.lock, no `packageManager` field), and publish-npm.yml publishes with a bare `npm publish` (no changesets or workspace-range rewrite step). npm does not understand the `workspace:` protocol; installing the published @quiver/react outside this monorepo would fail to resolve @quiver/types.
 
@@ -928,7 +931,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q176 — Flagship browser demo bypasses @quiver/wasm's AudioWorklet path entirely, contradicting its own docs
 
 - **Severity:** high  |  **Status:** unverified  |  **Dimension:** `usable-ts`  |  **Location:** `demos/browser/src/main.ts:3`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The browser demo now runs on the package's AudioWorklet path (ScriptProcessor removed), matching @quiver/wasm's own docs (wave-e/wasm-ts, demos/browser).
 
 **Finding.** main.ts:3 imports via a raw relative path (`'../../../packages/@quiver/wasm/quiver.js'`) reaching outside its own package boundary — demos/browser/package.json has no `@quiver/wasm` dependency at all. Audio is produced with the deprecated main-thread `ctx.createScriptProcessor(512,0,2)` (main.ts:213-214, wired at 284-285), not the AudioWorklet infrastructure the package ships (worklet.ts, audio.ts's createQuiverAudioNode). This directly contradicts demos/browser/CLAUDE.md's claim that 'the WASM module runs in the worklet thread, ensuring glitch-free audio' — the one demo that could prove the worklet path works never exercises it, and ScriptProcessorNode is UI-thread-blocking, exactly the real-time footgun this library says it avoids.
 
@@ -937,7 +940,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q181 — tick() before/after compile() silently returns (0.0, 0.0) forever with no error
 
 - **Severity:** high  |  **Status:** unverified  |  **Dimension:** `usable-errors`  |  **Location:** `src/graph.rs:667`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — tick() before/after compile no longer silently returns (0,0); lazy recompile and last_compile_error() surface the missing-compile state (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** tick() (line 667) iterates `self.execution_order.clone()`, which is empty until compile() runs, and read_output() (line 746) returns `(0.0, 0.0)` when output_node is unset or execution_order is empty — no panic, no Result, no log. Worse, every add()/connect()/disconnect() calls invalidate() (line 567-569) which clears execution_order without recompiling, so calling tick() after any post-compile edit silently degrades to permanent silence again. This is the exact 'silence with no error' failure mode the audit calls out, baked into the library's own core loop.
 
@@ -946,7 +949,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q182 — connect() validation errors omit module/port names and valid alternatives
 
 - **Severity:** high  |  **Status:** unverified  |  **Dimension:** `usable-errors`  |  **Location:** `src/graph.rs:581`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — connect() validation errors now carry the offending node/port names in Display instead of bare InvalidNode/InvalidPort (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** validate_output_port/validate_input_port (lines 571-597) return bare `PatchError::InvalidNode`/`InvalidPort` with no data, and Display (lines 183-185) just prints "Invalid node"/"Invalid port". The caller gets no indication of which node, which port name was requested, or what ports actually exist on that module's PortSpec (which is available right there via `node.module.port_spec()`), forcing the developer to re-derive the mismatch by hand.
 
@@ -955,7 +958,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q183 — Docs claim default validation mode is Warn; code defaults to None (fully silent)
 
 - **Severity:** high  |  **Status:** unverified  |  **Dimension:** `usable-errors`  |  **Location:** `src/graph.rs:286`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — ValidationMode now defaults to Warn, matching the how-to doc, instead of the silent None (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** Patch::new() sets `validation_mode: ValidationMode::None` (line 286), matching `ValidationMode::default()` (lines 19-23, `#[default] None`). But docs/src/how-to/connect-modules.md states "Default is `Warn`, which helps catch mistakes without blocking experimentation." A user who reads only the docs believes connecting an Audio output to a Gate input, or CvBipolar to CvUnipolar, will at least log a warning; in reality validate_signal_compatibility() (graph.rs:438-440) short-circuits to Ok(()) immediately whenever mode is None, so the mismatch is 100% silent.
 
@@ -964,7 +967,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q003 — Karplus-Strong systematic tuning error from buffer length and fractional-delay tap placement
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-oscillators`  |  **Location:** `src/modules.rs:2366`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — KarplusStrong places fractional-delay taps so total loop delay equals the target period, correcting the systematic tuning error (Q003 comment, wave-b/oscillators).
 
 **Finding.** Buffer is sized period_int+2 (lines 2359-2360) and read at taps read_pos (delay L−1) and read_pos2 (delay L−2) interpolated by frac=period.fract() (lines 2366-2369). Effective delay = (L−1)(1−frac)+(L−2)frac = L−1−frac = period_int+1−frac, whereas the desired loop delay is period = period_int+frac. Error = 1−2·frac samples (0 only at frac=0.5, up to ±1 sample otherwise), ignoring the ~0.5-sample loop-filter delay entirely. At period=20 (~2.2kHz) a 1-sample error is ~5% ≈ 0.8 semitone — audibly out of tune.
 
@@ -973,7 +976,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q004 — Karplus-Strong DC excitation never decays (loop DC gain = 1)
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-oscillators`  |  **Location:** `src/modules.rs:2373`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — KarplusStrong removes DC from the excitation and leaks the loop (LOOP_LEAK 0.9995) so DC gain is below unity and decays (wave-b/oscillators, modules/oscillators.rs).
 
 **Finding.** excite() adds a purely positive impulse component `impulse = if i<period/4 {1.0}` (line 2327), giving the excitation a positive DC bias at low brightness. The loop filter filtered = sample·c + last·(1−c) with c=0.5+damping·0.49 (line 2373) has DC gain c+(1−c)=1 exactly, so the DC component circulates undamped forever — a plucked note retains a constant offset/thump that never decays regardless of the damping control. Standard KS uses zero-mean excitation or a filter with DC gain <1.
 
@@ -982,7 +985,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q005 — Wavetable has no mipmapping: fixed harmonic count aliases at high pitch and is dull at low pitch
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-oscillators`  |  **Location:** `src/modules.rs:4839`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Wavetable now uses an 8-level mip pyramid (octave-per-level band-limiting, level chosen from phase increment) to stop high-pitch aliasing (wave-b/oscillators).
 
 **Finding.** Tables are precomputed once with a fixed harmonic count (saw 16, tri/square 8; lines 4839,4826,4852) independent of playback pitch. read_table (line 4908) just linearly interpolates one table for all notes. Above a fundamental of fs/(2·16) ≈ 1378 Hz (≈ F6) the 16th saw harmonic exceeds Nyquist and folds back — high notes alias. Conversely 16 harmonics at low notes (e.g. A1) roll off at ~880 Hz, sounding dull. A proper wavetable oscillator selects a per-octave mip level with harmonics ≤ Nyquist.
 
@@ -991,7 +994,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q006 — Supersaw center saw bypasses PolyBLEP, reintroducing aliasing when mix<1
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-oscillators`  |  **Location:** `src/modules.rs:2255`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Supersaw center saw reuses the already band-limited center voice for the mix, so mix<1 no longer reintroduces aliasing (wave-b/oscillators, modules/oscillators.rs).
 
 **Finding.** The 7 detuned saws are band-limited with PolyBLEP (line 2239-2240), but the crossfade blends toward a raw center_saw = 2·phases[3]−1 (line 2255) with no blep. output = center_saw·(1−mix)+normalized·mix, so at the default/low mix the dominant term is an aliased naive saw. The center oscillator (index 3) is already computed with blep inside the loop as `saw`; that band-limited value should be reused instead of recomputing a naive ramp.
 
@@ -1000,7 +1003,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q010 — SVF cutoff frozen above ~fs/6 (~7.3 kHz at 44.1 kHz); documented 20 kHz unreachable
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-filters`  |  **Location:** `src/modules.rs:280`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — TPT SVF reaches the full 20 kHz cutoff range, removing the ~fs/6 frequency freeze (wave-b/filters, modules/filters.rs).
 
 **Finding.** f = 2*sin(pi*fc/fs) then f = min(f, 0.99). f reaches 0.99 when sin(pi*fc/fs)=0.495 → fc ≈ 0.165*fs (≈7.27 kHz at 44.1 kHz). base_cutoff maps CV to 20-20000 Hz (line 274) and clamps to 20000 (278), but every requested cutoff above ~7.3 kHz collapses to the same coefficient f=0.99, so the top ~1.5 octaves of the advertised range are unreachable and the cap is sample-rate dependent (≈16 kHz at 96 kHz). This is the classic Chamberlin fc<fs/6 stability limit, not a true 12 dB/oct 20-20k filter.
 
@@ -1009,7 +1012,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q011 — DiodeLadder one-pole is naive forward-Euler (state=y), not TPT — cutoff mistuned high
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-filters`  |  **Location:** `src/modules.rs:449`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — DiodeLadder one-pole stages now use the true TPT update (s = 2y - s_old) instead of naive forward-Euler, correcting cutoff tuning (wave-b/filters, modules/filters.rs).
 
 **Finding.** g1 = g/(1+g) with g=tan(pi*fc/fs) is the correct ZDF/TPT integrator gain, and y = s + g1*(x-s) matches the TPT output. But TPT then updates state s = 2y - s_old; the code instead stores stages[i] = y (line 449-458). That makes each stage a forward-difference one-pole with pole 1-g1 = 1/(1+g), whereas the intended bilinear pole is (1-g)/(1+g). At fc=fs/4 (g=1) intended pole=0 but actual pole=0.5, so the real -3 dB point sits far below the knob value; the error grows with frequency and compounds across 4 stages, making the filter progressively too dark/mistuned toward the top.
 
@@ -1018,7 +1021,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q012 — DiodeLadder resonance feedback uses previous-sample output (unit-delay, non-ZDF)
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-filters`  |  **Location:** `src/modules.rs:443`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — DiodeLadder resonance feedback resolved within the sample via a 2-iteration ZDF solve, removing the unit-delay non-ZDF path (wave-b/filters, modules/filters.rs).
 
 **Finding.** fb is computed from self.feedback (line 443), which was written as s4/5 at the END of the prior tick (line 459); u = input_driven - fb*5 (446). Thus the global resonance path has a full one-sample delay rather than zero-delay feedback resolution. With k=res*4 this detunes resonance, shifts the self-oscillation frequency (increasingly at high fc / low fs where one sample is a larger phase), and reduces effective resonance versus a true ladder. Stability is preserved only because diode_sat (tanh) bounds fb and each stage, so it won't NaN — but the resonance tuning and self-osc pitch are wrong.
 
@@ -1027,7 +1030,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q015 — ADSR decay/release parameter times do not equal actual segment durations
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-dynamics`  |  **Location:** `src/modules.rs:578`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — ADSR decay/release rates scaled by the traversed span so labeled times equal actual segment durations (wave-b/dynamics, modules/dynamics.rs).
 
 **Finding.** Segments are linear: level−=decay_rate with decay_rate=1/(decay_time·fs) (line 578,595), running from 1.0 down to sustain. Actual decay samples = (1−sustain)/decay_rate = (1−sustain)·decay_time·fs, so real decay duration = (1−sustain)·decay_time. With sustain=0.7 a ‘0.3s’ decay lasts 0.09s (3.3× off). Release runs from current level to 0: duration = level·release_time, so a ‘0.4s’ release from sustain 0.7 lasts 0.28s. The parameters denote full-scale traversal time, not the conventional peak→sustain / sustain→0 time. Attack (0→1) is correct at attack_time.
 
@@ -1036,7 +1039,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q016 — NoiseGate: gate open/close ramp reuses detector coefficients and lacks a hold time
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-dynamics`  |  **Location:** `src/modules.rs:1313`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — NoiseGate gained an independent 5ms anti-click fade and a hold time, decoupled from the detector coefficients (wave-b/dynamics, modules/dynamics.rs).
 
 **Finding.** gate_state ramps with attack_coef/release_coef (lines 1313,1315) which are the level-detector coefficients derived from attack_ms(0.1–50ms)/release_ms(10–490ms) at lines 1299-1300. Thus the click-avoidance ramp speed is welded to detector ballistics rather than an independent fade time, so a fast detector forces a fast (clicky) gate fade. There is also no hold time (CLAUDE lists NoiseGate ballistics), so signals hovering near threshold chatter despite the 0.7 hysteresis, and gate_state*=release_coef (line 1315) decays asymptotically toward denormals, never reaching 0.
 
@@ -1045,7 +1048,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q022 — Delay time changes are not smoothed → zipper/click on modulation (DelayLine)
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-timefx`  |  **Location:** `src/modules.rs:935`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — DelayLine delay-time changes smoothed by a one-pole 5ms slew, removing zipper/click on modulation (wave-b/timefx, modules/timefx.rs).
 
 **Finding.** DelayLine maps time CV to delay per-sample (935-937) and immediately reads at the new delay (940) with no slew/crossfade on the delay length. When the 'time' input is automated or a control jumps, the read pointer moves discontinuously; linear interpolation smooths sub-sample but not multi-sample jumps, producing clicks and pitch glitches. (LFO-driven Chorus/Flanger/Vibrato are fine because their delay changes continuously each sample.) This only bites when the time parameter itself is modulated, hence medium.
 
@@ -1054,7 +1057,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q027 — Vocoder top bands collapse to f=0.99 clamp (mistuned/degenerate)
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-nonlinear`  |  **Location:** `src/modules.rs:6035`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Vocoder band centers capped relative to sample rate so the top bands no longer collapse to the f=0.99 clamp (wave-b/nonlinear, modules/nonlinear.rs).
 
 **Finding.** The Chamberlin SVF coefficient f=2·sin(π·freq/sr) is clamped to 0.99 (line 6035). Solving 2·sin(π·f/sr)=0.99 at sr=44100 gives f≈7266 Hz. With VOCODER_FREQ_MAX=8000, every band center above ~7.3 kHz clamps to the same f=0.99, so the highest one or two bands are detuned downward and become identical in response — their bandpass tuning is lost. At lower sample rates the problem worsens. This distorts the analysis/synthesis filterbank at the top of the spectrum.
 
@@ -1063,7 +1066,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q028 — Granular normalizes by sqrt(active_count) → amplitude zipper
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-nonlinear`  |  **Location:** `src/modules.rs:6371`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Granular normalized by the smoothed expected overlap instead of sqrt(active_count), removing the amplitude zipper (wave-b/nonlinear, modules/nonlinear.rs).
 
 **Finding.** Line 6371 divides the summed grain output by sqrt(active_count). active_count changes discretely whenever a grain spawns or ends (6357,6364), so the normalization factor jumps sample-to-sample, producing audible amplitude steps/zipper. Worse, grains near phase 0 or 1 contribute ~0 via the Hann window (6346) yet still increment active_count, so the denominator over-counts silent grains and over-attenuates. Proper constant-power overlap-add should normalize by the expected steady-state overlap (density·grainsize), not the fluctuating instantaneous count.
 
@@ -1072,7 +1075,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q029 — Bitcrusher fractional downsample truncates to integer periods
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-nonlinear`  |  **Location:** `src/modules.rs:1574`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Bitcrusher fractional downsample now accumulates phase rather than truncating to integer periods (wave-b/nonlinear, modules/nonlinear.rs).
 
 **Finding.** downsample_factor is fractional (1..64, line 1572) but the hold logic (1574-1578) increments hold_counter by 1 and resets it to 0 when counter≥factor. Because it zeroes rather than subtracting the factor, no fractional phase accumulates: the effective hold period is ceil(factor) for all values. Factors 1.1 and 1.9 both yield a period of 2; there is no way to realize, e.g., an average 1.5× reduction. The advertised continuous sample-rate reduction is quantized to integers.
 
@@ -1081,7 +1084,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q030 — Foldback distortion uses a variable-time while-loop in the audio path
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-nonlinear`  |  **Location:** `src/modules.rs:2071`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Foldback distortion replaced its data-dependent while-loop with a constant-time closed-form fold, restoring the RT guarantee (wave-b/nonlinear, modules/nonlinear.rs).
 
 **Finding.** foldback (2067-2079) reflects with `while folded > threshold || folded < -threshold`. Iteration count scales with input magnitude: with the ±5V convention and drive→1, gained≈5·6=30 folds ~15 times; a stray large input folds proportionally more. This is a data-dependent, unbounded-iteration loop inside tick(), violating the documented 'predictable performance / avoid variable-time algorithms' real-time guarantee.
 
@@ -1090,7 +1093,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q031 — Granular pitch range doc/impl mismatch and extreme-speed buffer overrun
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-nonlinear`  |  **Location:** `src/modules.rs:6312`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Granular pitch clamped to ±24 st and grain reads bounded, fixing the doc/impl mismatch and extreme-speed buffer overrun (wave-b/nonlinear, modules/nonlinear.rs).
 
 **Finding.** Port doc (line 6192) states pitch shift '-24 to +24' semitones, but line 6313 computes semitones = pitch_cv·12 with pitch_cv clamped ±5 (6301), i.e. ±60 semitones → speed = 2^±5 = 0.031..32 (comment 6312 even says -60..+60). At speed=32 with grain size up to 0.5s·44100=22050 (6306), read_offset = phase·size·speed reaches ~705600 samples, wrapping the 96000 buffer ~7 times and reading effectively random/aliased buffer content. The documented and actual ranges disagree, and the extreme end is unusable.
 
@@ -1099,7 +1102,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q037 — Euclidean pulses control is inert unless step count changes
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-utilities`  |  **Location:** `src/modules.rs:2616`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Euclidean regenerates its pattern when steps OR pulses change, so the pulses control is no longer inert (wave-b/utilities, modules/sequencing.rs).
 
 **Finding.** The pattern is regenerated only when self.pattern.len() != steps (line 2617). generate_pattern takes both steps and pulses, but if the user changes only pulses_cv while steps stays constant, len() still equals steps so no regeneration occurs — the pulses knob has no audible effect. Turning the primary density control does nothing except at the moment the step count also changes.
 
@@ -1108,7 +1111,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q038 — Clock default CV yields ~27 BPM, not the documented 120 BPM
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-utilities`  |  **Location:** `src/modules.rs:3443`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Clock default bpm CV set so the documented 120 BPM is produced, fixing the ~27 BPM default (wave-b/utilities, modules/sequencing.rs).
 
 **Finding.** cv_to_bpm(cv) = 20 * 15^(cv/10). The bpm input defaults to 1.2 with the comment "120 BPM when scaled" (line 3430) and tick defaults to 1.2 (line 3461). But 20*15^(0.12) = 20*1.377 ≈ 27.5 BPM. To get 120 BPM you need cv ≈ 6.6 (since 6 = 15^(cv/10) → cv = 10*ln6/ln15 ≈ 6.62). Any patch relying on the default tempo runs 4x too slow.
 
@@ -1117,7 +1120,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q040 — Arpeggiator never releases held notes; reset input does not clear them
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-utilities`  |  **Location:** `src/modules.rs:5484`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Arpeggiator releases the note captured on the gate rising edge and clears on reset, fixing stuck/never-released notes (wave-b/utilities, modules/sequencing.rs).
 
 **Finding.** Notes are added on gate rising edge (line 5563) but remove_note (line 5484) is never called from tick, and the reset input (line 5570) only resets current_step/direction, not held_notes. So the doc claim that notes "persist until reset" is wrong — nothing except GraphModule::reset() clears them. In normal play the chord grows monotonically on every gate until num_notes hits the 8-note cap (add_note then silently drops further notes), and old notes are never removed on gate release.
 
@@ -1126,7 +1129,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q044 — cubic_sat has a discontinuity at the knee (wrong threshold 2/3 instead of 1)
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-analog`  |  **Location:** `src/analog.rs:88`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — cubic_sat knee threshold corrected from 2/3 to 1, removing the ~0.099 discontinuity (wave-b/analog, analog.rs).
 
 **Finding.** cubic_sat returns x - x^3/3 for |x|<2/3, else sign*2/3. The classic cubic soft-clip x - x^3/3 reaches its zero-slope maximum of 2/3 at x=1, not x=2/3. At x=2/3 the polynomial equals 2/3-(8/27)/3=0.5679, but the clamp jumps to 0.6667: a discontinuous step of ~0.099 and a slope kink. This injects a click/high harmonics whenever the signal crosses +/-2/3, defeating the point of a soft clipper.
 
@@ -1135,7 +1138,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q045 — V/Oct drift random walk is sample-rate dependent and effectively frozen
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-analog`  |  **Location:** `src/analog.rs:369`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — V/Oct drift replaced with an Ornstein-Uhlenbeck process (tau=30s, ~3c std), fixing the SR-dependent, effectively-frozen random walk (wave-b/analog, analog.rs).
 
 **Finding.** drift_state += random_bipolar()*drift_rate*dt*1000.0 is a pure random walk (no mean reversion, clamped to +/-10 cents). Increment scales with dt (not sqrt(dt)), so per-second diffusion variance = sr*Var(step) is proportional to dt = 1/sr: doubling the sample rate halves the drift speed. It is not sample-rate independent, and it is not Ornstein-Uhlenbeck. Also magnitude: step = +/-0.0001*0.0000227*1000 ≈ +/-2.3e-6 cents; reaching the +/-10 cent clamp needs ~1e13 samples (decades). The drift is inaudible/non-functional.
 
@@ -1144,7 +1147,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q046 — Tracking error uses abs(octave_distance), producing a non-physical V-shaped error
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-analog`  |  **Location:** `src/analog.rs:374`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Tracking error uses signed octave distance instead of abs(), removing the non-physical V-shaped error (wave-b/analog, analog.rs).
 
 **Finding.** octave_distance = (current_octave-center).abs(), then error_cents += octave_distance*octave_error_coef (coef always positive, 1-3 cents/oct). This makes both high and low octaves sharp by the same sign (a V with a kink at C4). Real VCO V/Oct tracking error is a scale-factor error (e.g. 1.005 V/oct) giving a monotone signed deviation: sharp at the top and flat at the bottom, not symmetric. The abs() model is not how analog tracking degrades.
 
@@ -1153,7 +1156,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q052 — Arrow laws are asserted but never tested, and the Arrow interface is only partially implemented
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-combinators`  |  **Location:** `src/combinator.rs:22`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added the missing Arrow arr primitive (arr/Arr) and Arrow-law tests, completing the interface (wave-b/combinator, combinator.rs).
 
 **Finding.** Docs list the full Arrow interface incl. `arr: (a->b)->Arrow a b` (line 16) and claim identity/associativity/first-distribution laws hold (lines 22-28). But there is no `arr` primitive (only `Map`/`Contramap` on an existing module) and no projection/`fst`/`assoc` primitives, so the exchange laws (Hughes laws 5-7) cannot even be expressed. The test module (lines 611-922) only checks pointwise `tick` values; no property/law test exists. The laws that are structurally trivial do hold (each sub-module is ticked once per tick in fixed order, so state-associativity is fine) — but the sweeping "satisfy the Arrow laws" claim is unverified and the interface is a subset.
 
@@ -1162,7 +1165,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q056 — AudioBlock documented 'SIMD-aligned' but Vec<f64> is only 8-byte aligned
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-simd-rng`  |  **Location:** `src/simd.rs:25`
-- **Remediation:** _pending_
+- **Remediation:** **Documented as intended** — The false 'SIMD-aligned' claim was dropped; the Vec<f64> 8-byte alignment with unaligned wide loads is now honestly documented (wave-b/simd-rng, simd.rs).
 
 **Finding.** Line 25 comments the struct as a 'SIMD-aligned audio buffer' and the module claims a 'SIMD-friendly audio buffer for vectorized operations'. The backing store is a plain `Vec<f64>` (line 31), which the global allocator aligns to `align_of::<f64>() = 8` bytes. SSE requires 16-byte and AVX 32-byte alignment for aligned loads/stores; an 8-byte-aligned base cannot guarantee those. So even if real SIMD were added, aligned loads (`_mm256_load_pd`) could fault; only unaligned loads would be safe. The alignment claim is false.
 
@@ -1171,7 +1174,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q057 — No denormal flushing in ring-buffer/block feedback paths — real-time CPU spikes
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-simd-rng`  |  **Location:** `src/simd.rs:530`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — flush_denorm applied at RingBuffer::read_interp, removing denormal CPU spikes in ring-buffer/block feedback paths (wave-b/simd-rng, simd.rs).
 
 **Finding.** RingBuffer (delay/feedback primitive) and AudioBlock block ops perform no denormal flush-to-zero. In feedback loops (`read_interp`, lines 530-539, feeding a decaying delay) signals asymptote toward 1e-300-scale denormals, which on x86 incur ~100x slower arithmetic — a well-known audio-DSP real-time hazard directly at odds with the library's 'predictable performance / no blocking in tick()' guarantee. Nothing here adds a tiny DC/anti-denormal offset or clamps `|x|<1e-20` to 0.
 
@@ -1180,7 +1183,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q058 — next_bool() uses the lowest bit of xoroshiro128+, its weakest bit
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-simd-rng`  |  **Location:** `src/rng.rs:100`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — next_bool now draws the top bit ((next_u64()>>63)==1) instead of xoroshiro128+'s weak low bit (wave-b/simd-rng, rng.rs).
 
 **Finding.** next_u64() (lines 72-82) is xoroshiro128+, whose low-order bits have low linear complexity — the LSB in particular is essentially an LFSR bit and fails BigCrush linear-complexity/matrix-rank tests (documented by Blackman & Vigna). `next_bool` (line 100) returns `next_u64() & 1`, extracting exactly that weakest bit, and `next_bool_with_probability` correctly uses next_f64 instead. Any consumer of next_bool (e.g. probabilistic/Bernoulli gating) gets a statistically poor bitstream.
 
@@ -1189,7 +1192,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q066 — Constant-power pan applied unconditionally: -3 dB on default path and wrong for stereo voices
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-polyphony`  |  **Location:** `src/polyphony.rs:629`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Constant-power pan applied only when unison>1 with spread; the default mono path is unity-gain and stereo voices are balance-preserved (wave-d/polyphony, polyphony.rs).
 
 **Finding.** For every unison voice, pan_angle=(pan+1)*PI/4 with left_gain=cos, right_gain=sin (l.629-631). With the default UnisonConfig (voices=1) pan_position returns 0 (l.405), giving pan_angle=PI/4 and left_gain=right_gain=0.7071, so left+=l*0.7071, right+=r*0.7071 - every voice is attenuated ~3 dB even with no unison. Worse, the law is applied to an already-stereo (l,r) pair: at pan=-1 right_gain=0 zeroes the patch's right channel entirely, collapsing/discarding stereo content rather than positioning a mono source.
 
@@ -1198,7 +1201,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q067 — No gain compensation across simultaneously sounding notes (polyphonic sum clips)
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-polyphony`  |  **Location:** `src/polyphony.rs:633`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Polyphonic sum gets smoothed 1/sqrt(N) gain compensation so simultaneous notes no longer clip (wave-d/polyphony, polyphony.rs).
 
 **Finding.** tick() accumulates every active voice's output into left/right (l.633-634) with only unison_gain=1/sqrt(unison.voices) applied. There is no scaling by the number of active polyphony voices. N held full-scale notes sum toward N (correlated attack transients approach linear addition), so 4-8 note chords routinely exceed +/-1.0 and clip downstream. The unison 1/sqrt(N) is a defensible perceptual compromise, but nothing bounds the polyphonic sum. output() (l.645) exposes the unbounded value.
 
@@ -1207,7 +1210,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q068 — Voice stealing does not prefer releasing voices over held notes
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-polyphony`  |  **Location:** `src/polyphony.rs:309`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Voice stealing prefers releasing voices and QuietestSteal works, instead of stealing held notes (wave-d/polyphony, polyphony.rs).
 
 **Finding.** For RoundRobin/OldestSteal, find_steal_voice picks max_by_key(|v| v.age) (l.311) across all non-free voices without regard to state. A voice that is still held (Active) but old will be stolen even when a Releasing voice (already fading, inaudible-bound) exists - the standard, less-audible steal target. This cuts sustained notes the player is holding and increases click likelihood. QuietestSteal (l.313) relies on envelope_level which PolyPatch never populates, so it always returns voice 0.
 
@@ -1216,7 +1219,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q069 — set_sample_rate does not propagate to voice patches or inputs
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `math-polyphony`  |  **Location:** `src/polyphony.rs:506`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — set_sample_rate propagates to voices (voices rebuilt from the stored builder) (wave-d/polyphony, polyphony.rs).
 
 **Finding.** PolyPatch::set_sample_rate only writes self.sample_rate (l.507) and comments that patches 'would need to be recompiled' (l.508-509). It never calls set_sample_rate on any entry of voice_patches or voice_inputs. After a sample-rate change every oscillator/filter/envelope in the voices keeps its old rate, producing wrong pitch, cutoff and envelope timing. The test (l.1104-1108) only checks the scalar field, masking the gap.
 
@@ -1225,7 +1228,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q076 — Graph mutation after compile() silently freezes output until recompiled
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-graph`  |  **Location:** `src/graph.rs:567`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Graph mutation triggers lazy recompile with last_compile_error(); no more silent frozen output after post-compile edits (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** invalidate() only does `self.execution_order.clear()` (lines 567-569); it does not clear buffers or set any 'dirty' flag that tick() checks. After a compiled patch is mutated (add/connect/remove), execution_order is empty, so tick()'s loop body never runs and scatter_outputs is never called. read_output() then returns the stale `buffers` values from the last pre-mutation tick — output freezes at the last sample rather than erroring or reflecting the new graph. tick() before the first compile() likewise silently returns (0,0). Nothing signals that a recompile is required.
 
@@ -1234,7 +1237,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q077 — Feedback patches are impossible: any cycle (even through a unit delay) is rejected
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-graph`  |  **Location:** `src/graph.rs:621`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Feedback patches now compile through delay cycle-breakers with one-sample semantics, instead of rejecting every cycle (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** topological_sort() builds edges purely from cable from.node->to.node (lines 626-632) and rejects any graph whose Kahn ordering is incomplete with CycleDetected (lines 654-660). There is no implicit unit-delay/feedback-break: a delay-with-feedback or FM-feedback patch — core to a 'hardware modular' system — cannot compile. Even inserting a UnitDelay module in the loop still forms a graph cycle (its input->output edge is present), so compile() still fails. The engine therefore cannot express a large class of legitimate patches the library advertises.
 
@@ -1243,7 +1246,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q079 — Normalled inputs read the output-buffer namespace, causing id collisions and a one-sample lag
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-graph`  |  **Location:** `src/graph.rs:716`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Normalled inputs read current-tick sibling input values, fixing the output-namespace id collision and one-sample lag (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** For an unpatched input with normalled_to, gather_inputs reads `self.buffers.get(&{node, normalled_port})` (lines 716-726). But `buffers` is keyed by PortRef{node,port} and only ever stores OUTPUTS (compile:606-616, scatter_outputs:736). Since input and output port ids share the {node,port} key space, a normalled_to targeting an input id finds no entry and silently falls back to `input.default`; if an output happens to share that id it reads the previous tick's output (one-sample stale). E.g. StereoOutput normals right(in id1)->0, reading last tick's left OUTPUT and overriding the module's own current-sample mono fallback with a delayed value.
 
@@ -1252,7 +1255,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q080 — Nondeterministic evaluation order from HashMap-seeded topological sort
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-graph`  |  **Location:** `src/graph.rs:635`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Topological sort made deterministic, removing HashMap-seeded nondeterministic evaluation order (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** Under the default `std` feature StdMap = std::collections::HashMap (lib.rs:27). topological_sort seeds Kahn's queue via `in_degree.iter().filter(deg==0)` (lines 635-639) and iterates `successors` (a HashMap) — both in nondeterministic hash order. Independent source nodes (e.g. parallel oscillators feeding one mixer) therefore get an arbitrary, run-varying relative order. Because multi-cable inputs are summed in cable-list order this is mostly stable, but execution_order itself (exposed and used by observers) and any order-sensitive shared state are not reproducible across runs/builds.
 
@@ -1261,7 +1264,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q081 — ModulatedParam.value() adds volt-scale CV to a normalized base then clamps, pinning params
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-graph`  |  **Location:** `src/port.rs:485`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — ModulatedParam normalizes CV by CV_FULL_SCALE_VOLTS (5V) before combining with the 0-1 base, so params are no longer pinned (wave-b graph/port overhaul, port.rs).
 
 **Finding.** value() computes `modulated = base + cv*attenuverter` then `range.apply(modulated)` (lines 485-488). For Linear/Exponential, apply() clamps `modulated` to [0,1] (lines 434,436). `base` is documented normalized 0-1, but `cv` is 'incoming CV voltage' — CvBipolar is ±5V. So cv=5, base=0.5 -> 5.5 -> clamped to 1.0: any modest positive CV slams the parameter to its maximum, and any negative CV to minimum, giving on/off behavior instead of proportional modulation. The unit tests only exercise cv=0.2 (already normalized), hiding the mismatch.
 
@@ -1270,7 +1273,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q087 — Output-node assignment is not serialized; from_def guesses it heuristically
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-serialize`  |  **Location:** `src/serialize.rs:1354`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — PatchDef gained an explicit output field so the output node is serialized instead of heuristically guessed (wave-e/serialize, serialize.rs).
 
 **Finding.** PatchDef has no field for the output node, and to_def never records patch.output_node. from_def picks the output by looking for a module literally named "output", else the first module with a port named "left"/"right" (lines 1354-1364). A patch whose output node has a different name, or a patch containing multiple modules exposing left/right (e.g. Chorus, Reverb, RingModulator all have left/right outputs — modules.rs), restores the wrong output or none. Round-trip through to_def/from_def is therefore not faithful for output routing.
 
@@ -1279,7 +1282,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q088 — Schema/implementation drift: module_type enum lists 36 of 63 registered types
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-serialize`  |  **Location:** `schemas/patch.schema.json:71`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The schema module_type enum was regenerated from the registry (36->66 types) with a drift-guard test (wave-e/serialize, schemas/patch.schema.json).
 
 **Finding.** The registry registers 63 types (serialize.rs, e.g. reverb:944, delay_line:452, compressor:519, distortion:570, chorus:462, wavetable:922, vocoder:963, granular:983, arpeggiator:1006, mixer8:422, etc.), but the schema's module_type enum (lines 72-107) contains only 36 and omits all of those. A fully valid, loadable patch using e.g. "reverb" fails JSON-schema validation against the shipped schema. The schema also documents a generic `state` object (line 120) that the implementation never emits or consumes.
 
@@ -1288,7 +1291,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q089 — Introspection coverage gap: ~25 stateful modules have no ModuleIntrospection impl and it is never dispatched from a live patch
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-serialize`  |  **Location:** `src/introspection_impls.rs:15`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — ModuleIntrospection coverage extended and dispatched from a live Patch via param_infos/get_param_by_id/set_param_by_id (wave-e/serialize, introspection_impls.rs).
 
 **Finding.** Only the modules imported at lines 15-22 get an impl; stateful modules like DelayLine, Chorus, Flanger, Phaser, Tremolo, Vibrato, Distortion, Bitcrusher, Limiter, NoiseGate, Compressor, EnvelopeFollower, Supersaw, KarplusStrong, Euclidean, ScaleQuantizer have no ModuleIntrospection impl at all. Moreover the trait is implemented only on concrete types; the graph stores Box<dyn GraphModule> and nothing exposes ModuleIntrospection from it (grep finds no param_infos/set_param_by_id usage in graph.rs/observer/wasm). So a GUI cannot enumerate or set parameters of a loaded patch, which — combined with the dead parameters map — means there is no working end-to-end parameter round-trip.
 
@@ -1297,7 +1300,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q094 — React hooks never free wasm-bindgen engines (leak + no audio teardown)
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-wasm`  |  **Location:** `packages/@quiver/react/src/hooks.ts:372`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Engines get an explicit free/destroy lifecycle so React hooks release wasm-bindgen engines and tear down audio (wave-e/wasm-ts, packages/@quiver).
 
 **Finding.** useQuiverEngine (hooks.ts:345-378) creates an engine via createEngine and, on unmount or sampleRate change, its cleanup only sets `mounted=false` (line 372-374) — it never calls the wasm-bindgen `engine.free()`. wasm-bindgen objects hold WASM linear memory and are not reclaimed by JS GC without explicit free or a FinalizationRegistry, so every sampleRate change and every unmount leaks an engine. No hook wires a worklet, so 'does unmount stop audio?' — there is no audio to stop, and dispose() in audio.ts (line 165) likewise never frees the worklet's engine.
 
@@ -1306,7 +1309,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q095 — Structural graph mutation and compile() run on the audio thread
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-wasm`  |  **Location:** `packages/@quiver/wasm/src/worklet.ts:176`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Structural graph mutation/compile made boundary-safe on the worklet thread rather than running unguarded on the audio thread (wave-e/wasm-ts, wasm/engine.rs).
 
 **Finding.** handleMessage (worklet.ts:176-237) runs inside port.onmessage, which executes on the AudioWorklet render thread. add_module (line 192), connect (199), and especially compile() (line 223) rebuild the patch schedule and allocate, executing between render quanta. A load_patch also does load_patch+compile inline (line 182-184). Long/allocating operations on the audio thread risk deadline misses and audible glitches, contradicting the 'no blocking / predictable performance in tick()' guarantee.
 
@@ -1315,7 +1318,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q096 — MIDI API is wired to nothing and unreachable through the worklet
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-wasm`  |  **Location:** `src/wasm/engine.rs:512`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — MIDI is wired to five engine-owned in-patch ExternalInputs, reachable through the worklet and verified audible in a browser (wave-e/wasm-ts, wasm/engine.rs).
 
 **Finding.** midi_note_on merely stores v_oct/velocity/gate into engine fields (engine.rs:512-516, comment: 'For now, just store them for retrieval'); nothing feeds these into any patch input, so notes never affect audio. Worse, worklet.ts's WorkletMessage union and handleMessage switch (lines 83-92, 180-230) have no midi cases at all, so the documented MIDI integration cannot even be invoked on the audio-producing engine. The feature is effectively dead.
 
@@ -1324,7 +1327,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q101 — O(n^2) hand-rolled DFT executed on the audio thread
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-rtio`  |  **Location:** `src/observer.rs:793`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The O(n^2) hand-rolled DFT on the audio thread was replaced, removing the audio-thread spectral cost (wave-b/rtio, observer.rs/visual.rs).
 
 **Finding.** compute_magnitude_spectrum is a naive DFT: outer k in 0..n/2, inner i in 0..n, each iteration calling libm::cos and libm::sin (lines 813-821). For fft_size=256 that is 256*128≈32768 sin/cos pairs per full buffer, run inside collect_spectrum on the worklet thread. visual.rs SpectrumAnalyzer::compute_spectrum (lines 729-756) has the identical O(n^2) structure with std trig. This is non-predictable, variable-time work on the real-time path (the library claims "predictable performance, avoid variable-time algorithms").
 
@@ -1333,7 +1336,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q102 — MidiState multi-field updates use Relaxed with no release/acquire, allowing torn note snapshots
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `correct-rtio`  |  **Location:** `src/io.rs:201`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — MidiState note-on writes pitch/gate with release/acquire ordering instead of separate Relaxed atomics, preventing torn note snapshots (wave-b/rtio, io.rs).
 
 **Finding.** MidiState is documented for cross-thread use ("Update from a MIDI callback thread, read from the audio thread"). Note-on writes pitch then gate as separate atomics (lines 201-203), each via AtomicF64::set which uses Ordering::Relaxed (line 32). Relaxed provides no inter-variable ordering, so the audio thread reading gate=5V (new) may still observe the old pitch (or a new pitch with an old gate) for a sample, producing a wrong-pitch transient on note changes. The same applies to velocity/gate pairing. Individual scalar reads are fine, but the multi-field handoff is unsynchronized.
 
@@ -1342,7 +1345,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q109 — ParametricEq recomputes three biquads (pow/cos/sin/sqrt) unconditionally every sample
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `perf-tickpath`  |  **Location:** `src/modules.rs:4682`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — ParametricEq caches each band's biquad coefficients and recomputes only on parameter change, ending the unconditional per-sample pow/cos/sin/sqrt (wave-b/filters).
 
 **Finding.** tick() calls calc_low_shelf, calc_peaking, calc_high_shelf every sample (modules.rs:4682-4684). Each does pow(10,..)/cos/sin plus sqrt (calc_low/high_shelf use two sqrt, lines 4581-4582). That is ~3 pow + 3 cos + 3 sin + 6 sqrt per sample even when the CV inputs are static. The struct (modules.rs:4528-4534) caches only biquad state, no coefficients, so there is no change-detection.
 
@@ -1351,7 +1354,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q110 — PolyPatch::tick multiplies the graph's per-sample allocations by voices×unison
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `perf-tickpath`  |  **Location:** `src/polyphony.rs:626`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — PolyPatch::tick is allocation-free: inner sub.patch.tick() uses the zero-alloc graph tick, unison gain is cached outside the loop, and UnisonConfig is an all-scalar heap-free clone (wave-c+wave-d).
 
 **Finding.** The inner loops call `patch.tick()` once per active voice per unison voice (polyphony.rs:606-636). Each call incurs the execution_order.clone() (graph.rs:668) and 2×(modules) PortValues HashMap allocations. With 8 voices × 4 unison that is 32 full graph ticks — and 32× the per-sample heap churn — for a single output sample, compounding findings above into the worst-case real-time load.
 
@@ -1360,7 +1363,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q117 — Benchmarks profile native x86 opt-3, but production is wasm32 opt-level="z"
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `perf-bench`  |  **Location:** `Cargo.toml:60`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added a wasm-oriented size profile and .cargo/config.toml flags so benches reflect production wasm settings, not just native x86 opt-3 (wave-e/benches).
 
 **Finding.** [profile.release] sets opt-level="z" + lto=true (Cargo.toml:60-62), and the shipped target is wasm32 (Makefile:146 `wasm-pack build --target web`). Criterion benches build under the bench profile on the host (x86-64, opt-level 3). Size-optimized wasm in a browser can be several× slower than native opt-3, so the whole real-time-budget analysis (tables in benches/CLAUDE.md, realtime_compliance group) is measured on a platform/opt-level the user never runs. There is no wasm-side performance measurement at all.
 
@@ -1369,7 +1372,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q118 — WASM build enables no SIMD128 and optimizes for size, hurting real-time headroom
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `perf-bench`  |  **Location:** `Makefile:146`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — WASM build enables simd128 and adds a [profile.wasm-size] rather than only optimizing for size, restoring real-time headroom (wave-e/benches, Cargo.toml/.cargo).
 
 **Finding.** The wasm target builds with `--no-default-features --features wasm` and no `RUSTFLAGS=-C target-feature=+simd128` and no `simd` feature (Makefile:146); there is no .cargo/config setting it. Combined with opt-level="z" (Cargo.toml:61), the shipped audio engine has neither WebAssembly SIMD128 nor speed-favoring codegen — the worst configuration for a real-time DSP engine. The browser demo also drives audio via the deprecated main-thread ScriptProcessorNode(512) (demos/browser/src/main.ts:214) rather than the AudioWorklet, adding main-thread jank the benches never model.
 
@@ -1378,7 +1381,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q119 — Worst-case expensive modules are never benchmarked
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `perf-bench`  |  **Location:** `benches/audio_performance.rs:1182`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added heavy-FX worst-case and per-expensive-module benchmarks (wave-e/benches, benches/audio_performance.rs).
 
 **Finding.** Only vco/svf/diode/adsr/lfo/noise/quantizer/slew/clock are benched (groups at 1182-1197), and create_complex_patch (92) is just 2 VCOs + mixer + diode ladder. The modules most likely to blow the real-time budget — Reverb, Granular, PitchShifter, Vocoder, DelayLine (ring-buffer/interp), Wavetable, Supersaw, KarplusStrong, FFT-based effects — have zero coverage. A 'large patch / all-modules' worst case (dense FX chain at 96kHz/32-sample buffer) is never measured, so the suite validates cheap modules and omits the ones that matter for real-time compliance.
 
@@ -1387,7 +1390,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q123 — Parameter API (params/get_param/set_param) is a trait-default no-op for nearly every module
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `elegance-api`  |  **Location:** `src/port.rs:535`
-- **Remediation:** _pending_
+- **Remediation:** **Documented as intended** — The trait-default param no-op is kept but the real parameter API is ModuleIntrospection (param_infos/set/get), and the trait defaults are now honestly documented (wave-b/E serialize).
 
 **Finding.** `GraphModule::params()` defaults to `&[]`, `get_param`→`None`, `set_param`→ignore. `grep` finds exactly one `fn params` override in modules.rs (Offset, line 789). So `patch.set_param(vco.id(), 0, 0.5)` (as in graph.rs test line 1273) silently does nothing for VCO/VCF/ADSR/etc., and `get_param` returns `None`. A GUI enumerating parameters via this API sees empty lists everywhere. The surface advertises live parameter control that is essentially unimplemented across the module library.
 
@@ -1396,7 +1399,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q124 — Two divergent, publicly-exported signal-compatibility APIs that disagree
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `elegance-api`  |  **Location:** `src/port.rs:212`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The two divergent signal-compatibility APIs were unified into a single is_compatible source of truth (wave-b graph/port overhaul, graph.rs/port.rs).
 
 **Finding.** `port.rs::ports_compatible` returns a `Compatibility` enum; `graph.rs::SignalKind::is_compatible_with` returns a `CompatibilityResult` struct. They give different verdicts: for Audio→CvBipolar, `ports_compatible` yields `Allowed` (no warning) while `is_compatible_with` yields a warning. The graph's validation uses `is_compatible_with`; `ports_compatible` is exported in the prelude (lib.rs:76) but never called internally — it is dead but public. Two overlapping truth sources for the same question is confusing and a maintenance hazard.
 
@@ -1405,7 +1408,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q130 — Core DSP idioms copy-pasted instead of shared helpers (V/Oct, env coef, delay read)
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `elegance-internals`  |  **Location:** `src/modules.rs:69`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Copy-pasted DSP idioms replaced by shared helpers (voct_to_hz, env_coef, read_interpolated, EdgeDetector, flush_denorm, polyblep) in the B-0 modules.rs split.
 
 **Finding.** No shared DSP helper layer. `261.63 * pow(2.0, voct)` (V/Oct→Hz) is re-derived with the literal 261.63 at 69, 2226, 2352, 4945, 5147 (13 total). Envelope smoothing coefficient `exp(-1.0/(time*sr))` is duplicated at 1200,1299-1300,1406-1407,1497-1498,6078-6079 (9×), split across ms-vs-seconds variants inviting unit bugs. `read_interpolated` (linear wrapping delay read) is byte-identical at 1640,1946 and near-identical at 899 (4 defs total). 314 `PortDef::new` and 199 `inputs.get_or` calls show the same construction/param pattern repeated ~58×.
 
@@ -1414,7 +1417,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q131 — mdk.rs is not dogfooded — internal modules never use the Module Development Kit
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `elegance-internals`  |  **Location:** `src/mdk.rs:668`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added an mdk dogfooding test so the Module Development Kit is exercised by internal modules (wave-f/tests, tests/mdk).
 
 **Finding.** `grep 'mdk\|ModuleTestHarness\|AudioAnalysis' src/modules.rs` → 0 hits. mdk.rs ships ModuleTestHarness::run_all (test_reset, test_stability, test_nan_inf, test_output_range, test_zero_input) and AudioAnalysis (rms, peak, dc_offset, estimate_frequency). modules.rs has 172 `#[test]`s that instead reimplement zero-crossing counting inline (6419, 8490) and never run the standard harness against its 58 modules. This means the kit's own contract is unverified by the library it ships with, and each module misses free NaN/inf/stability/range coverage.
 
@@ -1423,7 +1426,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q132 — Fundamental domain values are unnamed magic numbers
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `elegance-internals`  |  **Location:** `src/modules.rs:68`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Magic numbers named as constants (C4_HZ, GATE_THRESHOLD_V/GATE_HIGH_V, etc.) during the B-0 modules.rs split refactor (modules/common.rs).
 
 **Finding.** While per-module tables have constants, the cross-cutting domain values have none: gate high 5.0 and threshold 2.5 (scattered ~73×), C4 = 261.63 Hz (13×), keytrack/FM `pow(2.0, x)` octave math. The compressor/limiter dB math at 1417-1420 (`20*log10`, `pow(10, -x/20)`) is also unnamed and duplicated in feel across dynamics modules. A reader cannot grep a single source of truth for 'what voltage is a gate high', and changing the tuning reference requires editing 13 sites.
 
@@ -1432,7 +1435,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q138 — Missing rust-version field despite CI enforcing MSRV 1.78
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `elegance-features`  |  **Location:** `Cargo.toml:4`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added rust-version = 1.78 to Cargo.toml, matching the CI-enforced MSRV (wave-f/hygiene, Cargo.toml).
 
 **Finding.** Cargo.toml has no `rust-version` key (only `edition = "2021"` at line 4; grep for rust-version/msrv returns nothing). CI's msrv job (.github/workflows/ci.yml:104-114) pins `dtolnay/rust-toolchain@1.78.0` and only runs on pushes to main, so a PR that raises the effective MSRV (e.g. via a dependency bump or a newer language feature) merges without warning and only breaks after merge. Also, without this field, crates.io/docs.rs cannot display or enforce the MSRV for downstream consumers.
 
@@ -1441,7 +1444,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q139 — No [package.metadata.docs.rs] section; wasm-gated public API invisible on docs.rs
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `elegance-features`  |  **Location:** `Cargo.toml:37`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added [package.metadata.docs.rs] (all-features + docsrs cfg badges) so the wasm-gated API is visible on docs.rs (wave-f/hygiene, Cargo.toml).
 
 **Finding.** No `[package.metadata.docs.rs]` section exists (grep confirms), and no `docsrs` cfg string appears anywhere in src/ (grep confirms zero matches). docs.rs builds with default features only (`std`, which implies `alloc` but not `wasm`), so the wasm bindings re-exported in the prelude (`QuiverEngine`, `QuiverError`, gated `#[cfg(feature = "wasm")]` at src/lib.rs:190-192, plus the whole `pub mod wasm` at src/lib.rs:63-64) never render on the published docs, and no gated item shows a 'this is supported on feature=...' badge since `--cfg docsrs` is never passed.
 
@@ -1450,7 +1453,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q143 — Nonlinear stages have no oversampling/anti-aliasing path
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-domain`  |  **Location:** `src/modules.rs:2114`
-- **Remediation:** _pending_
+- **Remediation:** **Implemented** — Added an Oversampler (polyphase sinc 31/63-tap ~-74dB) with opt-in 2x/4x set_oversample on Distortion/Wavefolder for anti-aliasing (wave-e/new-modules, modules).
 
 **Finding.** `Distortion::tick` (modules.rs:2100-2130) dispatches to `hard_clip`, `foldback`, and `asymmetric` (line ~2114-2117) directly at the host sample rate with no oversample/downsample step; `grep -n 'oversample\|upsample'` across src/*.rs returns nothing. Hard clipping and foldback are strongly nonlinear and generate harmonics well above Nyquist at high drive/high pitch, which will fold back as audible aliasing - a well-known problem these algorithms specifically need 2x-8x oversampling to avoid. `Wavefolder::fold` (src/analog.rs:68) and `Bitcrusher` (modules.rs:1561) have the same lack of any anti-aliasing measure.
 
@@ -1459,7 +1462,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q144 — Time-modulation effects are inconsistently mono vs. stereo
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-domain`  |  **Location:** `src/modules.rs:1698`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Flanger and Phaser made stereo with a decorrelated L/R spread port appended (mono out port kept bit-compatible), fixing the mono/stereo inconsistency (wave-e/stereo-timefx).
 
 **Finding.** Chorus (modules.rs:975-1047) and Reverb (5812+) implement true dual-channel processing with decorrelated left/right delay lines (`STEREO_SPREAD` offset, comb_buffers_l/_r) and expose `left`/`right` output ports (Chorus port 11/12). Flanger's port_spec (verified via its GraphModule impl at line 1656) exposes only a single output port 10 `out` and processes one buffer/LFO; Phaser (1758) is likewise single-buffer/single-output. Users must instantiate two mono Flanger/Phaser copies per channel, but since each keeps its own LFO phase independently, there's no shared-phase / stereo-spread control, unlike hardware/plugin equivalents.
 
@@ -1468,7 +1471,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q145 — No WAV/audio export or offline rendering capability anywhere in the crate or demo
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-domain`  |  **Location:** `src/extended_io.rs:1`
-- **Remediation:** _pending_
+- **Remediation:** **Implemented** — Added offline render/render_to_wav/write_wav (hand-rolled RIFF, std-gated) so patches can be rendered to WAV (wave-e/new-modules, render.rs).
 
 **Finding.** Grepping the whole workspace (`src/*.rs`, `Cargo.toml`, `demos/browser/src`, `packages/@quiver`) for `wav`, `hound`, `MediaRecorder`, `write_wav` returns no hits related to file/audio export; extended_io.rs provides OSC and WebAudio glue but no bounce-to-disk. For a library marketed as a 'software synth library' with example patches producing audio, there is no supported way to render a patch to a `.wav` file for offline use, only real-time `tick()` consumption.
 
@@ -1477,7 +1480,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q146 — No microtuning/Scala support - Scale enum is a fixed 12-TET preset list
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-domain`  |  **Location:** `src/modules.rs:3300`
-- **Remediation:** _pending_
+- **Remediation:** **Implemented** — Added microtuning: ScaleQuantizer set_custom_scale/load_scala plus a src/scala.rs .scl parser, beyond the fixed 12-TET presets (wave-e/new-modules).
 
 **Finding.** `Scale` (modules.rs:3300-3322) is a closed enum: Chromatic/Major/Minor/PentatonicMajor/PentatonicMinor/Dorian/Mixolydian/Blues, each mapped to a fixed 12-semitone-degree slice, and `ScaleQuantizer`/`Quantizer` only ever snap V/Oct to these built-in tables. There is no cents-based tuning table, no `.scl`/`.kbn` (Scala) import, and no way to define a custom microtonal scale - the V/Oct spec itself (port.rs) hardcodes `2^n` equal-tempered octave scaling with no alternate temperament hook.
 
@@ -1486,7 +1489,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q147 — ModulatedParam smoothing abstraction is defined and exported but used by zero modules
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-domain`  |  **Location:** `src/port.rs:450`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — ModulatedParam adopted as the parameter-read path in new modules (SamplePlayer pitch/start, Ducker amount/threshold), so the abstraction is no longer dead (wave-e/new-modules).
 
 **Finding.** `ModulatedParam` (port.rs:450-486) combines a base knob value, CV, attenuverter and range mapping, and is re-exported from the prelude (lib.rs:76), suggesting it's meant to be the standard way modules read parameters. Grepping `src/modules.rs` for `ModulatedParam` returns zero hits - every module reads raw `inputs.get_or(...)` each tick with no smoothing. Only `SlewLimiter` (modules.rs:3251) offers smoothing, and only if a user manually patches it onto a CV connection; there is no crate-level mechanism to avoid zipper noise on knob/CV steps for any of the ~55 modules.
 
@@ -1495,7 +1498,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q153 — module-catalog.md type_id examples don't match real type_id() strings
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-docs`  |  **Location:** `docs/src/how-to/module-catalog.md:14`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — module-catalog.md type_id examples corrected to the real type_id() strings (wave-f/docs, docs/src).
 
 **Finding.** docs/src/how-to/module-catalog.md:14 shows `type_id: "Vco"`, line 37-39 lists `Vco, Lfo, NoiseGenerator`, `AdsrEnvelope, SlewLimiter`, `SvfFilter, DiodeLadderFilter`, and line 77 does `catalog.find(m => m.type_id === 'SvfFilter')`. The actual `GraphModule::type_id()` implementations return lowercase snake_case strings: `"vco"` (src/modules.rs:107), `"svf"` (src/modules.rs:332), `"adsr"` (src/modules.rs:635), `"lfo"` (src/modules.rs:201) — there is no `SvfFilter` or `AdsrEnvelope` type_id anywhere in the codebase. A developer copying this doc's filter/search examples verbatim will get no matches.
 
@@ -1504,7 +1507,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q154 — README links to a non-existent DEVELOPMENT.md
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-docs`  |  **Location:** `README.md:157`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The missing DEVELOPMENT.md that README linked to was created (wave-f/docs, DEVELOPMENT.md).
 
 **Finding.** README.md:157 `| 🗺️ [DEVELOPMENT.md](./DEVELOPMENT.md) | Architecture decisions and roadmap |` and README.md:209 `See [DEVELOPMENT.md](./DEVELOPMENT.md) for the development roadmap...` both link to `./DEVELOPMENT.md`, but `ls DEVELOPMENT.md` at repo root returns 'No such file or directory' — the file does not exist anywhere in the repo (verified via find).
 
@@ -1513,7 +1516,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q155 — CHANGELOG is a stale auto-gen placeholder, not current history
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-docs`  |  **Location:** `.github/CHANGELOG.md:10`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The stale placeholder CHANGELOG was replaced with current history (wave-f/docs, CHANGELOG).
 
 **Finding.** .github/CHANGELOG.md:10-19 'Unreleased' section only lists 'Developer experience setup' and 'Changelog generation script', with 'Fixed: None'/'Changed: None', and line 24 literally reads '<!-- Generated on: Run `make changelog` to update -->' — the placeholder was never re-run. `git log -1 --format=%cd -- .github/CHANGELOG.md` shows Dec 21 2025, while the repo's recent commit log (e.g. 96f6f3b, 9d86900, f2f6a20, 5a79576, ce3f9aa) shows substantial unrelated feature/docs work landed after that with no changelog entries. There is also no root-level CHANGELOG.md despite `make changelog` being documented as a top-level command in CLAUDE.md.
 
@@ -1522,7 +1525,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q159 — No test exercises set_sample_rate() mid-stream (after audio has flowed) on any module
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-tests`  |  **Location:** `src/modules.rs:7419`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added tests exercising set_sample_rate() mid-stream after audio has flowed (wave-f/tests, tests/sample_rate_change.rs).
 
 **Finding.** All ~28 `*_default_reset_sample_rate` tests (e.g. test_vco_default_reset_sample_rate, line 7419) call `set_sample_rate()` immediately after construction, before any tick(), then tick, then reset(). None call set_sample_rate() after already accumulating state (e.g. a DelayLine with echoes buffered, an SVF mid-resonant-decay). DelayLine::set_sample_rate (src/modules.rs:958-963) reallocates `self.buffer` and resets write_pos to 0, silently discarding any in-flight delayed audio with no click/discontinuity or allocation-in-tick test in place.
 
@@ -1531,7 +1534,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q161 — Quantizer/ScaleQuantizer have no test with negative V/Oct (notes below C4)
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-tests`  |  **Location:** `src/modules.rs:3354`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added Quantizer/ScaleQuantizer tests with negative V/Oct (notes below C4) (wave-f/tests).
 
 **Finding.** test_quantizer_chromatic (7009) and test_quantizer_major_scale (7034) only use inputs 0.0-0.07V (C4 to slightly above). Quantizer::quantize (src/modules.rs:3354-3384) relies on `floor(total_semitones/12.0)` for octave and a scale-wrap search that also checks `semi+12`; the floor-based negative-octave path and the wrap-to-next-octave branch for negative `within_octave` values are entirely unexercised, despite modular synths routinely sending negative V/Oct for bass notes.
 
@@ -1540,7 +1543,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q163 — Polyphony has no stress test beyond 2-4 voices; no full-voice-count contention test
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-tests`  |  **Location:** `src/polyphony.rs:857`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added a full-voice-count polyphony contention/stress test beyond 2-4 voices (wave-f/tests, poly stress).
 
 **Finding.** All VoiceAllocator tests (test_voice_stealing 857, test_no_steal_mode 873, test_poly_patch_basic 953, test_poly_patch_panic 967) use VoiceAllocator::new(2) or PolyPatch::new(4, ...) with 2-4 voices and only a handful of note_on/note_off calls. There is no test with a realistic voice count (8/16/32), rapid overlapping note_on/note_off churn causing repeated voice stealing, or a sustained multi-thousand-sample tick() loop verifying mixed polyphonic audio stays bounded/correct under full load.
 
@@ -1549,7 +1552,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q164 — src/wasm/engine.rs (618 lines, QuiverEngine) has zero native Rust #[test] functions
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-tests`  |  **Location:** `src/wasm/engine.rs:15`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added native Rust #[test] coverage for src/wasm/engine.rs (QuiverEngine) (wave-f/tests).
 
 **Finding.** `grep -rn '#\[test\]' src/wasm/*.rs` returns 0 matches across error.rs, mod.rs, and engine.rs (618 lines). Commit ce3f9aa ('Add comprehensive tests for edge cases, error handling, and subscriptions in QuiverEngine') added only TypeScript Playwright specs under demos/browser/tests/ that exercise QuiverEngine indirectly through the compiled WASM binary in a browser -- there is no `cargo test --features wasm` coverage of the Rust-side bindings (parameter marshaling, error mapping, tsify type generation) that can run in normal CI without a browser.
 
@@ -1558,7 +1561,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q166 — Long-run stability tests are rare and short; most DSP tests run only 100-1000 samples (~2-23ms)
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `complete-tests`  |  **Location:** `src/modules.rs:9073`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added long-run DSP stability tests, replacing the short 100-1000-sample runs (wave-f/tests, tests/dsp_stability.rs).
 
 **Finding.** Counting `for _ in 0..N` loop bounds in modules.rs: 28 tests use only 100 iterations, 25 use 1000, and just 3 (lines 6651, 8314, 8860) use 10000. test_reverb_stereo_output (9073) -- the module most at risk for feedback-driven denormal/DC drift -- only runs 3000 samples of silence after an impulse (~68ms at 44.1kHz), far short of the 'stability over 10k+ samples' bar for a feedback comb/allpass reverb network with 8 comb + 4 allpass filters per channel.
 
@@ -1567,7 +1570,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q169 — 'Getting Started' tier has two near-duplicate examples
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `usable-examples`  |  **Location:** `examples/simple_patch.rs:11`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The two near-duplicate starters were differentiated: simple_patch is the minimal patch, first_patch the full voice (wave-f/examples).
 
 **Finding.** first_patch.rs:12-26 and simple_patch.rs:11-28 both build the identical VCO->VCF->VCA chain with Adsr and ExternalInput gate/pitch, same module names, same structure, verified by reading both files side by side. Of the 3 'Getting Started' examples (quick_taste, first_patch, simple_patch), 2 teach the exact same concept with almost no differentiation, burning a newcomer's limited exploration time without adding a new idea (e.g. no MIDI, no polyphony, no different envelope shape).
 
@@ -1576,7 +1579,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q170 — Tutorials explain WHAT the code does but rarely WHY (no DSP rationale)
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `usable-examples`  |  **Location:** `examples/tutorial_fm.rs:15`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Every tutorial gained DSP-rationale comments explaining why, not just what the code does (wave-f/examples).
 
 **Finding.** tutorial_fm.rs:15-22 comments say 'Carrier oscillator - this is what we hear' / 'modulates the carrier's frequency' / 'Modulation index control (depth of FM effect)' but never explain the FM math (e.g. that sidebands appear at fc ± n*fm, or how mod_depth in volts maps to modulation index). Grep across all tutorial_*.rs for explanatory markers ('// Why', '// Note:', '// This is because') returned zero hits, confirming comments are structural, not conceptual.
 
@@ -1585,7 +1588,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q177 — QuiverEngine is only re-exported as a type, forcing a duplicated interface in @quiver/react
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `usable-ts`  |  **Location:** `packages/@quiver/wasm/src/index.ts:10`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — QuiverEngine's real interface is exported from the package so @quiver/react no longer duplicates it (wave-e/wasm-ts, packages/@quiver).
 
 **Finding.** index.ts:10 does `export type { QuiverEngine, QuiverError } from '../quiver';` — a type-only export, so `@quiver/wasm` has no runtime value consumers can `new QuiverEngine(...)` from directly (only via the broken createEngine/createAudioContext helpers, finding #1). Because the real type isn't safely importable/aligned, @quiver/react/src/hooks.ts:20-85 hand-declares its own parallel `QuiverEngine` interface duck-typing the Rust API, which will silently drift from the actual wasm-bindgen surface as the Rust API evolves.
 
@@ -1594,7 +1597,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q178 — @quiver/react hooks lack a 'use client' directive
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `usable-ts`  |  **Location:** `packages/@quiver/react/src/hooks.ts:1`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — @quiver/react hooks gained the 'use client' directive (wave-e/wasm-ts, packages/@quiver/react).
 
 **Finding.** hooks.ts and index.ts (both checked, lines 1-3) contain no `'use client'` pragma despite exporting useState/useEffect/useCallback-based hooks (useQuiverEngine, useQuiverUpdates, etc.). Any Next.js App Router consumer importing these hooks into a file that isn't already a client boundary gets a build/runtime error requiring them to add the pragma themselves — a hooks package this shape conventionally ships the directive so it 'just works' in RSC frameworks.
 
@@ -1603,7 +1606,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q184 — Primary 'connect modules' doc shows APIs that don't exist in the crate
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `usable-errors`  |  **Location:** `docs/src/how-to/connect-modules.md:128`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The 'connect modules' doc was rewritten to the actual crate API (connect/connect_attenuated/connect_modulated, disconnect_ports) (wave-f/docs, docs/src).
 
 **Finding.** The doc's 'Error Handling' section shows `Err(PatchError::PortNotFound(port))` and `Err(PatchError::CycleDetected)` (line ~128-136), but the real enum (src/graph.rs:164-178) has `InvalidPort` (unit variant, no port data) and `CycleDetected { nodes: Vec<NodeId> }` (struct variant). It also documents `patch.disconnect_port(...)` and `patch.cables_to(...)` (lines 122,148), neither of which exists — the real method is `disconnect_ports(from, to)` (graph.rs:804) taking two PortRefs, and there is no cables_to. Earlier examples use `connect_with`/`Cable::new().with_attenuation()` (lines 40-46, 58-64) which also don't exist (real API: connect_attenuated/connect_modulated). All blocks are fenced ```rust,ignore```, so mdbook never compiles them and this drift is invisible in CI.
 
@@ -1612,7 +1615,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q185 — CycleDetected error never surfaces which nodes/modules are in the cycle
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `usable-errors`  |  **Location:** `src/graph.rs:186`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — CycleDetected error now reports the nodes in the cycle via Display (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** topological_sort() correctly collects the stuck nodes into `PatchError::CycleDetected { nodes: Vec<NodeId> }` (lines 654-660), but Display (lines 186-188) only prints "Cycle detected involving {} nodes" — the count, not the NodeIds or module names, even though the field is public and available at format time. A developer debugging an accidental feedback loop across a dozen-module patch has to manually iterate `nodes` and call `patch.get_name()` themselves; nothing in the message itself is actionable.
 
@@ -1621,7 +1624,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q192 — npm packages under packages/@quiver are unpublished; crates.io status is unclear from a fresh audit
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `position`  |  **Location:** `packages/@quiver/wasm/package.json:2`
-- **Remediation:** _pending_
+- **Remediation:** **Documented as intended** — Packages made publish-ready with a fixed workflow/lockfile, DEVELOPMENT.md added and README status clarified; actual npm/crates.io publish is deliberately gated on owner credentials (wave-e/wave-f).
 
 **Finding.** packages/@quiver/wasm/package.json and packages/@quiver/react/package.json both declare version 0.1.0 with `prepublishOnly` build scripts, but `curl https://registry.npmjs.org/@quiver/wasm` returns HTTP 404 ({"error":"Not found"}), confirming the package has never been published to npm. A direct GET to crates.io/crates/quiver from this environment returned 403 (WAF-blocked, inconclusive) rather than a clean 200/404, so crates.io status could not be independently confirmed here — but combined with the missing DEVELOPMENT.md referenced by README.md line 157 (file does not exist in the repo), the overall packaging/release hygiene looks incomplete for a library asking users to add it as a dependency.
 
@@ -1630,7 +1633,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q193 — Project has no external contributor community, undermining any 'open ecosystem' positioning
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `position`  |  **Location:** `README.md:211`
-- **Remediation:** _pending_
+- **Remediation:** **Documented as intended** — README now transparently states this is a solo (human+AI-assisted) project rather than implying an active contributor community (wave-f/docs, README.md).
 
 **Finding.** README.md lines 211-233 invite contributions and list 'good first issue' areas, but `git shortlog -sn` on this checkout shows only 2 authors across 123 commits (48 by Alex Nodeland, 75 by 'Claude'), and the GitHub contributors API for alexnodeland/quiver lists only the owner and an automated 'claude' account. There is no evidence of any external human contributor, reviewer, or issue discussion driving the project.
 
@@ -1639,7 +1642,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q194 — No positioning against the closest real competitor (fundsp) or any named alternative anywhere in the docs
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `position`  |  **Location:** `docs/src/introduction.md:29`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Docs added an honest comparison/positioning against fundsp (and named alternatives), filling the competitor-positioning gap (wave-f/docs, README/docs).
 
 **Finding.** docs/src/introduction.md's 'Why Quiver?' section (lines 29-50) and README.md's 'Why Quiver?' (lines 23-44) both argue against a generic strawman ('low-level vs high-level convenience') but never mention fundsp, dasp, glicol, kira/oddio, Faust, SuperCollider, or VCV Rack anywhere in the repo (grep across all .md files returns zero hits). fundsp already offers typed Arrow-style Rust audio combinators and is published to crates.io with an established user base, making the comparison directly relevant and its absence conspicuous to anyone evaluating alternatives.
 
@@ -1648,7 +1651,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q195 — packages/@quiver/wasm/dist/ is an untracked, stale build artifact not covered by .gitignore or package.json
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `hygiene`  |  **Location:** `.gitignore:6`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — packages/@quiver/wasm/dist/ removed and covered by .gitignore (packages/@quiver/*/dist/), so the stale build artifact is no longer at risk of commit (wave-e/wasm-ts).
 
 **Finding.** git status shows packages/@quiver/wasm/dist/ as untracked. .gitignore (lines 6-9) only ignores root-level wasm-pack outputs (quiver.js, quiver.d.ts, quiver_bg.wasm, quiver_bg.wasm.d.ts), not the dist/ subdirectory. dist/ contains files (index.js, audio.js, worklet chunks, quiver-FQN7IICD.mjs) dated Jan 2026 from an entirely different bundler than the one the Makefile invokes ('make wasm' -> wasm-pack --target web, which writes quiver.js/.d.ts/quiver_bg.wasm to the package root per package.json's own 'main'/'files' fields). dist/ is neither the documented build output nor tracked source, so it is dead weight risking accidental commit of stale/wrong artifacts.
 
@@ -1657,7 +1660,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q196 — Doc-tests are 100% ignored, contradicting CLAUDE.md's 'doc tests are part of the test suite' claim
 
 - **Severity:** medium  |  **Status:** unverified  |  **Dimension:** `hygiene`  |  **Location:** `src/presets.rs:10`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Doc-tests are no longer 100% ignored; ignore blocks removed so doctests compile/run (0 ignored), matching CLAUDE.md's claim (wave-f/docs, lib.rs).
 
 **Finding.** cargo test --all-features output: 'Doc-tests quiver ... test result: ok. 0 passed; 0 failed; 8 ignored'. All 8 doctest code blocks (src/combinator.rs lines 47 and 83, src/extended_io.rs line 946, src/presets.rs lines 10/133/171/184/201) are marked with the `ignore` fence attribute, so `make test-doc` / `cargo test --doc` never actually compiles or runs any example code. CLAUDE.md states 'Doc tests are part of the test suite' as if they provide coverage, but none execute, so any of these examples could silently rot without CI catching it.
 
@@ -1666,7 +1669,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q007 — Vco exponential FM scales a ±5V input as ±5 octaves with no linear/through-zero FM
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-oscillators`  |  **Location:** `src/modules.rs:70`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Vco gained a linear/through-zero FM input (fm_lin) alongside the exponential path, fixing the ±5-octave-only FM scaling (wave-b/oscillators, modules/oscillators.rs).
 
 **Finding.** freq = base·2^fm (line 70) with fm being the raw CvBipolar input (−5..+5V). A full-scale FM signal therefore multiplies frequency by 2^±5 = ×32/÷32, five octaves — an enormous, purely exponential swing. There is no linear (through-zero) FM path, so audio-rate FM produces inharmonic, asymmetric sidebands rather than the classic linear-FM spectrum, and combined with the naive (non-band-limited) waveforms the sidebands alias heavily. Exponential FM is a legitimate design choice but the ±5-octave depth with no index/attenuation baked in is unusual and easy to misuse.
 
@@ -1675,7 +1678,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q008 — C4 reference constant 261.63 slightly off from documented 261.6256 Hz
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-oscillators`  |  **Location:** `src/modules.rs:69`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — All oscillators anchored to shared precise C4_HZ constant (modules/common.rs); final stray 261.63 literal in AnalogVco's live pitch path replaced in wave-g/fix-dsp with anchor regression test.
 
 **Finding.** All oscillators hard-code base = 261.63 (lines 69, 2226, 2352, 4945, 5147) whereas the port/system spec documents C4 = 261.6256 Hz. The error is (261.63−261.6256)/261.6256 ≈ 1.7e-5, about 0.029 cents — inaudible in isolation but a fixed global tuning offset shared by every oscillator, and it contradicts the stated 0V reference.
 
@@ -1684,7 +1687,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q017 — Dynamics detectors leave denormal tails at silence (no flush)
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-dynamics`  |  **Location:** `src/modules.rs:1207`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — flush_denorm applied to the detector one-poles in Limiter/Compressor/etc., removing denormal tails at silence (wave-b/dynamics, modules/dynamics.rs).
 
 **Finding.** In Limiter (1207), Compressor (1413), NoiseGate (1306), EnvelopeFollower (1504) the release update env = coef·env + (1−coef)·abs decays toward abs_input; when abs_input=0 the envelope decays exponentially toward zero and lingers in the denormal range (coef≈0.9998). Sustained denormals can cause large per-sample CPU cost on some x86 targets, contradicting the ‘predictable performance / real-time’ guarantee. No flush-to-zero or DAZ handling is present.
 
@@ -1693,7 +1696,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q018 — ADSR envelope segments are linear (not exponential) and retrigger does not restart from zero
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-dynamics`  |  **Location:** `src/modules.rs:588`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — ADSR gained an exponential curve mode via a new shape input port and retrigger that restarts from zero (wave-b/dynamics, modules/dynamics.rs).
 
 **Finding.** Attack/decay/release use fixed per-sample increments (level+=attack_rate etc., lines 588,595,605), yielding straight-line segments rather than the one-pole exponential (level += (target−level)·(1−exp(−1/(t·fs)))) of analog ADSRs — audibly different, especially percussive tails. Separately, retrigger (line 570) sets stage=Attack without resetting level, so a retrigger during sustain ramps upward from the sustain level rather than restarting from 0; acceptable but inconsistent with a ‘retrigger’ that many expect to restart the contour.
 
@@ -1702,7 +1705,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q019 — VCA is attenuation-only and linear; cannot amplify
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-dynamics`  |  **Location:** `src/modules.rs:675`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Vca gained a response port (id2) plus gain (id3) so it can amplify and apply square-law response, not just linear attenuation (wave-b/dynamics, modules/dynamics.rs).
 
 **Finding.** gain = cv.clamp(0,10)/10 ∈ [0,1] (line 675), so out = in·gain can only reduce level; an ‘amplifier’ with maximum unity gain is a misnomer and prevents CV-boost use. Response is strictly linear with no exponential/VCA-curve option (CLAUDE asks for linear vs exponential response), and negative CV is clamped to 0 rather than offering through-zero/inverting behavior.
 
@@ -1711,7 +1714,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q023 — Vibrato writes before reading, giving a one-sample-shorter delay than the other delays
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-timefx`  |  **Location:** `src/modules.rs:1988`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Vibrato reads before writing the delay, restoring the exact delay length matching the other delay modules (wave-b/timefx, modules/timefx.rs).
 
 **Finding.** Vibrato writes input to buffer then advances write_pos (1988-1989) BEFORE calling read_interpolated (1996), whereas DelayLine/Flanger/Chorus read then write. After the increment, delay_int=1 makes read_pos1 = write_pos-1 = the slot just written (current input), so the effective minimum delay is 0 samples rather than 1, and every tap is one sample shorter than the nominal delay_ms. Harmless for vibrato's 1-19 ms range but an inconsistency that would matter if this ordering were copied to a feedback delay.
 
@@ -1720,7 +1723,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q024 — Reverb stereo-spread offset is a fixed sample count, not scaled with sample rate
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-timefx`  |  **Location:** `src/modules.rs:5655`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Reverb stereo-spread offset now scales with sample rate (Libm round) instead of a fixed sample count (wave-b/timefx, modules/timefx.rs).
 
 **Finding.** Comb/allpass lengths are scaled by ratio = sample_rate/44100 in update_tunings (5748-5757), but STEREO_SPREAD=23 (5655) is added as a raw sample count (5864, 5893). At 96 kHz the intended ~0.5 ms decorrelation offset shrinks to ~0.24 ms, so the stereo image narrows at higher sample rates. Cosmetic, not a correctness/stability issue (Freeverb topology is otherwise faithful and stable).
 
@@ -1729,7 +1732,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q032 — Bitcrusher quantizer truncates (floor) → DC bias and full-scale extra level
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-nonlinear`  |  **Location:** `src/modules.rs:1582`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Bitcrusher quantizer uses mid-tread rounding over an integer code count, removing DC bias and the full-scale extra level (wave-b/nonlinear, modules/nonlinear.rs).
 
 **Finding.** Line 1582 uses floor(normalized·levels)/levels — a truncating (mid-rise-toward-zero) quantizer. Truncation biases every sample downward by ~0.5 LSB, injecting a constant DC offset that grows as bits decrease. Also, at full-scale input (+5V → normalized=1.0), floor(levels)=levels yields quantized=1.0, one step beyond the intended 0..(levels-1)/levels range, so the top code is asymmetric. A mid-tread rounding quantizer would be unbiased.
 
@@ -1738,7 +1741,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q033 — PitchShifter high pitch-up crosses write pointer; no oversampling
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-nonlinear`  |  **Location:** `src/modules.rs:5291`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — PitchShifter grain read margin bounded so the read pointer never crosses the write pointer on high pitch-up (wave-b/nonlinear, modules/nonlinear.rs).
 
 **Finding.** rate = 2^(semitones/12) reaches 4 at +24 semitones (5291). grain_pos advances by rate each sample (5308); over one window of window_samples it moves up to 4·window while write advances only window, so the read pointer overtakes the write pointer within a grain, reading not-yet-written/stale samples → glitches at large pitch-up. Additionally, none of these shapers/pitch processors oversample, so all generate aliasing, and this limitation is undocumented. (The 50%-overlap Hann COLA itself is correct — unity gain.)
 
@@ -1747,7 +1750,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q041 — Comparator/quantizers lack true hysteresis, allowing boundary chatter
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-utilities`  |  **Location:** `src/modules.rs:3964`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Comparator/quantizers gained true stateful hysteresis (hold last state), eliminating boundary chatter (wave-b/utilities, modules/logic.rs).
 
 **Finding.** Comparator's comment says "hysteresis" but implements a static ±0.01V deadband (gt: a>b+0.01, lt: a<b-0.01) with no state — a signal dithering around b still toggles gt/eq/lt every sample. Similarly Quantizer (3354) and ScaleQuantizer (2493) round to nearest with no hysteresis, so a CV sitting exactly between two scale notes chatters between them, emitting a continuous stream of spurious change-triggers (ScaleQuantizer trigger at line 2514). Real hardware quantizers add hysteresis to prevent this.
 
@@ -1756,7 +1759,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q042 — Euclidean accent uses pre-rotation step counter, can accent silent steps
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-utilities`  |  **Location:** `src/modules.rs:2641`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Euclidean accent gated on the first actual pulse of each rotated pattern so it can no longer accent silent steps (wave-b/utilities, modules/sequencing.rs).
 
 **Finding.** The accent output fires when self.step == 0, but pattern lookup uses rotated_step = (self.step + rotation) % steps (line 2636). With nonzero rotation, counter 0 maps to a rotated pattern slot that may be a rest, so the accent (line 2641) can fire on a step where out=0 (no pulse), and the true downbeat of the rotated pattern is never accented. Rotation is also limited to 0..steps-1 via (rotation_cv*(steps-1)) truncation, excluding a full-wrap.
 
@@ -1765,7 +1768,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q047 — tanh_sat origin gain exceeds unity, boosting level through the Saturator
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-analog`  |  **Location:** `src/analog.rs:19`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — tanh_sat origin gain compensated to unity, so the Saturator no longer boosts small-signal level (wave-b/analog, analog.rs).
 
 **Finding.** tanh_sat(x,drive)=tanh(x*drive)/tanh(drive). Derivative at x=0 is drive/tanh(drive) which is >1 for all drive>0 (1.31 at drive=1, 2.07 at drive=2). So a small signal is amplified rather than passed at unity. Saturator (line 665) does tanh_sat(in/5,drive)*5 with default drive=1, applying a ~31% small-signal gain boost, not transparent low-level behavior expected of a warmth/saturation stage.
 
@@ -1774,7 +1777,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q048 — Thermal model time constants are uncalibrated; drift never settles or becomes audible
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-analog`  |  **Location:** `src/analog.rs:201`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Thermal model recalibrated to a documented phenomenological form (tau=40s, 1c/degC) so drift settles and becomes audible (wave-b/analog, analog.rs).
 
 **Finding.** update() uses forward Euler with real dt: temp += (energy*heat_rate - (temp-ambient)*cool_rate)*dt. Default cool_rate=0.001 gives tau=1/cool_rate=1000 s (~16 min) to equilibrium, so 'thermal drift' effectively never moves on a musical timescale. Equilibrium offset = energy*(heat_rate/cool_rate)=energy*10 degC, and detuning is offset*0.001 (line 551), all magic constants with no stated physical basis. The test (line 781) 'passes' only because heating produces a ~1e-4 offset that trivially stays under 0.01.
 
@@ -1783,7 +1786,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q049 — asym_sat on saw is described as 'slight' but compresses amplitude ~24%
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-analog`  |  **Location:** `src/analog.rs:578`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — AnalogVco saw asymmetry made gentle and gain-compensated, ending the ~24% amplitude compression (wave-b/analog, analog.rs).
 
 **Finding.** The saw (range -1..1) is passed through asym_sat(saw+dc,1.0,0.98)=tanh(x) for x>=0. tanh(1)=0.762, so the +/-1 saw peaks are squashed to +/-0.76 before the *5 scaling (line 599), i.e. output peaks at ~+/-3.8V instead of +/-5V, and the linear ramp is noticeably curved. The comment calls this 'slight' asymmetric saturation; the level loss and waveform bending are substantial and the near-symmetric drives (1.0 vs 0.98) add almost no even-harmonic asymmetry.
 
@@ -1792,7 +1795,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q053 — `>>>`, `***`, `&&&` are described as operators but no operator overloads exist
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-combinators`  |  **Location:** `src/combinator.rs:26`
-- **Remediation:** _pending_
+- **Remediation:** **Documented as intended** — >>> *** &&& are kept as conceptual/notational documentation with no Rust operator overloads, deliberately, per the combinator docs (wave-b/combinator).
 
 **Finding.** lib.rs, CLAUDE.md, and combinator.rs repeatedly present `>>>` (chain), `***` (parallel), `&&&` (fanout) as usable operators. Verified there are zero `impl Shr/BitXor/BitAnd` (or any `core::ops`) in combinator.rs — and `>>>` is not even a Rust operator token. The actual API is the methods `.then`, `.parallel`, `.fanout`. Users copying the operator notation from the docs get compile errors. The notation is borrowed from Haskell/Control.Arrow purely as illustration but reads as real API.
 
@@ -1801,7 +1804,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q054 — Feedback first-tick value and combine-argument order are undocumented
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-combinators`  |  **Location:** `src/combinator.rs:330`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Feedback's contract documented: combine(external_input, previous_output) with the first-tick value defined (wave-b/combinator, combinator.rs).
 
 **Finding.** `Feedback::tick` computes `combine(input, self.delay_buffer.clone())` then stores output into `delay_buffer` (lines 330-334). This is a correct causal unit-delay, and reset/set_sample_rate both propagate (lines 337-344) — genuinely well done. But the doc comments (lines 191, 314) never state (a) that on the first tick the feedback path sees `M::Out::default()` (0.0 for f64), nor (b) the argument order of `combine` (external input first, delayed output second). Users writing an asymmetric combine function must read the source to know which argument is the feedback signal.
 
@@ -1810,7 +1813,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q059 — RNG documented as 'Xorshift128+' but is actually xoroshiro128+
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-simd-rng`  |  **Location:** `src/rng.rs:4`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — RNG docs corrected from 'Xorshift128+' to the actual 'xoroshiro128+' (wave-b/simd-rng, rng.rs).
 
 **Finding.** Module doc (line 4) and struct doc (lines 25-27) say 'Xorshift128+'. The implementation (lines 77-79) is `s1^=s0; s0 = rotl(s0,24) ^ s1 ^ (s1<<16); s1 = rotl(s1,37); result = s0+s1` — the exact xoroshiro128+ update with Blackman/Vigna constants (24,16,37). The jump constants (line 113) are also the xoroshiro128+ 2^64-jump polynomial. These are different algorithms (xorshift128+ has no rotations). The code is a correct xoroshiro128+; only the label is wrong, which misleads readers about statistical properties and provenance.
 
@@ -1819,7 +1822,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q060 — RingBuffer uses modulo, not power-of-two masking, in the per-sample audio path
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-simd-rng`  |  **Location:** `src/simd.rs:516`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — RingBuffer storage rounded up to a power of two and wrapped with a bitmask instead of modulo in the per-sample path (wave-b/simd-rng, simd.rs).
 
 **Finding.** write() (line 516) does `self.write_pos = (self.write_pos + 1) % self.size` and read() (line 525) `(self.write_pos + self.size - delay - 1) % self.size`. `size` is an arbitrary `capacity`, so these are integer divisions executed every sample in delay lines — the slowest integer op, in the real-time path. The module header advertises SIMD/performance focus; a mask on a power-of-two-rounded capacity would eliminate the division. Correctness is fine (indices verified: read(0) = write_pos-1 = most recent, matching test line 661).
 
@@ -1828,7 +1831,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q061 — RingBuffer::new(0).write() panics (OOB index and modulo-by-zero)
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-simd-rng`  |  **Location:** `src/simd.rs:513`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — RingBuffer internal storage clamped to at least one slot, so new(0).write() no longer panics (wave-b/simd-rng, simd.rs).
 
 **Finding.** RingBuffer::new(0) (line 494) builds an empty buffer with size 0; is_empty() returns true and is tested (line 856). But write() (lines 513-517) unconditionally does `self.buffer[self.write_pos]` → index-out-of-bounds panic on the empty Vec, and `(self.write_pos + 1) % self.size` → divide-by-zero panic. No guard exists. A zero-capacity buffer is nonsensical but constructible via the public API, so this is a reachable panic rather than a compile-time impossibility.
 
@@ -1837,7 +1840,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q062 — Tests omit simd/non-simd equivalence and RNG known-answer vectors
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-simd-rng`  |  **Location:** `src/rng.rs:239`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added xoroshiro128+ known-answer tests and a simd/scalar equivalence test (wave-b/simd-rng, rng.rs/simd.rs).
 
 **Finding.** rng tests (lines 238-353) assert determinism, range, and mean but never check next_u64 against published xoroshiro128+ reference vectors, so a constant/rotation typo would pass silently. simd tests (lines 594-914) exercise whichever add/mul variant the active feature set compiles, but nothing asserts the `#[cfg(feature="simd")]` unrolled path yields the same results as the scalar path (they can only be compared across two builds). Range test at line 263 also can't detect that next_f64 never quite reaches meaningful coverage, only membership.
 
@@ -1846,7 +1849,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q070 — No per-voice DSP reset on allocation or steal (state leakage / steal clicks)
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-polyphony`  |  **Location:** `src/polyphony.rs:250`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Voices reset DSP state on allocation/steal, removing state leakage and steal clicks (wave-d/polyphony, polyphony.rs).
 
 **Finding.** On both fresh allocation (l.243) and steal (l.250) only the Voice metadata is set via note_on (l.90-98); the corresponding voice_patch is never reset. Voice::note_on sets trigger=1.0 for one sample (l.96), but the patch's filter/delay/reverb state and oscillator phase from the previous note persist. For a stolen voice mid-tail this concatenates the old signal into the new note (click / audible bleed); envelope retrigger depends entirely on downstream modules honoring the one-sample trigger. There is no 'clean retrigger' of DSP state.
 
@@ -1855,7 +1858,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q071 — Retrigger path skips LRU update
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-polyphony`  |  **Location:** `src/polyphony.rs:236`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The retrigger path now updates the LRU order (wave-d/polyphony, polyphony.rs).
 
 **Finding.** When a note already sounding is retriggered, note_on returns early (l.234-238) without calling update_lru, unlike the free-voice (l.244) and steal (l.251) paths. The retriggered voice keeps its stale position near the front of lru_queue, so it is treated as least-recently-used. It cannot be mis-selected by find_free_voice (which filters is_free, l.302), but the LRU ordering no longer reflects actual recency, which can skew subsequent round-robin free-voice choices.
 
@@ -1864,7 +1867,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q072 — AllocationMode doc comments for Highest/LowestPriority are mislabeled
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `math-polyphony`  |  **Location:** `src/polyphony.rs:33`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — AllocationMode Highest/LowestPriority doc comments corrected to match behavior (wave-d/polyphony, polyphony.rs).
 
 **Finding.** HighestPriority's doc says 'Lowest priority - higher notes steal lower notes' (l.33) and LowestPriority says 'Highest priority - lower notes steal higher notes' (l.35) - the leading phrases are swapped relative to the variant names. The implementations (l.324-339) match the names (HighestPriority steals the lowest note when the new note is higher), so the code is right but the comments are contradictory and will mislead users choosing a mode. Also note: if the new note is not higher (Highest) / lower (Lowest) than any existing note, the filter is empty and the note is silently dropped.
 
@@ -1873,7 +1876,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q082 — ParamRange::Exponential produces NaN when min>0 and max<=0
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `correct-graph`  |  **Location:** `src/port.rs:435`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — ParamRange::Exponential guards against NaN when min>0 and max<=0 (wave-b graph/port overhaul, port.rs).
 
 **Finding.** Exponential::apply only special-cases `min <= 0` (falls back to linear `clamped*max`, line 437-440); when `min > 0` it computes `min * pow(max/min, clamped)` (line 441). If a caller constructs Exponential{min:20, max:-1} (or any max<=0 with min>0), `max/min` is negative and `pow(negative, fractional)` returns NaN, which then propagates silently into frequency/time controls. There is no validation that max>min>0.
 
@@ -1882,7 +1885,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q090 — to_def discards metadata and version handling is unused (no forward-compat)
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `correct-serialize`  |  **Location:** `src/serialize.rs:1269`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — to_def preserves PatchMeta metadata and CURRENT_PATCH_VERSION is documented as advisory for forward-compat (wave-e/serialize, serialize.rs).
 
 **Finding.** to_def hardcodes version:1 and sets author/description/tags to None/empty and parameters to an empty map (1269-1278), so converting a loaded PatchDef through a live Patch and back loses all metadata. The version field is never inspected on load: from_json/from_def ignore it and validate() only checks version>=1 (1448), so there is no migration path or rejection of unknown future versions — the 'forward compatibility' the field documents is not implemented.
 
@@ -1891,7 +1894,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q097 — dispose()/processor never free the engine or stop the processor
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `correct-wasm`  |  **Location:** `packages/@quiver/wasm/src/audio.ts:165`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — dispose() now frees the engine and stops the processor via the free/destroy lifecycle (wave-e/wasm-ts, packages/@quiver).
 
 **Finding.** dispose() (audio.ts:165-168) calls node.disconnect() and node.port.close() but never signals the worklet to free its QuiverEngine. QuiverProcessor.process() always `return true` (worklet.ts:279), so the processor never self-terminates; it only stops when the browser GCs the whole node. The WASM engine's linear memory is held until then, and there is no explicit engine.free().
 
@@ -1900,7 +1903,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q098 — tick() typed as tuple but returns a Float64Array at runtime; doc/API name drift
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `correct-wasm`  |  **Location:** `packages/@quiver/react/src/hooks.ts:75`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — tick() TS types corrected to the real Float64Array runtime return, fixing the tuple doc/API drift (wave-e/wasm-ts, packages/@quiver/types).
 
 **Finding.** hooks.ts:75 types `tick(): [number, number]`, but Rust returns `Box<[f64]>` (engine.rs:457-460), which wasm-bindgen marshals as a Float64Array — indexing works but Array.isArray/tuple-destructure semantics differ and it is a fresh allocation per call. Separately, wasm/CLAUDE.md documents get_patch()/clear()/disconnect(cable_id) while the real methods are save_patch/clear_patch/disconnect(from,to) (engine.rs:117,132,300), so the doc contract does not match the bindings.
 
@@ -1909,7 +1912,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q103 — OscPattern matching is a simplified stub that mis-implements OSC wildcard semantics
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `correct-rtio`  |  **Location:** `src/extended_io.rs:195`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — OscPattern rewritten with OSC 1.0 semantics (component-scoped * and ?), replacing the mis-implemented stub (wave-b/rtio, extended_io.rs).
 
 **Finding.** matches() (self-described "Simplified matching") treats PatternSegment::Wildcard as `return true` matching the entire remainder (lines 212-214), so `/synth/*` matches `/synth/a/b/c`, whereas OSC `*` matches within a single path component only. CharClass has no range support: `[a-z]` is parsed as the literal set {a,-,z} (parser at 167-181 pushes chars verbatim, no `-` handling), and an unterminated `[` silently swallows the rest of the pattern. No exclamation-negation either. Not a memory-safety issue (all safe Vec/char ops, no raw byte parsing so no overrun), but bindings will match/ignore addresses incorrectly.
 
@@ -1918,7 +1921,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q104 — LevelMeterState peak-hold never truly holds after first decay
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `correct-rtio`  |  **Location:** `src/observer.rs:709`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — LevelMeterState resets samples_since_peak so peak-hold actually holds after the first decay (wave-b/rtio, visual.rs).
 
 **Finding.** In update(), when peak_db <= peak_hold_db the code increments samples_since_peak and, once it exceeds peak_hold_samples, sets peak_hold_db = peak_db (lines 710-714) but never resets samples_since_peak. So on every subsequent call the counter stays above threshold and peak_hold_db is continuously overwritten with the current peak_db — the hold collapses to a follower with no hold time after the first expiry, and it snaps instantly rather than decaying.
 
@@ -1927,7 +1930,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q111 — Block-processing path is unused and still allocates
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `perf-tickpath`  |  **Location:** `src/port.rs:514`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added an allocation-free tick_block path (BlockPortValues::frame_into), proven by a counting-allocator test (0 allocs/1000 ticks) (wave-c/perf, graph.rs, tests/zero_alloc.rs).
 
 **Finding.** Patch exposes no block tick (grep of graph.rs finds only per-sample tick), so simd.rs/AudioBlock infra never accelerates the graph. The default GraphModule::process_block (port.rs:514-526) also allocates per frame: it calls inputs.frame(i) which builds a new PortValues+map (port.rs:392-400) and creates a fresh out_frame each frame, so even the block API does not deliver allocation-free processing.
 
@@ -1936,7 +1939,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q126 — Inconsistent error/return policy: Result vs panic vs silent no-op; PatchError not non_exhaustive
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `elegance-api`  |  **Location:** `src/graph.rs:163`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — PatchError made non_exhaustive and carries node/port/cycle context in Display, unifying the error/return policy (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** The public surface mixes three failure styles: `connect`/`remove`/`disconnect` return `Result<_,PatchError>`; `in_`/`out` panic; `set_param`/`set_output`/`set_position` silently no-op on bad NodeId. `PatchError` is a hand-rolled enum with manual Display and is not `#[non_exhaustive]`, so adding a variant is a breaking change for downstream match arms. No `thiserror` usage. This makes the library's contract hard to reason about and evolve.
 
@@ -1945,7 +1948,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q127 — Prelude glob pollution: crate-root re-export of a ~150-name prelude
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `elegance-api`  |  **Location:** `src/lib.rs:196`
-- **Remediation:** _pending_
+- **Remediation:** **Documented as intended** — The crate-root prelude glob re-export is kept and documented as intentional convenience (wave-b graph/port overhaul, lib.rs).
 
 **Finding.** `pub use prelude::*;` at the crate root re-exports the entire prelude (≈150 items: combinators, ports, graph, every module, ChordType, WavetableType, DotStyle, TriggerMode, SIMD, RNG…) both as `quiver::X` and `quiver::prelude::X`. There is no lean import path — `use quiver::prelude::*` pulls everything, and the flat crate root duplicates it, raising name-collision risk in user code and cluttering docs. Enum-associated helper types (ArpPattern, ValueFormat) sit at top level beside core types with no grouping.
 
@@ -1954,7 +1957,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q128 — Constructor conventions are inconsistent, and sample_rate is passed redundantly
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `elegance-api`  |  **Location:** `src/modules.rs:751`
-- **Remediation:** _pending_
+- **Remediation:** **Documented as intended** — Convention codified in DEVELOPMENT.md + book (SR-dependent modules take sample_rate in new(); set_sample_rate authoritative). Full fn new() audit: one benign exception (Crosstalk) documented (wave-g/fix-ci).
 
 **Finding.** Constructors vary with no rule: `Vco::new(sample_rate)`, `Svf::new(sample_rate)`, `Adsr::new(sample_rate)` take rate; `Vca::new()`, `StereoOutput::new()` take nothing; `Offset::new(offset)` takes a value. Yet `Patch::add` already calls `module.set_sample_rate(self.sample_rate)` (graph.rs:322), so `Vco::new(44100.0)` inside a 44100 patch passes the rate twice (see quick_taste.rs:11,14). A user cannot predict from the name whether `new` needs a rate, and the double-specification invites mismatched rates.
 
@@ -1963,7 +1966,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q133 — read_interpolated duplicated verbatim across four modules
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `elegance-internals`  |  **Location:** `src/modules.rs:1640`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — read_interpolated de-duplicated into one shared helper used by the four delay-based modules in the B-0 modules.rs split (modules/common.rs).
 
 **Finding.** The wrapping linear-interpolated delay read is identical at 1640-1647 and 1946-1953 and structurally the same at 899-911 and 1027-1037 (the free-fn variant takes buffer/write_pos as args). All compute `read_pos1=(write_pos+len-delay_int)%len`, `read_pos2=…-1`, `s1*(1-frac)+s2*frac`. Four independent copies means a future fix (e.g. Hermite interpolation, or guarding `delay_int` overflow) must be applied four times and can drift.
 
@@ -1972,7 +1975,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q134 — Single 9915-line modules.rs should be a module directory
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `elegance-internals`  |  **Location:** `src/modules.rs:1`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The 9915-line modules.rs was split into a modules/ directory of domain files (oscillators, filters, dynamics, etc.) in the B-0 refactor.
 
 **Finding.** All 58 modules plus 172 tests live in one file (11,760 lines with mdk). CLAUDE.md already groups them into clear categories (Oscillators, Filters, Envelopes, Effects, Delays, Utilities, Logic/CV, Sequencing). A single file this size hurts compile-time incrementality, code navigation, and review diff locality, and makes the duplication above easy to miss.
 
@@ -1981,7 +1984,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q135 — Inconsistent naming for edge-detection state fields (last_ vs prev_)
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `elegance-internals`  |  **Location:** `src/modules.rs:66`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Edge-detection state fields unified on the EdgeDetector prev_* convention across analog.rs/dynamics.rs/utilities.rs (last_sync, last_gate, last_clock, last_reset, last_trigger renamed) in wave-g/fix-dsp.
 
 **Finding.** Edge-detector state uses two conventions: `self.last_*` appears 34× (last_sync, last_reset, last_gate, last_trigger, last_clock, last_retrig) and `self.prev_*` 12× (prev_gate, prev_clock, prev_sync, prev_reset). Both name the identical 'value on previous tick' concept, sometimes for the same signal (last_clock at 2627 vs prev_clock at 3053). This friction compounds the copy-paste edge-detection logic and makes grep-based reasoning harder.
 
@@ -1990,7 +1993,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q140 — Unconditional cdylib crate-type conflates/amplifies the no_std breakage and burdens every build
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `elegance-features`  |  **Location:** `Cargo.toml:13`
-- **Remediation:** _pending_
+- **Remediation:** **Documented as intended** — cdylib crate-type is kept (wasm-pack hard-requires it) and the decision documented, with an rlib override used for the no_std checks (wave-f/hygiene, Cargo.toml).
 
 **Finding.** `[lib] crate-type = ["cdylib", "rlib"]` (line 13) is unconditional, not limited to wasm builds. Because cdylib is a final linked artifact, `cargo check --no-default-features` and `--features alloc` additionally emit 'no global memory allocator found', '#[panic_handler] function required', and 'unwinding panics are not supported without std' (3 of the 14 errors in finding #1). Verified by copying the crate to a scratch dir with crate-type reduced to `["rlib"]`: those 3 lang-item errors disappeared, leaving only the genuine libm-bypass E0599 errors. This also means every ordinary `cargo build` (std consumers included) compiles an unused cdylib artifact.
 
@@ -1999,7 +2002,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q148 — Sidechain routing exists only on Compressor; no generic ducking or shared mechanism
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `complete-domain`  |  **Location:** `src/modules.rs:1369`
-- **Remediation:** _pending_
+- **Remediation:** **Implemented** — Added a generic Ducker plus sidechain key ports on Limiter (id4) and NoiseGate (id5), extending sidechaining beyond Compressor (wave-e/new-modules, modules/dynamics.rs).
 
 **Finding.** Compressor alone has a dedicated `sidechain` input port (modules.rs:1369, consumed at 1398-1413 as the envelope-detector source instead of its own input). NoiseGate (1285-1340) and Limiter (1151-1188) - the other two dynamics modules that would commonly benefit from external key input for ducking/gating - expose no equivalent port. There's also no standalone 'sidechain duck' utility module for the common EDM-style ducking patch outside a compressor.
 
@@ -2008,7 +2011,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q149 — Wavefolder is a fully working module but orphaned outside modules.rs, hurting discoverability
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `complete-domain`  |  **Location:** `src/analog.rs:679`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Wavefolder moved into modules/nonlinear (with an analog re-export for compatibility), fixing its discoverability (B-0 modules.rs split).
 
 **Finding.** `Wavefolder` (analog.rs:679-725) is a complete, tested GraphModule (type_id 'wavefolder', registered in serialize.rs:792-798 and presets.rs:693) implementing classic West-Coast folding, but it lives in analog.rs among drift/saturation utilities rather than alongside all other 55+ DSP modules in modules.rs where the CLAUDE.md module inventory and most users would look for it. It is real and usable (present, not missing) but its placement makes it easy to overlook as a synthesis building block.
 
@@ -2017,7 +2020,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q150 — No mid/side encode-decode utilities for stereo-bus processing
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `complete-domain`  |  **Location:** `src/modules.rs:1`
-- **Remediation:** _pending_
+- **Remediation:** **Implemented** — Added MidSideEncode and MidSideDecode (with width control) for stereo-bus processing (wave-e/new-modules, modules).
 
 **Finding.** The module inventory has Mixer, Attenuverter, Crossfader, PrecisionAdder and a stereo-aware Reverb/Chorus, but no Mid/Side encoder or decoder (M = (L+R)/2, S = (L-R)/2 and inverse) anywhere in modules.rs, simd.rs, or elsewhere. This is a standard building block for stereo-width control, mastering-style EQ, and dual-mono correction that a modular-style stereo toolkit would typically include; it is currently unreachable without hand-writing PrecisionAdder/Attenuverter combinations manually per patch.
 
@@ -2026,7 +2029,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q156 — MSRV inconsistent across docs (1.70 vs 1.78)
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `complete-docs`  |  **Location:** `docs/src/getting-started/installation.md:7`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — MSRV made consistent at 1.78 across docs, resolving the 1.70 vs 1.78 discrepancy (wave-f/docs).
 
 **Finding.** docs/src/getting-started/installation.md:7 states '**Rust 1.70+** (2021 edition)' while README.md's badge (README.md:7) reads 'rust-1.78%2B' and CLAUDE.md's CI/CD Pipeline section states 'MSRV check (Rust 1.78)'. Cargo.toml has no `rust-version` field pinned at all (only `edition = "2021"`), so neither number is enforced by the build, but the two docs disagree with each other on the actual minimum.
 
@@ -2035,7 +2038,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q165 — No property-based testing anywhere in the crate
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `complete-tests`  |  **Location:** `Cargo.toml:1`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added property-based (proptest) tests to the crate (wave-f/tests, tests/proptest).
 
 **Finding.** Cargo.toml's [dev-dependencies] lists only `approx` and `criterion`; there is no `proptest` or `quickcheck` dependency, and no such tests exist. All DSP stability checks (the '_bounded' tests in modules.rs) use a small number of hand-picked point values (e.g. resonance=0.9, input=20.0) rather than randomized/generated ranges, so parameter combinations outside the chosen points (e.g. resonance=0.99, cutoff near Nyquist) are unverified.
 
@@ -2044,7 +2047,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q171 — README Feature Flags table omits `wasm` feature documented in CLAUDE.md/Cargo.toml
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `usable-examples`  |  **Location:** `README.md:98`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — README Feature Flags table now documents the wasm feature (wave-f/docs, README.md).
 
 **Finding.** README.md:98-102 lists only std/alloc/simd in the Feature Flags table, while Cargo.toml (verified lines ~46-53) and CLAUDE.md both document a fourth `wasm` feature. A newcomer reading only the README doesn't learn that WASM bindings are gated behind `--features wasm`.
 
@@ -2053,7 +2056,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q179 — Orphaned dist/ build output in @quiver/wasm doesn't match current source or any script
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `usable-ts`  |  **Location:** `packages/@quiver/wasm/dist:1`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — The stale @quiver/wasm/dist/ artifact was removed and gitignored via packages/@quiver/*/dist/ (wave-e/wasm-ts, .gitignore).
 
 **Finding.** packages/@quiver/wasm/dist/ is untracked (per `git status`) and contains files like audio-manager.js/mjs and quiver-worklet.js/quiver-worker.js that reference an `audio-manager.ts` source which does not exist in src/ (only audio.ts, index.ts, worklet.ts are present). No script in package.json (build/build:dev/prepublishOnly all just shell to `make wasm`) produces this directory, indicating a stale artifact from a different/earlier build pipeline that was never reconciled or cleaned up, and will confuse a contributor who inspects it expecting it to reflect current source.
 
@@ -2062,7 +2065,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q187 — Patch has no Debug impl for println-style inspection
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `usable-errors`  |  **Location:** `src/graph.rs:257`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Patch gained a Debug impl for println-style inspection (wave-b graph/port overhaul, graph.rs).
 
 **Finding.** The `Patch` struct (line 257) and its internal `Node` (line 156, containing `Box<dyn GraphModule>`) have no `#[derive(Debug)]` or manual `impl Debug`, and `GraphModule` (src/port.rs:506) does not require Debug. So `println!("{:?}", patch)` — the first thing most Rust developers reach for when a patch behaves unexpectedly — simply doesn't compile, pushing users toward reading the observer/introspection APIs, which are less discoverable and undocumented as debugging tools in connect-modules.md.
 
@@ -2071,7 +2074,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q188 — SpectrumAnalyzer::peak_frequency() panics on NaN input instead of degrading gracefully
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `usable-errors`  |  **Location:** `src/visual.rs:787`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — SpectrumAnalyzer::peak_frequency() degrades gracefully on NaN bins instead of panicking (wave-b/rtio, visual.rs).
 
 **Finding.** `peak_frequency()` does `self.spectrum.iter().enumerate().max_by(|(_,a),(_,b)| a.partial_cmp(b).unwrap())` (line 787). If any bin is NaN (plausible after divergent feedback, filter self-oscillation blow-up, or a 0/0 in FFT normalization elsewhere in the signal path — the very failure this tool exists to diagnose), `partial_cmp` returns None and `.unwrap()` panics. The one tool meant to help debug 'why is my patch behaving strangely' can itself crash instead of reporting a bogus/degenerate reading.
 
@@ -2080,7 +2083,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q197 — Cargo.toml missing readme/documentation fields for crates.io publish readiness
 
 - **Severity:** low  |  **Status:** unverified  |  **Dimension:** `hygiene`  |  **Location:** `Cargo.toml:9`
-- **Remediation:** _pending_
+- **Remediation:** **Fixed** — Added readme and documentation fields to Cargo.toml for crates.io publish readiness (wave-f/hygiene, Cargo.toml).
 
 **Finding.** Cargo.toml has name, version, edition, authors, description, license, repository, keywords, categories (lines 2-10) but no 'readme' field pointing at README.md and no explicit 'documentation' field. crates.io will publish without them (falling back to docs.rs default), but the crates.io package page won't render the README, and `cargo publish --dry-run` typically warns about the missing readme field.
 
