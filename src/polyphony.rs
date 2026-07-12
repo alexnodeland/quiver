@@ -76,6 +76,14 @@ const COUNT_TAU_S: f64 = 0.010;
 const GRACE_S: f64 = 0.005;
 /// Followed amplitude below which a *released* voice is considered finished.
 const RELEASE_THRESHOLD: f64 = 0.001;
+/// Worst-case lifetime of a `Releasing` voice before it is force-freed, even if
+/// its tracked amplitude never falls below [`RELEASE_THRESHOLD`]. Bounds voice
+/// lifetime so a non-decaying released voice (a drone / self-oscillating / DC
+/// voice whose follower never crosses the threshold) cannot pin an allocator
+/// slot forever and starve every subsequent `note_on` (permanent voice
+/// exhaustion under [`AllocationMode::NoSteal`]). Deliberately generous so it
+/// almost never truncates a legitimate release tail.
+const MAX_RELEASE_S: f64 = 10.0;
 /// Length of the one-shot trigger pulse emitted by [`VoiceInput`], in seconds.
 const TRIGGER_S: f64 = 0.001;
 
@@ -267,6 +275,10 @@ pub struct VoiceAllocator {
     release_threshold: f64,
     /// Minimum samples a voice must have spent releasing before it can be freed
     release_grace_samples: u64,
+    /// Hard cap on samples a voice may spend `Releasing` before it is
+    /// force-freed regardless of its tracked amplitude. `u64::MAX` disables the
+    /// cap (the standalone default); [`PolyPatch`] installs a finite bound.
+    max_release_samples: u64,
     /// Index of the voice stolen by the most recent `note_on`, if any
     last_stolen: Option<usize>,
 }
@@ -294,6 +306,9 @@ impl VoiceAllocator {
             // with real levels + a grace period so release tails complete.
             release_threshold: 0.0001,
             release_grace_samples: 0,
+            // Unbounded by default for the rate-agnostic standalone allocator;
+            // `PolyPatch` installs a real cap (MAX_RELEASE_S x sample_rate).
+            max_release_samples: u64::MAX,
             last_stolen: None,
         }
     }
@@ -314,6 +329,20 @@ impl VoiceAllocator {
     pub fn set_release_criteria(&mut self, threshold: f64, grace_samples: u64) {
         self.release_threshold = threshold;
         self.release_grace_samples = grace_samples;
+    }
+
+    /// Set the hard cap (in samples) on how long a voice may stay `Releasing`
+    /// before [`tick`](Self::tick) force-frees it, independent of its tracked
+    /// amplitude. Guards against a non-decaying released voice pinning a slot
+    /// forever (permanent voice exhaustion under [`AllocationMode::NoSteal`]).
+    /// Pass `u64::MAX` to disable the cap.
+    pub fn set_max_release_samples(&mut self, max_samples: u64) {
+        self.max_release_samples = max_samples;
+    }
+
+    /// The current hard release cap in samples (`u64::MAX` if disabled).
+    pub fn max_release_samples(&self) -> u64 {
+        self.max_release_samples
     }
 
     /// Get the number of voices
@@ -424,11 +453,17 @@ impl VoiceAllocator {
 
         let threshold = self.release_threshold;
         let grace = self.release_grace_samples;
+        let max_release = self.max_release_samples;
         for voice in &mut self.voices {
-            if voice.state == VoiceState::Releasing
-                && voice.envelope_level < threshold
-                && voice.release_samples >= grace
-            {
+            if voice.state != VoiceState::Releasing {
+                continue;
+            }
+            // Normal path: freed once genuinely quiet (past the grace period).
+            let quiet_done = voice.envelope_level < threshold && voice.release_samples >= grace;
+            // Safety net: force-free a voice whose amplitude never decays so it
+            // cannot pin a slot forever (permanent exhaustion under NoSteal).
+            let timed_out = voice.release_samples >= max_release;
+            if quiet_done || timed_out {
                 voice.free();
             }
         }
@@ -927,6 +962,28 @@ impl PolyPatch {
         self.grace_samples = (GRACE_S * self.sample_rate).max(1.0) as u64;
         self.allocator
             .set_release_criteria(RELEASE_THRESHOLD, self.grace_samples);
+        self.allocator
+            .set_max_release_samples(Self::release_cap_samples(MAX_RELEASE_S, self.sample_rate));
+    }
+
+    /// Convert a max-release time in seconds to a sample count for the allocator
+    /// cap, saturating (a non-positive/non-finite time disables the cap).
+    fn release_cap_samples(seconds: f64, sample_rate: f64) -> u64 {
+        let samples = seconds * sample_rate;
+        if !samples.is_finite() || samples <= 0.0 {
+            u64::MAX
+        } else {
+            (samples as u64).max(1)
+        }
+    }
+
+    /// Set the worst-case time (seconds) a released voice may keep sounding
+    /// before the allocator force-frees it, bounding voice lifetime so a
+    /// non-decaying (drone / self-oscillating) voice cannot permanently pin a
+    /// slot. A non-positive or non-finite value disables the cap.
+    pub fn set_max_release_time(&mut self, seconds: f64) {
+        self.allocator
+            .set_max_release_samples(Self::release_cap_samples(seconds, self.sample_rate));
     }
 
     /// Build the full set of voice graphs from the current configuration.
@@ -2103,6 +2160,75 @@ mod tests {
         // (Behavioral proof: the voice still produces output after the steal.)
         let (l, _r) = poly.tick();
         assert!(l.abs() > 0.0, "stolen voice should keep producing audio");
+    }
+
+    // ---- Max-release safety cap ------------------------------------------
+
+    // Regression: a released voice whose output never decays below the release
+    // threshold (a DC / drone / self-oscillating voice) must still be reclaimed
+    // by the worst-case release cap, otherwise under NoSteal it pins the slot
+    // forever and every later note_on is dropped (permanent voice exhaustion).
+    #[test]
+    fn test_nondecaying_released_voice_force_frees() {
+        let sr = 48_000.0;
+        let mut poly = build_dc_poly(1, 1.0, sr);
+        poly.allocator_mut().set_mode(AllocationMode::NoSteal);
+
+        // Play then release the only voice. Its DC output stays at full scale, so
+        // amplitude-based reaping alone would never free it.
+        poly.note_on(60, 100);
+        for _ in 0..200 {
+            poly.tick();
+        }
+        poly.note_off(60);
+
+        // Under the generous default cap a short run leaves it stuck Releasing,
+        // and NoSteal drops a new note -> this is the exhaustion being bounded.
+        for _ in 0..2000 {
+            poly.tick();
+        }
+        assert_eq!(
+            poly.allocator().voices()[0].state,
+            VoiceState::Releasing,
+            "DC voice does not decay, so it is still releasing"
+        );
+        poly.note_on(72, 100);
+        assert_ne!(
+            poly.allocator().voices()[0].note,
+            Some(72),
+            "NoSteal cannot reuse a still-Releasing voice yet"
+        );
+
+        // Tighten the cap so the worst-case timeout fires and force-frees it.
+        poly.set_max_release_time(0.01); // ~480 samples at 48 kHz
+        for _ in 0..1000 {
+            poly.tick();
+        }
+        assert_eq!(
+            poly.allocator().voices()[0].state,
+            VoiceState::Free,
+            "a non-decaying released voice must force-free after the release cap"
+        );
+
+        // The reclaimed slot accepts a new note again: exhaustion resolved.
+        poly.note_on(72, 100);
+        assert_eq!(poly.allocator().voices()[0].note, Some(72));
+        assert_eq!(poly.allocator().voices()[0].state, VoiceState::Active);
+    }
+
+    // A finite cap is installed by default (derived from sample rate), and a
+    // non-positive request disables it.
+    #[test]
+    fn test_release_cap_configuration() {
+        let sr = 48_000.0;
+        let mut poly = build_dc_poly(1, 1.0, sr);
+        // Default: MAX_RELEASE_S * sr samples.
+        assert_eq!(
+            poly.allocator().max_release_samples(),
+            (MAX_RELEASE_S * sr) as u64
+        );
+        poly.set_max_release_time(0.0);
+        assert_eq!(poly.allocator().max_release_samples(), u64::MAX);
     }
 
     // ---- VoiceMixer -------------------------------------------------------
