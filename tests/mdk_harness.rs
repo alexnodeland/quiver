@@ -30,31 +30,11 @@ use quiver::prelude::*;
 ///   defeat its purpose. Its filter state IS cleared on reset — only the random
 ///   draw differs — so this is an inherent property, not a bug.
 ///
-/// - `*` / `nan_recovery`: these modules read an audio input straight into a
-///   feedback/detector state without `sanitize_audio`, so a single non-finite
-///   input sample latches that state to NaN permanently (recoverable only via
-///   `reset()`). The `nan_recovery` check (added here) is precisely what surfaces
-///   this gap. Sanitizing them is out of scope for this CI/tests/docs pass and
-///   is tracked as its own remediation for the affected modules; allowlisting
-///   keeps the harness a real gate for the many modules that DO sanitize
-///   (Svf, DiodeLadderFilter, Chorus, Flanger, Phaser, DelayLine, Reverb, ...),
-///   catching any future regression in those. When a listed module is sanitized
-///   its entry goes stale and the guard below fails, forcing its removal.
-///   - `compressor`, `ducker`, `envelope_follower`: one-pole envelope detectors.
-///   - `parametric_eq`: TDF-II biquad feedback state.
-///   - `distortion`, `vocoder`: nonlinear/analysis feedback paths.
-///   - `crosstalk`, `ground_loop`: analog-artifact feedback/filter state.
-const ALLOWLIST: &[(&str, &str)] = &[
-    ("noise", "reset_clears_state"),
-    ("compressor", "nan_recovery"),
-    ("ducker", "nan_recovery"),
-    ("envelope_follower", "nan_recovery"),
-    ("parametric_eq", "nan_recovery"),
-    ("distortion", "nan_recovery"),
-    ("vocoder", "nan_recovery"),
-    ("crosstalk", "nan_recovery"),
-    ("ground_loop", "nan_recovery"),
-];
+/// All modules with feedback/detector state now pass `nan_recovery`: every
+/// audio-kind input feeding such state goes through `sanitize_audio`, so a
+/// non-finite sample cannot latch. Any new entry here needs the same level of
+/// justification as `noise` below.
+const ALLOWLIST: &[(&str, &str)] = &[("noise", "reset_clears_state")];
 
 /// Adapter so a `Box<dyn GraphModule>` from the registry satisfies the
 /// `M: GraphModule` bound on `ModuleTestHarness` (there is no blanket impl for

@@ -1,6 +1,6 @@
 //! Utility, logic, CV, and sequencing modules.
 
-use super::common::{EdgeDetector, GATE_HIGH_V, GATE_THRESHOLD_V};
+use super::common::{sanitize_audio, EdgeDetector, GATE_HIGH_V, GATE_THRESHOLD_V};
 use crate::port::{GraphModule, ParamDef, ParamId, PortDef, PortSpec, PortValues, SignalKind};
 use crate::rng;
 use alloc::format;
@@ -645,8 +645,8 @@ impl GraphModule for Crosstalk {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let in_a = inputs.get_or(0, 0.0);
-        let in_b = inputs.get_or(1, 0.0);
+        let in_a = sanitize_audio(inputs.get_or(0, 0.0));
+        let in_b = sanitize_audio(inputs.get_or(1, 0.0));
         let amount = inputs.get_or(2, 0.01).clamp(0.0, 0.5);
         let hf_emphasis = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
 
@@ -747,7 +747,7 @@ impl GraphModule for GroundLoop {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let level = inputs.get_or(1, 0.005).clamp(0.0, 0.1);
         let modulation = inputs.get_or(2, 0.1).clamp(0.0, 1.0);
         let freq_select = inputs.get_or(3, 1.0);

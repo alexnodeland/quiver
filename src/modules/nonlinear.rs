@@ -1,6 +1,6 @@
 //! Nonlinear and spectral processing modules.
 
-use super::common::{env_coef, GATE_THRESHOLD_V};
+use super::common::{env_coef, sanitize_audio, GATE_THRESHOLD_V};
 use super::oversample::{Oversample, Oversampler};
 use crate::analog::saturation;
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
@@ -232,7 +232,7 @@ impl GraphModule for Distortion {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let drive = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let tone = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
         let mode = inputs.get_or(3, 0.0).clamp(0.0, 1.0);
@@ -664,8 +664,8 @@ impl GraphModule for Vocoder {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let carrier = inputs.get_or(0, 0.0);
-        let modulator = inputs.get_or(1, 0.0);
+        let carrier = sanitize_audio(inputs.get_or(0, 0.0));
+        let modulator = sanitize_audio(inputs.get_or(1, 0.0));
         let bands_cv = inputs.get_or(2, 1.0).clamp(0.0, 1.0);
         let attack_cv = inputs.get_or(3, 0.3).clamp(0.0, 1.0);
         let release_cv = inputs.get_or(4, 0.3).clamp(0.0, 1.0);
