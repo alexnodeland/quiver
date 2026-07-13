@@ -129,7 +129,7 @@ quiver-dsp = "0.1"
 | `std` | Yes | Full functionality including OSC, plugins, visualization (implies `alloc`) |
 | `alloc` | No | Serialization, presets, and I/O for `no_std` + heap environments |
 | `simd` | No | SIMD vectorization for block processing (works with any tier) |
-| `wasm` | No | WebAssembly bindings (`wasm-bindgen`) + TypeScript types (`tsify`); implies `alloc`. Powers [`packages/@quiver/wasm`](./packages/@quiver/wasm) and the [browser synth demo](./demos/browser) |
+| `wasm` | No | WebAssembly bindings (`wasm-bindgen`) + TypeScript types (`tsify`); implies `alloc`. Powers [`packages/@quiver-dsp/wasm`](./packages/@quiver-dsp/wasm) and the [browser synth demo](./demos/browser) |
 
 ### `no_std` Support
 

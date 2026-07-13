@@ -1,5 +1,5 @@
 {
-  "name": "@quiver/types",
+  "name": "@quiver-dsp/types",
   "version": "0.1.0",
   "description": "TypeScript type definitions for Quiver modular synthesizer",
   "main": "dist/index.js",

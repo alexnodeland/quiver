@@ -42,7 +42,7 @@ npm run dev             # Start Vite dev server
 ```
 
 The dev server runs at `http://localhost:3000` (set in `vite.config.ts`). Build the
-`@quiver/wasm` package first (`make wasm` then `npm run build:wasm:ts` at the repo
+`@quiver-dsp/wasm` package first (`make wasm` then `npm run build:wasm:ts` at the repo
 root) so Vite can resolve the worklet/wasm assets.
 
 > Note: the Playwright E2E tests under `tests/` run against a **separate** static
@@ -67,8 +67,8 @@ npx playwright test
 
 ## Dependencies
 
-- Depends on the `@quiver/wasm` npm workspace package (declared in `package.json`
-  as `"@quiver/wasm": "^0.1.0"`; resolved via the root npm workspace symlink). The
+- Depends on the `@quiver-dsp/wasm` npm workspace package (declared in `package.json`
+  as `"@quiver-dsp/wasm": "^0.1.0"`; resolved via the root npm workspace symlink). The
   demo is itself a workspace (`demos/browser` in the root `package.json`
   `workspaces`), so `npm install` at the repo root links everything.
 - Vite for bundling and dev server
@@ -78,15 +78,15 @@ npx playwright test
 
 ### Audio Worklet Integration (the real audio path)
 Audio runs through the package's AudioWorklet helper, `createQuiverAudioNode` from
-`@quiver/wasm`. The Quiver engine lives **inside** the worklet render thread; the
+`@quiver-dsp/wasm`. The Quiver engine lives **inside** the worklet render thread; the
 demo drives it with message-based control calls (`addModule`, `connect`, `setParam`,
 `setOutput`, `loadPatch`, `savePatch`, MIDI). The worklet script and the `.wasm`
 binary are pulled in as Vite `?url` assets:
 
 ```ts
-import { createQuiverAudioNode } from '@quiver/wasm';
-import workletUrl from '@quiver/wasm/worklet?url';
-import wasmUrl from '@quiver/wasm/quiver_bg.wasm?url';
+import { createQuiverAudioNode } from '@quiver-dsp/wasm';
+import workletUrl from '@quiver-dsp/wasm/worklet?url';
+import wasmUrl from '@quiver-dsp/wasm/quiver_bg.wasm?url';
 
 const quiver = await createQuiverAudioNode(ctx, { workletUrl, wasmUrl });
 ```

@@ -102,14 +102,14 @@ registry, so a patch saved while they are present cannot be reconstructed by
 ## Building
 
 ```bash
-make wasm            # Build WASM glue (release) into packages/@quiver/wasm/
+make wasm            # Build WASM glue (release) into packages/@quiver-dsp/wasm/
 make wasm-dev        # Faster dev build
 make wasm-check      # Type-check for the wasm target
 ```
 
 `make wasm` emits `quiver.js`, `quiver.d.ts`, `quiver_bg.wasm`, `quiver_bg.wasm.d.ts`
-into `packages/@quiver/wasm/`. The npm package's tsup build (`npm run build
---workspace @quiver/wasm`) then compiles `src/index.ts`, `src/audio.ts` and
+into `packages/@quiver-dsp/wasm/`. The npm package's tsup build (`npm run build
+--workspace @quiver-dsp/wasm`) then compiles `src/index.ts`, `src/audio.ts` and
 `src/worklet.ts` on top of that glue into `dist/`.
 
 ## Feature Flag
@@ -121,7 +121,7 @@ Gated behind the `wasm` feature (which implies `alloc`). Enables `wasm-bindgen`,
 
 ### Thread safety
 Single-threaded (no `Send`/`Sync`). The AudioWorklet runs on its own thread and
-communicates with the main thread by message passing (see `@quiver/wasm`'s
+communicates with the main thread by message passing (see `@quiver-dsp/wasm`'s
 `audio.ts` / `worklet.ts`); the engine instance lives entirely inside the worklet.
 
 ### Memory management

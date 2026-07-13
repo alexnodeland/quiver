@@ -234,7 +234,7 @@ The DFT uses a Hann window to reduce spectral leakage.
 
 ## React Hooks
 
-The `@quiver/react` package provides hooks for common patterns:
+The `@quiver-dsp/react` package provides hooks for common patterns:
 
 ```tsx
 import {
@@ -242,7 +242,7 @@ import {
   useQuiverScope,
   useQuiverGate,
   useQuiverSpectrum
-} from '@quiver/react';
+} from '@quiver-dsp/react';
 
 function OutputMeter({ engine }) {
   const { rms_db, peak_db } = useQuiverLevel(engine, 'output', 0);

@@ -1,5 +1,5 @@
 {
-  "name": "@quiver/demo-browser-synth",
+  "name": "@quiver-dsp/demo-browser-synth",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@quiver/wasm": "^0.1.0"
+    "@quiver-dsp/wasm": "^0.1.0"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

@@ -1,5 +1,5 @@
 /**
- * @quiver/wasm - WASM bindings for Quiver modular synthesizer
+ * @quiver-dsp/wasm - WASM bindings for Quiver modular synthesizer
  *
  * This package provides the core WASM engine for running Quiver in a browser
  * environment, plus the AudioWorklet helpers that are the *only* supported way to
@@ -20,7 +20,7 @@
  */
 
 // Re-export the wasm-bindgen bindings: the QuiverEngine class value *and* its
-// generated type, so consumers (and @quiver/react) get the real type instead of a
+// generated type, so consumers (and @quiver-dsp/react) get the real type instead of a
 // hand-maintained duplicate. The glue lives at the package root (built by
 // wasm-pack) and is kept external from this bundle.
 export { QuiverEngine, QuiverError } from '../quiver';
@@ -45,7 +45,7 @@ let wasmInitPromise: Promise<unknown> | null = null;
  *
  * @example
  * ```typescript
- * import { initWasm, QuiverEngine } from '@quiver/wasm';
+ * import { initWasm, QuiverEngine } from '@quiver-dsp/wasm';
  *
  * await initWasm();
  * const engine = new QuiverEngine(44100);

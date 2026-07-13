@@ -1,7 +1,7 @@
 // Quiver Browser Synth - Polyphonic Version with Enhanced Visualizations
 // Retro-futuristic modular synthesizer demo.
 //
-// Audio runs through the @quiver/wasm AudioWorklet helper: the Quiver engine lives
+// Audio runs through the @quiver-dsp/wasm AudioWorklet helper: the Quiver engine lives
 // on the audio render thread and we drive it with message-based control calls
 // (addModule / connect / setParam / setOutput). This is the package's supported
 // real-time path — no main-thread audio engine, no deprecated ScriptProcessorNode.
@@ -13,10 +13,10 @@ import {
   createQuiverAudioNode,
   type QuiverAudioNode,
   type QuiverEngine,
-} from '@quiver/wasm';
+} from '@quiver-dsp/wasm';
 // Asset URLs resolved by Vite: the self-contained worklet bundle and the wasm binary.
-import workletUrl from '@quiver/wasm/worklet?url';
-import wasmUrl from '@quiver/wasm/quiver_bg.wasm?url';
+import workletUrl from '@quiver-dsp/wasm/worklet?url';
+import wasmUrl from '@quiver-dsp/wasm/quiver_bg.wasm?url';
 
 const NUM_VOICES = 4;
 const FFT_SIZE = 256;

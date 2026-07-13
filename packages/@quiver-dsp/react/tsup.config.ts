@@ -13,6 +13,6 @@ export default defineConfig({
   banner: {
     js: "'use client';",
   },
-  // Peer/host packages stay external; @quiver/* are resolved by the consumer.
-  external: ['react', '@xyflow/react', '@quiver/types', '@quiver/wasm'],
+  // Peer/host packages stay external; @quiver-dsp/* are resolved by the consumer.
+  external: ['react', '@xyflow/react', '@quiver-dsp/types', '@quiver-dsp/wasm'],
 });

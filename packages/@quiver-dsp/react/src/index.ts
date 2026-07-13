@@ -1,5 +1,5 @@
 /**
- * @quiver/react - React utilities for Quiver modular synthesizer
+ * @quiver-dsp/react - React utilities for Quiver modular synthesizer
  *
  * This package provides React Flow mapping utilities and hooks for building
  * modular synthesizer UIs with Quiver.
@@ -13,13 +13,13 @@ import type {
   PortReference,
   SignalKind,
   ModuleTypeId,
-} from '@quiver/types';
+} from '@quiver-dsp/types';
 import {
   parsePortReference,
   createPortReference,
   getSignalColor,
   DEFAULT_SIGNAL_COLORS,
-} from '@quiver/types';
+} from '@quiver-dsp/types';
 
 // =============================================================================
 // React Flow Types
@@ -407,7 +407,7 @@ export {
 } from './hooks';
 
 // =============================================================================
-// Re-exports from @quiver/types
+// Re-exports from @quiver-dsp/types
 // =============================================================================
 
 export {
@@ -438,4 +438,4 @@ export {
   getSignalColor,
   checkPortCompatibility,
   validatePatchDef,
-} from '@quiver/types';
+} from '@quiver-dsp/types';

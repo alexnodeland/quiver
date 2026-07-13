@@ -1,5 +1,5 @@
 /**
- * @quiver/types - TypeScript type definitions for Quiver modular synthesizer
+ * @quiver-dsp/types - TypeScript type definitions for Quiver modular synthesizer
  *
  * This package provides type definitions that match the Rust serialization format,
  * enabling type-safe integration between the Quiver audio engine and frontend UIs.

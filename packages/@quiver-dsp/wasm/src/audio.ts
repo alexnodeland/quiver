@@ -82,9 +82,9 @@ export interface QuiverAudioNode {
  *
  * @example
  * ```typescript
- * import { createQuiverAudioNode } from '@quiver/wasm';
- * import workletUrl from '@quiver/wasm/dist/worklet.js?url';
- * import wasmUrl from '@quiver/wasm/quiver_bg.wasm?url';
+ * import { createQuiverAudioNode } from '@quiver-dsp/wasm';
+ * import workletUrl from '@quiver-dsp/wasm/dist/worklet.js?url';
+ * import wasmUrl from '@quiver-dsp/wasm/quiver_bg.wasm?url';
  *
  * const ctx = new AudioContext();
  * const quiver = await createQuiverAudioNode(ctx, { workletUrl, wasmUrl });

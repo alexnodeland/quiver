@@ -137,7 +137,7 @@ clean:
 	rm -rf docs/book/
 	rm -rf pkg/
 	rm -f tarpaulin-report.html
-	rm -f packages/@quiver/wasm/quiver*.js packages/@quiver/wasm/quiver*.wasm packages/@quiver/wasm/quiver*.d.ts
+	rm -f packages/@quiver-dsp/wasm/quiver*.js packages/@quiver-dsp/wasm/quiver*.wasm packages/@quiver-dsp/wasm/quiver*.d.ts
 
 # Setup development environment
 setup: install-hooks
@@ -199,8 +199,8 @@ watch-check:
 # (wasm-pack always uses the `release` profile).
 wasm:
 	wasm-pack build --target web --no-default-features --features wasm
-	cp pkg/quiver.js pkg/quiver.d.ts pkg/quiver_bg.wasm pkg/quiver_bg.wasm.d.ts packages/@quiver/wasm/
-	@echo "WASM package built: packages/@quiver/wasm/"
+	cp pkg/quiver.js pkg/quiver.d.ts pkg/quiver_bg.wasm pkg/quiver_bg.wasm.d.ts packages/@quiver-dsp/wasm/
+	@echo "WASM package built: packages/@quiver-dsp/wasm/"
 
 # Build WASM package (development, faster)
 #
@@ -213,8 +213,8 @@ wasm:
 # `cargo build` argument error) instead of the intended dev build.
 wasm-dev:
 	wasm-pack build --dev --target web --no-default-features --features wasm
-	cp pkg/quiver.js pkg/quiver.d.ts pkg/quiver_bg.wasm pkg/quiver_bg.wasm.d.ts packages/@quiver/wasm/
-	@echo "WASM package built (dev): packages/@quiver/wasm/"
+	cp pkg/quiver.js pkg/quiver.d.ts pkg/quiver_bg.wasm pkg/quiver_bg.wasm.d.ts packages/@quiver-dsp/wasm/
+	@echo "WASM package built (dev): packages/@quiver-dsp/wasm/"
 
 # Check WASM compilation without building
 wasm-check:
@@ -223,7 +223,7 @@ wasm-check:
 # Check TypeScript compilation
 ts-check:
 	@echo "Checking TypeScript..."
-	@cd packages/@quiver/types && npx tsc --noEmit 2>/dev/null || (npm install --silent && npx tsc --noEmit)
+	@cd packages/@quiver-dsp/types && npx tsc --noEmit 2>/dev/null || (npm install --silent && npx tsc --noEmit)
 	@echo "TypeScript OK"
 
 # Run browser tests with Playwright

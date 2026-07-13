@@ -72,7 +72,7 @@ schemas/                # JSON schemas for patch format
 
 docs/                   # mdbook documentation source
 
-packages/@quiver/       # TypeScript/React packages for WASM
+packages/@quiver-dsp/       # TypeScript/React packages for WASM
 ├── wasm/               # WASM bindings package
 ├── types/              # TypeScript type definitions
 └── react/              # React hooks and components
@@ -388,10 +388,10 @@ The `wasm` feature enables JavaScript bindings via `wasm-bindgen` and TypeScript
 
 ### TypeScript Packages
 
-The `packages/@quiver/` directory contains npm packages:
-- `@quiver/wasm` - Core WASM bindings and audio worklet
-- `@quiver/types` - TypeScript type definitions
-- `@quiver/react` - React hooks for Quiver integration
+The `packages/@quiver-dsp/` directory contains npm packages:
+- `@quiver-dsp/wasm` - Core WASM bindings and audio worklet
+- `@quiver-dsp/types` - TypeScript type definitions
+- `@quiver-dsp/react` - React hooks for Quiver integration
 
 ## Documentation
 

@@ -14,16 +14,16 @@ import type {
   SubscriptionTarget,
   CatalogResponse,
   ModuleCatalogEntry,
-} from '@quiver/types';
+} from '@quiver-dsp/types';
 import {
   getObservableValueKey,
   getSubscriptionTargetKey,
-} from '@quiver/types';
+} from '@quiver-dsp/types';
 
-// Import the real engine type from the built @quiver/wasm entry rather than
+// Import the real engine type from the built @quiver-dsp/wasm entry rather than
 // duck-typing a duplicate here (Q177). This is the exact wasm-bindgen surface, so
 // it can never drift from the actual API.
-import type { QuiverEngine } from '@quiver/wasm';
+import type { QuiverEngine } from '@quiver-dsp/wasm';
 
 export type { QuiverEngine };
 
@@ -312,7 +312,7 @@ export function useQuiverEngine(sampleRate: number = 44100) {
     async function init() {
       try {
         // Dynamic import the WASM module
-        const { createEngine } = await import('@quiver/wasm');
+        const { createEngine } = await import('@quiver-dsp/wasm');
         const eng = await createEngine(sampleRate);
 
         if (mounted) {

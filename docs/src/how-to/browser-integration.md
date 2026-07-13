@@ -8,14 +8,14 @@ Quiver provides three npm packages for browser integration:
 
 | Package | Purpose |
 |---------|---------|
-| `@quiver/wasm` | Core WASM engine and AudioWorklet utilities |
-| `@quiver/react` | React hooks for UI integration |
-| `@quiver/types` | TypeScript type definitions |
+| `@quiver-dsp/wasm` | Core WASM engine and AudioWorklet utilities |
+| `@quiver-dsp/react` | React hooks for UI integration |
+| `@quiver-dsp/types` | TypeScript type definitions |
 
 ## Installation
 
 ```bash
-npm install @quiver/wasm @quiver/react
+npm install @quiver-dsp/wasm @quiver-dsp/react
 ```
 
 ## Initializing the Engine
@@ -23,7 +23,7 @@ npm install @quiver/wasm @quiver/react
 The WASM module must be initialized before use:
 
 ```typescript
-import { initWasm, createEngine } from '@quiver/wasm';
+import { initWasm, createEngine } from '@quiver-dsp/wasm';
 
 // Initialize once at app startup
 await initWasm();
@@ -107,9 +107,9 @@ takes an `AudioContext` and the worklet/wasm URLs, and returns a handle you driv
 to get audio out.)
 
 ```typescript
-import { createQuiverAudioNode } from '@quiver/wasm';
-import workletUrl from '@quiver/wasm/dist/worklet.js?url';
-import wasmUrl from '@quiver/wasm/quiver_bg.wasm?url';
+import { createQuiverAudioNode } from '@quiver-dsp/wasm';
+import workletUrl from '@quiver-dsp/wasm/dist/worklet.js?url';
+import wasmUrl from '@quiver-dsp/wasm/quiver_bg.wasm?url';
 
 async function startAudio(myPatch) {
   const ctx = new AudioContext();
@@ -165,7 +165,7 @@ Main Thread                      Audio Thread
 Initialize the engine in a component:
 
 ```tsx
-import { useQuiverEngine } from '@quiver/react';
+import { useQuiverEngine } from '@quiver-dsp/react';
 
 function Synth() {
   const { engine, isReady, error } = useQuiverEngine(44100);
@@ -182,7 +182,7 @@ function Synth() {
 Bind a parameter to UI. Returns a `[value, setValue]` tuple:
 
 ```tsx
-import { useQuiverParam } from '@quiver/react';
+import { useQuiverParam } from '@quiver-dsp/react';
 
 function FrequencyKnob({ engine, nodeId }) {
   const [value, setValue] = useQuiverParam(engine, nodeId, 0);
@@ -196,7 +196,7 @@ function FrequencyKnob({ engine, nodeId }) {
 Display level meters. Returns `{ rmsDb, peakDb }`:
 
 ```tsx
-import { useQuiverLevel } from '@quiver/react';
+import { useQuiverLevel } from '@quiver-dsp/react';
 
 function Meter({ engine, nodeId, portId }) {
   const { rmsDb, peakDb } = useQuiverLevel(engine, nodeId, portId);
