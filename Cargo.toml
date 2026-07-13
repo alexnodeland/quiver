@@ -1,15 +1,49 @@
 [package]
-name = "quiver"
+# crates.io package name. The bare name `quiver` is taken on crates.io by an
+# unrelated Apache-Arrow crate, so the package publishes as `quiver-dsp` while
+# the LIBRARY name stays `quiver` (see `[lib] name` below): consumers
+# `cargo add quiver-dsp` but still write `use quiver::prelude::*`.
+name = "quiver-dsp"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.78"
 authors = ["Alex Nodeland"]
 description = "A modular audio synthesis library using Arrow-style combinators and graph-based patching"
+readme = "README.md"
+documentation = "https://docs.rs/quiver-dsp"
 license = "MIT"
 repository = "https://github.com/alexnodeland/quiver"
 keywords = ["audio", "synthesis", "modular", "dsp", "music"]
 categories = ["multimedia::audio", "game-development"]
+# This repo is a monorepo: besides the crate itself it holds a TypeScript/npm
+# workspace (`packages/`, `demos/`) and an internal audit report. None of that
+# belongs in the crates.io tarball for a Rust consumer (verified with
+# `cargo package --list --allow-dirty`, which — before this exclude list —
+# pulled in all of `demos/`, `packages/`, the root `package.json`/
+# `package-lock.json`, `AUDIT.md` (~270KB), and every `CLAUDE.md`).
+exclude = ["AUDIT.md", "CLAUDE.md", "**/CLAUDE.md", "demos/", "packages/", "package.json", "package-lock.json"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
+# Keep the library (import) name `quiver` even though the package is published
+# as `quiver-dsp` — all code, docs, and examples use `use quiver::...`, and
+# wasm-pack's generated JS glue keeps its `quiver.js`/`quiver_bg.wasm` names.
+name = "quiver"
+# `cdylib` is required by wasm-pack (Q140): wasm-bindgen's build pipeline links
+# a `cdylib` artifact to produce the `.wasm` binary consumed by JS. Keeping it
+# declared unconditionally means every native (non-wasm) build also produces an
+# unused cdylib artifact, and — more importantly — `no_std` checks that don't
+# override `--crate-type` can hit spurious lang-item/allocator errors, because
+# rustc requires an allocator/panic-handler for cdylib outputs even when the
+# check target is `rlib`-shaped in spirit. Removing `cdylib` breaks
+# `make wasm`/`make wasm-dev` (wasm-pack refuses to build without it). The
+# resolution: keep `cdylib` here, and for no_std verification (see the
+# `no_std` CI job / `make check-nostd`) invoke
+# `cargo rustc --crate-type rlib ...` to override the declared crate-type for
+# that one invocation instead of removing it from the manifest.
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
@@ -18,6 +52,15 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"], 
 slotmap = { version = "1.0", default-features = false, features = ["serde"] }
 rand = { version = "0.8", optional = true }
 libm = "0.2"
+# Portable 64-bit atomics: targets whose `max_atomic_width < 64` (e.g. the
+# embedded `thumbv7em-none-eabihf` no_std CI target) do not provide
+# `core::sync::atomic::AtomicU64`. `portable-atomic` supplies it (native where
+# available, a lock-based `fallback` otherwise), so `AtomicF64`/`AtomicNote`,
+# the polyphony voice control handles, and the no_std global RNG all build on
+# 32-bit-atomic targets.
+portable-atomic = { version = "1", default-features = false, features = ["fallback"] }
+# SIMD backend (no_std-compatible); enabled by the `simd` feature.
+wide = { version = "0.7", default-features = false, optional = true }
 
 # WASM dependencies (optional)
 wasm-bindgen = { version = "0.2", optional = true }
@@ -29,6 +72,7 @@ console_error_panic_hook = { version = "0.1", optional = true }
 [dev-dependencies]
 approx = "0.5"
 criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
 
 [[bench]]
 name = "audio_performance"
@@ -41,7 +85,7 @@ std = ["alloc", "serde/std", "slotmap/std", "rand"]
 # Heap allocation support for no_std (enables serialization, presets, I/O)
 alloc = ["serde_json"]
 # SIMD vectorization (works with any feature combination)
-simd = []
+simd = ["dep:wide"]
 # WASM target (browser) - enables wasm-bindgen bindings and TypeScript type generation
 wasm = [
     "alloc",
@@ -56,7 +100,22 @@ wasm = [
 name = "simple_patch"
 path = "examples/simple_patch.rs"
 
-# Optimize for WASM size in release builds
+# Speed-optimized release profile (Q117/Q118).
+#
+# `opt-level = 3` optimizes for execution speed — the right default for a
+# real-time DSP library. This is the profile the benchmarks and the
+# `realtime_compliance` test measure, so the numbers reflect what a real host
+# actually ships. Trade-off: larger binaries (including a larger `.wasm`) than
+# `opt-level = "z"`. If you specifically need the smallest binary (e.g.
+# bandwidth-constrained WASM delivery), build with the size-optimized profile
+# below (`cargo build --profile wasm-size`).
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
+
+# Size-optimized variant of `release` for callers who need the smallest binary
+# rather than the fastest one. Inherits everything from `release` and only
+# overrides the optimization level.
+[profile.wasm-size]
+inherits = "release"
+opt-level = "z"

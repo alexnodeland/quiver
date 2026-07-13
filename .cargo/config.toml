@@ -1,0 +1,15 @@
+# Cargo build configuration.
+
+# Enable WebAssembly SIMD (simd128) for all wasm32 builds (Q118).
+#
+# Without this, wasm builds emit purely scalar code — the worst case for
+# real-time DSP in the browser. `+simd128` lets the compiler autovectorize and,
+# when the crate's `simd` feature is enabled, lets the `wide` crate's `f64x4`
+# operations lower to real WebAssembly SIMD instructions. The flag is harmless
+# for scalar code paths, so it is safe to apply to every wasm32 build.
+#
+# Real-time budget numbers are measured on native builds (see
+# `benches/CLAUDE.md`); the browser-delivered wasm build's numbers come from the
+# browser demo path.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

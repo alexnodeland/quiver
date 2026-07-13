@@ -4,10 +4,15 @@ docs/book/
 
 # WASM build artifacts
 /pkg
-packages/@quiver/wasm/quiver.js
-packages/@quiver/wasm/quiver.d.ts
-packages/@quiver/wasm/quiver_bg.wasm
-packages/@quiver/wasm/quiver_bg.wasm.d.ts
+packages/@quiver-dsp/wasm/quiver.js
+packages/@quiver-dsp/wasm/quiver.d.ts
+packages/@quiver-dsp/wasm/quiver_bg.wasm
+packages/@quiver-dsp/wasm/quiver_bg.wasm.d.ts
+
+# Built TypeScript package output (tsup). Regenerated on build; shipped via each
+# package's "files" field, never committed.
+packages/@quiver-dsp/*/dist/
+demos/browser/dist/
 
 # Node
 node_modules/

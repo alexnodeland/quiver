@@ -13,12 +13,14 @@ use crate::introspection::{ControlType, ModuleIntrospection, ParamCurve, ParamIn
 
 use crate::analog::{AnalogVco, Saturator, Wavefolder};
 use crate::modules::{
-    Adsr, Arpeggiator, Attenuverter, BernoulliGate, ChordMemory, Clock, Comparator, Crossfader,
-    Crosstalk, DiodeLadderFilter, FormantOsc, Granular, GroundLoop, Lfo, LogicAnd, LogicNot,
-    LogicOr, LogicXor, Max, Min, Mixer, Multiple, NoiseGenerator, Offset, ParametricEq,
+    Adsr, Arpeggiator, Attenuverter, BernoulliGate, Bitcrusher, ChordMemory, Chorus, Clock,
+    Comparator, Compressor, Crossfader, Crosstalk, DelayLine, DiodeLadderFilter, Distortion,
+    Ducker, EnvelopeFollower, Euclidean, Flanger, FormantOsc, Granular, GroundLoop, KarplusStrong,
+    Lfo, Limiter, LogicAnd, LogicNot, LogicOr, LogicXor, Max, MidSideDecode, MidSideEncode, Min,
+    Mixer, Multiple, NoiseGate, NoiseGenerator, Offset, Oversample, ParametricEq, Phaser,
     PitchShifter, PrecisionAdder, Quantizer, Rectifier, Reverb, RingModulator, SampleAndHold,
-    Scale, SlewLimiter, StepSequencer, StereoOutput, Svf, UnitDelay, VcSwitch, Vca, Vco, Vocoder,
-    Wavetable,
+    SamplePlayer, Scale, ScaleQuantizer, SlewLimiter, StepSequencer, StereoOutput, Supersaw, Svf,
+    Tremolo, UnitDelay, VcSwitch, Vca, Vco, Vibrato, Vocoder, Wavetable,
 };
 
 // =============================================================================
@@ -50,6 +52,8 @@ impl ModuleIntrospection for VcSwitch {}
 impl ModuleIntrospection for Min {}
 impl ModuleIntrospection for Max {}
 impl ModuleIntrospection for Crossfader {}
+impl ModuleIntrospection for MidSideEncode {}
+impl ModuleIntrospection for MidSideDecode {}
 
 // Effects (CV-controlled)
 impl ModuleIntrospection for RingModulator {}
@@ -78,6 +82,66 @@ impl ModuleIntrospection for PitchShifter {}
 impl ModuleIntrospection for Reverb {}
 impl ModuleIntrospection for Vocoder {}
 impl ModuleIntrospection for Granular {}
+
+// Effects & dynamics whose controllable quantities are all input ports (rate, depth, mix,
+// threshold, drive, …). They expose no non-port internal state, so the default empty impl
+// is correct: their parameters are discovered and driven through the port system, and the
+// `Patch` synthesizes `ParamInfo`s for those ports (see `Patch::param_infos`).
+impl ModuleIntrospection for Bitcrusher {}
+impl ModuleIntrospection for Chorus {}
+impl ModuleIntrospection for Compressor {}
+impl ModuleIntrospection for DelayLine {}
+impl ModuleIntrospection for EnvelopeFollower {}
+impl ModuleIntrospection for Euclidean {}
+impl ModuleIntrospection for Flanger {}
+impl ModuleIntrospection for KarplusStrong {}
+impl ModuleIntrospection for Limiter {}
+impl ModuleIntrospection for NoiseGate {}
+impl ModuleIntrospection for Phaser {}
+impl ModuleIntrospection for Supersaw {}
+impl ModuleIntrospection for Tremolo {}
+impl ModuleIntrospection for Vibrato {}
+// ScaleQuantizer's `root`/`scale` selection are input ports; its only genuinely internal
+// state is an optional custom-scale table (a `&[cents]` list, not a scalar value), which is
+// intentionally excluded from the value-typed parameter surface.
+impl ModuleIntrospection for ScaleQuantizer {}
+
+/// Map an [`Oversample`] factor (1/2/4) to a select index (0/1/2) and back. Shared by the
+/// waveshaping modules whose only non-port parameter is their opt-in oversampling factor.
+fn oversample_to_index(factor: usize) -> f64 {
+    match factor {
+        4 => 2.0,
+        2 => 1.0,
+        _ => 0.0,
+    }
+}
+
+fn oversample_from_index(value: f64) -> Oversample {
+    // `libm::round` rather than `f64::round` so this compiles on `no_std + alloc` (the
+    // introspection tier is alloc-gated, not std-gated).
+    match libm::round(value) as i64 {
+        2 => Oversample::X4,
+        1 => Oversample::X2,
+        _ => Oversample::Off,
+    }
+}
+
+impl ModuleIntrospection for Distortion {
+    fn param_infos(&self) -> Vec<ParamInfo> {
+        vec![ParamInfo::select("oversample", "Oversampling", 3)
+            .with_value(oversample_to_index(self.oversample_factor()))]
+    }
+
+    fn set_param_by_id(&mut self, id: &str, value: f64) -> bool {
+        match id {
+            "oversample" => {
+                self.set_oversample(oversample_from_index(value));
+                true
+            }
+            _ => false,
+        }
+    }
+}
 
 // =============================================================================
 // Modules with Parameters
@@ -153,6 +217,11 @@ impl ModuleIntrospection for StepSequencer {
                         alloc::format!("step_{}_gate", i),
                         alloc::format!("Step {} Gate", i + 1),
                     )
+                    // Gates default ON to match the constructor (`gates: [true; 8]`). Without
+                    // this the `ParamInfo::toggle` default of 0.0 would equal a legitimately
+                    // OFF gate, so `to_def`'s "differs from default" filter would silently drop
+                    // it and the gate would spring back ON on reload.
+                    .with_default(1.0)
                     .with_value(if gate { 1.0 } else { 0.0 }),
                 );
             }
@@ -266,20 +335,79 @@ impl ModuleIntrospection for Saturator {
 
 impl ModuleIntrospection for Wavefolder {
     fn param_infos(&self) -> Vec<ParamInfo> {
-        vec![ParamInfo::new("threshold", "Fold Threshold")
-            .with_range(0.1, 5.0)
-            .with_default(1.0)
-            .with_value(self.threshold)
-            .with_curve(ParamCurve::Exponential)
-            .with_control(ControlType::Knob)
-            .with_unit("V")
-            .with_format(ValueFormat::Decimal { places: 2 })]
+        vec![
+            ParamInfo::new("threshold", "Fold Threshold")
+                .with_range(0.1, 5.0)
+                .with_default(1.0)
+                .with_value(self.threshold)
+                .with_curve(ParamCurve::Exponential)
+                .with_control(ControlType::Knob)
+                .with_unit("V")
+                .with_format(ValueFormat::Decimal { places: 2 }),
+            ParamInfo::select("oversample", "Oversampling", 3)
+                .with_value(oversample_to_index(self.oversample_factor())),
+        ]
     }
 
     fn set_param_by_id(&mut self, id: &str, value: f64) -> bool {
         match id {
             "threshold" => {
                 self.threshold = value.clamp(0.1, 5.0);
+                true
+            }
+            "oversample" => {
+                self.set_oversample(oversample_from_index(value));
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl ModuleIntrospection for SamplePlayer {
+    fn param_infos(&self) -> Vec<ParamInfo> {
+        vec![ParamInfo::percent("start", "Start Position")
+            .with_default(0.0)
+            .with_value(self.start_position())]
+    }
+
+    fn set_param_by_id(&mut self, id: &str, value: f64) -> bool {
+        match id {
+            "start" => {
+                self.set_start(value);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl ModuleIntrospection for Ducker {
+    fn param_infos(&self) -> Vec<ParamInfo> {
+        // These knob ids deliberately differ from the CV input ports "amount"/"threshold"
+        // (dynamics.rs). A colliding id would be dropped by `Patch::param_infos`' shadow
+        // filter (port wins) and `set_param_by_id` would route to the CV-port base (default
+        // 0.0) instead of the depth/threshold knobs (defaults 1.0/0.2), leaving the primary
+        // controls invisible to GUIs and un-serializable. `depth`/`thresh` are the base knobs;
+        // the same-named ports remain the (bipolar CV) modulation inputs.
+        vec![
+            ParamInfo::percent("depth", "Duck Amount")
+                .with_default(1.0)
+                .with_value(self.amount()),
+            ParamInfo::percent("thresh", "Threshold")
+                .with_default(0.2)
+                .with_value(self.threshold()),
+        ]
+    }
+
+    fn set_param_by_id(&mut self, id: &str, value: f64) -> bool {
+        match id {
+            "depth" => {
+                self.set_amount(value);
+                true
+            }
+            "thresh" => {
+                self.set_threshold(value);
                 true
             }
             _ => false,
@@ -381,5 +509,37 @@ mod tests {
         assert!(Vca::default().param_infos().is_empty());
         assert!(Clock::default().param_infos().is_empty());
         assert!(LogicAnd::default().param_infos().is_empty());
+        // Mid/side utilities are fully port/CV-controlled.
+        assert!(MidSideEncode::default().param_infos().is_empty());
+        assert!(MidSideDecode::default().param_infos().is_empty());
+    }
+
+    #[test]
+    fn test_sample_player_introspection() {
+        let mut player = SamplePlayer::default();
+        let params = player.param_infos();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].id, "start");
+
+        assert!(player.set_param_by_id("start", 0.5));
+        assert!((player.param_infos()[0].value - 0.5).abs() < 1e-9);
+        assert!(!player.set_param_by_id("invalid", 0.0));
+    }
+
+    #[test]
+    fn test_ducker_introspection() {
+        let mut ducker = Ducker::default();
+        let params = ducker.param_infos();
+        assert_eq!(params.len(), 2);
+        // Knob ids are distinct from the same-named CV ports (see impl comment).
+        assert_eq!(params[0].id, "depth");
+        assert_eq!(params[1].id, "thresh");
+
+        assert!(ducker.set_param_by_id("depth", 0.25));
+        assert!(ducker.set_param_by_id("thresh", 0.6));
+        let p = ducker.param_infos();
+        assert!((p[0].value - 0.25).abs() < 1e-9);
+        assert!((p[1].value - 0.6).abs() < 1e-9);
+        assert!(!ducker.set_param_by_id("invalid", 0.0));
     }
 }

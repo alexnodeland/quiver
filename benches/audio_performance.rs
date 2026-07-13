@@ -24,6 +24,9 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use quiver::prelude::*;
+// Modules not re-exported through the prelude (used by the heavy-FX and
+// expensive-module benches).
+use quiver::modules::{Chorus, DelayLine, KarplusStrong, Supersaw};
 
 // ============================================================================
 // Sample Rate Constants
@@ -133,6 +136,95 @@ fn create_complex_patch(sample_rate: f64) -> Patch {
     // To output
     patch.connect(vca.out("out"), output.in_("left")).unwrap();
     patch.connect(vca.out("out"), output.in_("right")).unwrap();
+
+    patch.set_output(output.id());
+    patch.compile().unwrap();
+    patch
+}
+
+// ----------------------------------------------------------------------------
+// Populated polyphony voice (Q112)
+// ----------------------------------------------------------------------------
+
+/// Build one realistic monophonic voice graph for [`PolyPatch::with_voice_fn`]:
+/// `ctrl → Vco → Svf → Vca`, with an `Adsr` (driven by the controller gate)
+/// modulating the VCA. This is the DSP every polyphony benchmark must actually
+/// measure — the old benches ran controller-only (empty) voices and therefore
+/// measured *zero* synthesis work.
+fn build_synth_voice(patch: &mut Patch, ctrl: &NodeHandle) -> Result<(), PatchError> {
+    let sr = patch.sample_rate();
+    let vco = patch.add("vco", Vco::new(sr));
+    let svf = patch.add("svf", Svf::new(sr));
+    let vca = patch.add("vca", Vca::new());
+    let adsr = patch.add("adsr", Adsr::new(sr));
+    let out = patch.add("out", StereoOutput::new());
+
+    // Controller → pitch and envelope gate.
+    patch.connect(ctrl.out("voct"), vco.in_("voct"))?;
+    patch.connect(ctrl.out("gate"), adsr.in_("gate"))?;
+    // Signal path: VCO saw → filter → VCA.
+    patch.connect(vco.out("saw"), svf.in_("in"))?;
+    patch.connect(svf.out("lp"), vca.in_("in"))?;
+    // Envelope → VCA gain.
+    patch.connect(adsr.out("env"), vca.in_("cv"))?;
+    // VCA → stereo output (both channels).
+    patch.connect(vca.out("out"), out.in_("left"))?;
+    patch.connect(vca.out("out"), out.in_("right"))?;
+
+    patch.set_output(out.id());
+    Ok(())
+}
+
+/// Create a polyphonic synth whose voices actually make sound (see
+/// [`build_synth_voice`]).
+fn create_poly_synth(num_voices: usize, sample_rate: f64) -> PolyPatch {
+    PolyPatch::with_voice_fn(num_voices, sample_rate, build_synth_voice)
+        .expect("voice graph must build")
+}
+
+/// Warm up a freshly built polyphonic synth and assert it produces NON-SILENT
+/// output. This makes an accidentally-empty or mis-wired voice graph fail the
+/// benchmark loudly instead of silently measuring nothing (Q112). Leaves the
+/// synth reset so the caller can set up its own note pattern.
+fn assert_poly_non_silent(poly: &mut PolyPatch) {
+    poly.note_on(60, 100);
+    let mut energy = 0.0;
+    for _ in 0..100 {
+        let (l, r) = poly.tick();
+        energy += l.abs() + r.abs();
+    }
+    assert!(
+        energy > 1e-3,
+        "polyphonic voice produced silence over 100 ticks (energy = {energy}); \
+         the voice graph is empty or mis-wired — benches would measure nothing"
+    );
+    poly.reset();
+}
+
+/// Worst-case heavy-FX chain (Q119): `Supersaw → DiodeLadderFilter → Chorus →
+/// DelayLine → Reverb → StereoOutput`. This is the most expensive single-voice
+/// signal path in the library and doubles as the worst-case patch for the
+/// real-time compliance test in `tests/realtime_compliance.rs`.
+fn create_heavy_fx_patch(sample_rate: f64) -> Patch {
+    let mut patch = Patch::new(sample_rate);
+
+    let saw = patch.add("saw", Supersaw::new(sample_rate));
+    let filter = patch.add("filter", DiodeLadderFilter::new(sample_rate));
+    let chorus = patch.add("chorus", Chorus::new(sample_rate));
+    let delay = patch.add("delay", DelayLine::new(sample_rate));
+    let reverb = patch.add("reverb", Reverb::new(sample_rate));
+    let output = patch.add("output", StereoOutput::new());
+
+    patch.connect(saw.out("out"), filter.in_("in")).unwrap();
+    patch.connect(filter.out("out"), chorus.in_("in")).unwrap();
+    patch.connect(chorus.out("out"), delay.in_("in")).unwrap();
+    patch.connect(delay.out("out"), reverb.in_("in")).unwrap();
+    patch
+        .connect(reverb.out("left"), output.in_("left"))
+        .unwrap();
+    patch
+        .connect(reverb.out("right"), output.in_("right"))
+        .unwrap();
 
     patch.set_output(output.id());
     patch.compile().unwrap();
@@ -431,8 +523,8 @@ fn bench_polyphony_scaling(c: &mut Criterion) {
             BenchmarkId::new("tick", num_voices),
             &num_voices,
             |b, &voices| {
-                let mut poly = PolyPatch::new(voices, sample_rate);
-                poly.compile().unwrap();
+                let mut poly = create_poly_synth(voices, sample_rate);
+                assert_poly_non_silent(&mut poly);
 
                 // Activate all voices
                 for i in 0..voices {
@@ -459,8 +551,8 @@ fn bench_polyphony_with_buffer(c: &mut Criterion) {
             BenchmarkId::new("256_samples", num_voices),
             &num_voices,
             |b, &voices| {
-                let mut poly = PolyPatch::new(voices, sample_rate);
-                poly.compile().unwrap();
+                let mut poly = create_poly_synth(voices, sample_rate);
+                assert_poly_non_silent(&mut poly);
 
                 // Activate all voices
                 for i in 0..voices {
@@ -562,9 +654,9 @@ fn bench_unison_processing(c: &mut Criterion) {
             BenchmarkId::new("voices", unison_voices),
             &unison_voices,
             |b, &unison| {
-                let mut poly = PolyPatch::new(4, sample_rate);
+                let mut poly = create_poly_synth(4, sample_rate);
                 poly.set_unison(UnisonConfig::new(unison, 10.0));
-                poly.compile().unwrap();
+                assert_poly_non_silent(&mut poly);
 
                 // Activate one voice with unison
                 poly.note_on(60, 100);
@@ -619,9 +711,22 @@ fn bench_patch_compilation(c: &mut Criterion) {
 }
 
 // ============================================================================
-// SIMD Block Processing Benchmarks
+// SIMD Block Processing Benchmarks (scalar vs. SIMD A/B — Q116)
 // ============================================================================
 
+/// Block-operation benchmarks. The four element-wise ops (`add_scalar`,
+/// `mul_scalar`, `add_block`, `mul_block`) are feature-gated in `src/simd.rs`:
+/// built with `--features simd` they run the `wide::f64x4` path, otherwise the
+/// scalar path. The bench *names are identical* either way, so a criterion
+/// baseline saved from the scalar build compares directly against the SIMD
+/// build:
+///
+/// ```text
+/// cargo bench -- simd --save-baseline scalar
+/// cargo bench --features simd -- simd --baseline scalar
+/// ```
+///
+/// (`make bench-simd` runs exactly that flow.)
 fn bench_audio_block_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("simd/audio_block");
 
@@ -650,6 +755,32 @@ fn bench_audio_block_operations(c: &mut Criterion) {
 
             b.iter(|| {
                 block.mul_scalar(black_box(0.5));
+                block.get(0)
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("add_block", size), &size, |b, &sz| {
+            let mut block = AudioBlock::new(sz);
+            let other = AudioBlock::constant(sz, 0.25);
+            for i in 0..sz {
+                block.set(i, i as f64 * 0.001);
+            }
+
+            b.iter(|| {
+                block.add_block(black_box(&other));
+                block.get(0)
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("mul_block", size), &size, |b, &sz| {
+            let mut block = AudioBlock::new(sz);
+            let other = AudioBlock::constant(sz, 0.999);
+            for i in 0..sz {
+                block.set(i, i as f64 * 0.001);
+            }
+
+            b.iter(|| {
+                block.mul_block(black_box(&other));
                 block.get(0)
             });
         });
@@ -755,8 +886,8 @@ fn bench_polyphonic_realtime(c: &mut Criterion) {
             BenchmarkId::new("voices", num_voices),
             &num_voices,
             |b, &voices| {
-                let mut poly = PolyPatch::new(voices, sample_rate);
-                poly.compile().unwrap();
+                let mut poly = create_poly_synth(voices, sample_rate);
+                assert_poly_non_silent(&mut poly);
 
                 // Activate all voices with different notes
                 for i in 0..voices {
@@ -811,8 +942,8 @@ fn bench_throughput(c: &mut Criterion) {
     // Polyphonic throughput (8 voices)
     group.throughput(Throughput::Elements(one_second_samples as u64));
     group.bench_function("poly8_1sec", |b| {
-        let mut poly = PolyPatch::new(8, sample_rate);
-        poly.compile().unwrap();
+        let mut poly = create_poly_synth(8, sample_rate);
+        assert_poly_non_silent(&mut poly);
         for i in 0..8 {
             poly.note_on(60 + i as u8, 100);
         }
@@ -877,8 +1008,8 @@ fn bench_high_polyphony(c: &mut Criterion) {
             BenchmarkId::new("tick", num_voices),
             &num_voices,
             |b, &voices| {
-                let mut poly = PolyPatch::new(voices, sample_rate);
-                poly.compile().unwrap();
+                let mut poly = create_poly_synth(voices, sample_rate);
+                assert_poly_non_silent(&mut poly);
 
                 // Activate all voices with different notes
                 for i in 0..voices {
@@ -906,8 +1037,8 @@ fn bench_high_polyphony_buffer(c: &mut Criterion) {
             BenchmarkId::new("128_samples", num_voices),
             &num_voices,
             |b, &voices| {
-                let mut poly = PolyPatch::new(voices, sample_rate);
-                poly.compile().unwrap();
+                let mut poly = create_poly_synth(voices, sample_rate);
+                assert_poly_non_silent(&mut poly);
 
                 for i in 0..voices {
                     poly.note_on(36 + (i as u8 % 48), 100);
@@ -1099,20 +1230,18 @@ fn bench_patch_lifecycle(c: &mut Criterion) {
         });
     });
 
-    // PolyPatch creation (8 voices)
+    // PolyPatch creation (8 populated voices — real build cost)
     group.bench_function("create_poly8", |b| {
         b.iter(|| {
-            let mut poly = PolyPatch::new(8, sample_rate);
-            poly.compile().unwrap();
+            let poly = create_poly_synth(8, sample_rate);
             black_box(poly)
         });
     });
 
-    // PolyPatch creation (32 voices)
+    // PolyPatch creation (32 populated voices — real build cost)
     group.bench_function("create_poly32", |b| {
         b.iter(|| {
-            let mut poly = PolyPatch::new(32, sample_rate);
-            poly.compile().unwrap();
+            let poly = create_poly_synth(32, sample_rate);
             black_box(poly)
         });
     });
@@ -1153,11 +1282,11 @@ fn bench_max_throughput(c: &mut Criterion) {
             BenchmarkId::new("scenario", *name),
             &(*voices, *unison),
             |b, &(v, u)| {
-                let mut poly = PolyPatch::new(v, sample_rate);
+                let mut poly = create_poly_synth(v, sample_rate);
                 if u > 1 {
                     poly.set_unison(UnisonConfig::new(u, 15.0));
                 }
-                poly.compile().unwrap();
+                assert_poly_non_silent(&mut poly);
 
                 for i in 0..v {
                     poly.note_on(48 + (i as u8 % 24), 100);
@@ -1169,6 +1298,163 @@ fn bench_max_throughput(c: &mut Criterion) {
                     }
                 });
             },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Heavy-FX Worst-Case Benchmarks (Q119)
+// ============================================================================
+
+/// Worst-case signal path: `Supersaw → DiodeLadderFilter → Chorus → DelayLine →
+/// Reverb` at 96 kHz, block-processed with `tick_block` into 32- and 64-sample
+/// buffers (the tightest realistic real-time budgets). This is the single most
+/// expensive chain the library can build and is the reference worst case for
+/// the real-time compliance test.
+fn bench_heavy_fx_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("heavy_fx/chain");
+
+    let sample_rate = 96000.0;
+
+    for buffer_size in [32usize, 64] {
+        let time_budget_us = (buffer_size as f64 / sample_rate) * 1_000_000.0;
+
+        group.throughput(Throughput::Elements(buffer_size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("96kHz", buffer_size),
+            &buffer_size,
+            |b, &bs| {
+                let mut patch = create_heavy_fx_patch(sample_rate);
+                let mut left = vec![0.0f64; bs];
+                let mut right = vec![0.0f64; bs];
+                b.iter(|| {
+                    patch.tick_block(black_box(&mut left), black_box(&mut right));
+                });
+            },
+        );
+
+        eprintln!(
+            "  heavy_fx @ 96kHz / {} samples: budget = {:.2}µs",
+            buffer_size, time_budget_us
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Expensive Module Benchmarks (Q119)
+// ============================================================================
+
+/// Per-`tick()` cost of the individually expensive modules, at 48 kHz and
+/// 96 kHz. These are the modules most likely to blow a real-time budget on
+/// their own; benching them in isolation makes their per-sample cost explicit.
+fn bench_expensive_modules(c: &mut Criterion) {
+    let mut group = c.benchmark_group("modules/expensive");
+
+    // Only measure sample rates where the per-sample budget matters most.
+    let rates = [48000.0f64, 96000.0];
+
+    for sr in rates {
+        let sr_name = format!("{}kHz", sr as u32 / 1000);
+
+        group.throughput(Throughput::Elements(1));
+
+        // --- Oscillators / sources ---------------------------------------
+        group.bench_with_input(BenchmarkId::new("supersaw", &sr_name), &sr, |b, &sr| {
+            let mut m = Supersaw::new(sr);
+            let mut inputs = PortValues::new();
+            inputs.set(0, 0.0); // voct
+            let mut outputs = PortValues::new();
+            b.iter(|| {
+                m.tick(black_box(&inputs), &mut outputs);
+                outputs.get(10).unwrap_or(0.0)
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("wavetable", &sr_name), &sr, |b, &sr| {
+            let mut m = Wavetable::new(sr);
+            let mut inputs = PortValues::new();
+            inputs.set(0, 0.0); // v_oct
+            let mut outputs = PortValues::new();
+            b.iter(|| {
+                m.tick(black_box(&inputs), &mut outputs);
+                outputs.get(10).unwrap_or(0.0)
+            });
+        });
+
+        group.bench_with_input(
+            BenchmarkId::new("karplus_strong", &sr_name),
+            &sr,
+            |b, &sr| {
+                let mut m = KarplusStrong::new(sr);
+                let mut inputs = PortValues::new();
+                inputs.set(0, 0.0); // voct
+                inputs.set(1, 5.0); // trigger (excite the string)
+                let mut outputs = PortValues::new();
+                b.iter(|| {
+                    m.tick(black_box(&inputs), &mut outputs);
+                    outputs.get(10).unwrap_or(0.0)
+                });
+            },
+        );
+
+        // --- Effects / processors ----------------------------------------
+        group.bench_with_input(BenchmarkId::new("reverb", &sr_name), &sr, |b, &sr| {
+            let mut m = Reverb::new(sr);
+            let mut inputs = PortValues::new();
+            inputs.set(0, 0.5); // audio in
+            let mut outputs = PortValues::new();
+            b.iter(|| {
+                m.tick(black_box(&inputs), &mut outputs);
+                outputs.get(10).unwrap_or(0.0)
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("granular", &sr_name), &sr, |b, &sr| {
+            let mut m = Granular::new(sr);
+            let mut inputs = PortValues::new();
+            inputs.set(0, 0.5); // audio in
+            let mut outputs = PortValues::new();
+            b.iter(|| {
+                m.tick(black_box(&inputs), &mut outputs);
+                outputs.get(10).unwrap_or(0.0)
+            });
+        });
+
+        group.bench_with_input(
+            BenchmarkId::new("pitch_shifter", &sr_name),
+            &sr,
+            |b, &sr| {
+                let mut m = PitchShifter::new(sr);
+                let mut inputs = PortValues::new();
+                inputs.set(0, 0.5); // audio in
+                inputs.set(1, 0.5); // shift up
+                let mut outputs = PortValues::new();
+                b.iter(|| {
+                    m.tick(black_box(&inputs), &mut outputs);
+                    outputs.get(10).unwrap_or(0.0)
+                });
+            },
+        );
+
+        group.bench_with_input(BenchmarkId::new("vocoder", &sr_name), &sr, |b, &sr| {
+            let mut m = Vocoder::new(sr);
+            let mut inputs = PortValues::new();
+            inputs.set(0, 0.5); // carrier
+            inputs.set(1, 0.3); // modulator
+            let mut outputs = PortValues::new();
+            b.iter(|| {
+                m.tick(black_box(&inputs), &mut outputs);
+                outputs.get(10).unwrap_or(0.0)
+            });
+        });
+
+        eprintln!(
+            "  expensive modules @ {}: per-tick budget @ 96kHz single buffer already tight",
+            sr_name
         );
     }
 
@@ -1240,6 +1526,8 @@ criterion_group!(comparison_benches, bench_filter_comparison,);
 
 criterion_group!(lifecycle_benches, bench_patch_lifecycle,);
 
+criterion_group!(heavy_benches, bench_heavy_fx_chain, bench_expensive_modules,);
+
 criterion_main!(
     module_benches,
     extended_module_benches,
@@ -1252,4 +1540,5 @@ criterion_main!(
     stress_benches,
     comparison_benches,
     lifecycle_benches,
+    heavy_benches,
 );

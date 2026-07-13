@@ -73,6 +73,53 @@ stereo.pan(0.3);  // 30% right
 let mono = stereo.mix(0.5, 0.5);
 ```
 
+## Rendering a Patch in Blocks
+
+A compiled `Patch` can be advanced one sample at a time or a whole buffer at a time.
+`tick_block` fills caller-provided left/right slices, which is the shape audio callbacks
+want:
+
+```rust,ignore
+let mut patch = Patch::new(44100.0);
+// ... add modules, connect, set_output, compile ...
+
+let mut left = [0.0f64; 128];
+let mut right = [0.0f64; 128];
+
+// Fill an entire 128-sample buffer in one call.
+patch.tick_block(&mut left, &mut right);
+```
+
+`tick_block` is equivalent to calling `tick()` in a loop, but keeps the per-buffer
+bookkeeping out of your code.
+
+### Zero-Allocation Guarantee
+
+Once a patch is **compiled**, neither `tick()` nor `tick_block()` allocates. All buffers
+are pre-sized at `compile()` time, so the audio path never touches the allocator, never
+locks, and has bounded, predictable timing. This is enforced by `tests/zero_alloc.rs`,
+which asserts **zero allocations** across a block of ticks.
+
+The corollary: do anything that allocates — `add`, `connect`, `to_def`,
+`SamplePlayer::set_buffer` — *before* you start the audio thread, never during a
+callback.
+
+## Offline Rendering
+
+With the `std` feature you can render a patch faster (or slower) than real time to a
+buffer or a WAV file:
+
+```rust,ignore
+use quiver::render::{render, render_to_wav};
+use std::path::Path;
+
+// Render 2 seconds of stereo audio into Vecs.
+let (left, right) = render(&mut patch, 2.0);
+
+// Or bounce straight to a 16-bit WAV file.
+render_to_wav(&mut patch, 2.0, Path::new("bounce.wav"))?;
+```
+
 ## SIMD Vectorization
 
 SIMD (Single Instruction Multiple Data) processes 4-8 samples simultaneously:
@@ -97,7 +144,7 @@ flowchart LR
 ```toml
 # Cargo.toml
 [dependencies]
-quiver = { version = "0.1", features = ["simd"] }
+quiver-dsp = { version = "0.1", features = ["simd"] }
 ```
 
 ### SIMD Operations

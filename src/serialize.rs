@@ -15,19 +15,42 @@ use alloc::vec;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
+/// Current patch schema version written by [`Patch::to_def`].
+///
+/// Version policy: the field is a monotonic integer. A loader accepts any patch whose
+/// `version <= CURRENT_PATCH_VERSION` (older or equal — the format only grows additively, so
+/// old files keep loading) and rejects anything newer with a descriptive error rather than
+/// silently misreading fields it does not understand. New *additive* fields (like `output`)
+/// do **not** bump the version; only a breaking change to existing field meaning would.
+pub const CURRENT_PATCH_VERSION: u32 = 1;
+
 /// Serializable patch definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct PatchDef {
-    /// Schema version for forward compatibility
+    /// Schema version. See [`CURRENT_PATCH_VERSION`] for the compatibility policy: loaders
+    /// accept `version <= CURRENT_PATCH_VERSION` and reject newer patches.
     pub version: u32,
 
     /// Patch metadata
     pub name: String,
     pub author: Option<String>,
     pub description: Option<String>,
+
+    /// Optional and additive: the published JSON schema marks `tags` optional (default `[]`),
+    /// so a hand-authored/tool-generated patch that omits the key must still load. `serde(default)`
+    /// keeps deserialization in sync with the schema.
+    #[serde(default)]
     pub tags: Vec<String>,
+
+    /// Name of the module whose output feeds the patch's stereo out.
+    ///
+    /// Optional and additive: patches written before this field existed omit it, and
+    /// [`Patch::from_def`] then falls back to its output-node heuristic. Written by
+    /// [`Patch::to_def`] whenever the patch has an output node set.
+    #[serde(default)]
+    pub output: Option<String>,
 
     /// Module instances
     pub modules: Vec<ModuleDef>,
@@ -35,7 +58,16 @@ pub struct PatchDef {
     /// Cable connections
     pub cables: Vec<CableDef>,
 
-    /// Parameter values (key: "module_name.param_id")
+    /// Parameter values (key: `"module_name.param_id"`).
+    ///
+    /// `param_id` is either a control-input port name (its unpatched base value) or an
+    /// internal parameter id exposed via `ModuleIntrospection`. Applied by
+    /// [`Patch::from_def`] through [`Patch::set_param_by_id`]; unknown keys are ignored so
+    /// hand-edited files degrade gracefully.
+    ///
+    /// Optional and additive: the schema marks `parameters` optional (default `{}`), so a patch
+    /// that omits the key must still load. `serde(default)` keeps deserialization in sync.
+    #[serde(default)]
     pub parameters: StdMap<String, f64>,
 }
 
@@ -43,11 +75,12 @@ impl PatchDef {
     /// Create a new empty patch definition
     pub fn new(name: impl Into<String>) -> Self {
         Self {
-            version: 1,
+            version: CURRENT_PATCH_VERSION,
             name: name.into(),
             author: None,
             description: None,
             tags: vec![],
+            output: None,
             modules: vec![],
             cables: vec![],
             parameters: StdMap::new(),
@@ -534,6 +567,48 @@ impl ModuleRegistry {
             &["envelope", "follower", "detector", "cv", "ducking"],
             &[],
             |sr| Box::new(EnvelopeFollower::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "ducker",
+            "Ducker",
+            "Dynamics",
+            "Sidechain ducking driven by a key input",
+            &["ducker", "duck", "sidechain", "key", "dynamics", "pump"],
+            &[],
+            |sr| Box::new(Ducker::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "sample_player",
+            "Sample Player",
+            "Oscillators",
+            "Mono sample playback with V/Oct pitch and looping",
+            &["sample", "player", "playback", "sampler", "wav", "loop"],
+            &[],
+            // Serialized default is an empty (silent) buffer; load audio via the
+            // non-RT SamplePlayer::set_buffer setter after instantiation.
+            |sr| Box::new(SamplePlayer::empty(sr)),
+        );
+
+        self.register_factory_with_keywords(
+            "mid_side_encode",
+            "Mid/Side Encode",
+            "Utilities",
+            "Encode left/right stereo to mid/side",
+            &["mid", "side", "ms", "stereo", "encode", "matrix"],
+            &[],
+            |_| Box::new(MidSideEncode::new()),
+        );
+
+        self.register_factory_with_keywords(
+            "mid_side_decode",
+            "Mid/Side Decode",
+            "Utilities",
+            "Decode mid/side to left/right with width control",
+            &["mid", "side", "ms", "stereo", "decode", "width"],
+            &[],
+            |_| Box::new(MidSideDecode::new()),
         );
 
         self.register_factory_with_keywords(
@@ -1266,15 +1341,36 @@ impl Patch {
             })
             .collect();
 
+        // Record every parameter whose current value differs from its default, keyed
+        // "module_name.param_id". Covers both control-input port base values and internal
+        // (introspection) parameters; unchanged params are omitted to keep the JSON lean.
+        let mut parameters: StdMap<String, f64> = StdMap::new();
+        for (node_id, node_name, _) in self.nodes() {
+            for p in self.param_infos(node_id) {
+                if (p.value - p.default).abs() > f64::EPSILON {
+                    parameters.insert(format!("{}.{}", node_name, p.id), p.value);
+                }
+            }
+        }
+
+        // Serialize the designated output node by name (Q087), so loading is deterministic
+        // instead of relying on from_def's heuristic.
+        let output = self
+            .output_node()
+            .and_then(|id| self.get_name(id))
+            .map(|n| n.to_string());
+
+        let meta = self.meta();
         PatchDef {
-            version: 1,
+            version: CURRENT_PATCH_VERSION,
             name: name.to_string(),
-            author: None,
-            description: None,
-            tags: vec![],
+            author: meta.author.clone(),
+            description: meta.description.clone(),
+            tags: meta.tags.clone(),
+            output,
             modules,
             cables,
-            parameters: StdMap::new(),
+            parameters,
         }
     }
 
@@ -1284,6 +1380,15 @@ impl Patch {
         registry: &ModuleRegistry,
         sample_rate: f64,
     ) -> Result<Self, PatchError> {
+        // Version policy (Q090): reject patches newer than we understand rather than
+        // silently misreading them; older/equal versions load (the format only grows).
+        if def.version > CURRENT_PATCH_VERSION {
+            return Err(PatchError::CompilationFailed(format!(
+                "Unsupported patch version {} (this build supports up to {})",
+                def.version, CURRENT_PATCH_VERSION
+            )));
+        }
+
         let mut patch = Patch::new(sample_rate);
         let mut name_to_handle: StdMap<String, NodeHandle> = StdMap::new();
 
@@ -1305,6 +1410,15 @@ impl Patch {
                 patch.set_position(handle.id(), (x, y));
             }
 
+            // Restore opaque module-specific state (e.g. a ScaleQuantizer custom/Scala tuning
+            // table) captured in `ModuleDef.state` by `GraphModule::serialize_state`. Modules
+            // without such state serialize `None`, so this is skipped for them.
+            if let Some(state) = &module_def.state {
+                patch
+                    .deserialize_module_state(handle.id(), state)
+                    .map_err(PatchError::CompilationFailed)?;
+            }
+
             name_to_handle.insert(module_def.name.clone(), handle);
         }
 
@@ -1321,47 +1435,86 @@ impl Patch {
                 PatchError::CompilationFailed(format!("Unknown module: {}", to_module))
             })?;
 
+            // Resolve port refs with the fallible NodeHandle::output/input so a mistyped
+            // port name in hand-edited/untrusted JSON returns a descriptive Err (module
+            // name, requested port, and the module's valid ports) instead of panicking via
+            // the convenience out()/in_() methods.
+            let from_ref = from_handle.output(from_port).map_err(|_| {
+                PatchError::CompilationFailed(format!(
+                    "Unknown output port '{}' on module '{}' (available: {})",
+                    from_port,
+                    from_module,
+                    from_handle.output_names().join(", ")
+                ))
+            })?;
+            let to_ref = to_handle.input(to_port).map_err(|_| {
+                PatchError::CompilationFailed(format!(
+                    "Unknown input port '{}' on module '{}' (available: {})",
+                    to_port,
+                    to_module,
+                    to_handle.input_names().join(", ")
+                ))
+            })?;
+
             match (cable_def.attenuation, cable_def.offset) {
                 (Some(attenuation), Some(offset)) => {
-                    patch.connect_modulated(
-                        from_handle.out(from_port),
-                        to_handle.in_(to_port),
-                        attenuation,
-                        offset,
-                    )?;
+                    patch.connect_modulated(from_ref, to_ref, attenuation, offset)?;
                 }
                 (Some(attenuation), None) => {
-                    patch.connect_attenuated(
-                        from_handle.out(from_port),
-                        to_handle.in_(to_port),
-                        attenuation,
-                    )?;
+                    patch.connect_attenuated(from_ref, to_ref, attenuation)?;
                 }
                 (None, Some(offset)) => {
                     patch.connect_modulated(
-                        from_handle.out(from_port),
-                        to_handle.in_(to_port),
-                        1.0, // Unity gain
+                        from_ref, to_ref, 1.0, // Unity gain
                         offset,
                     )?;
                 }
                 (None, None) => {
-                    patch.connect(from_handle.out(from_port), to_handle.in_(to_port))?;
+                    patch.connect(from_ref, to_ref)?;
                 }
             }
         }
 
-        // Find and set output node (look for stereo_output)
-        if let Some(handle) = name_to_handle.get("output") {
-            patch.set_output(handle.id());
-        } else if let Some(handle) = name_to_handle.values().find(|h| {
-            h.spec()
-                .outputs
-                .iter()
-                .any(|p| p.name == "left" || p.name == "right")
-        }) {
-            patch.set_output(handle.id());
+        // Apply parameters (Q086): "module_name.param_id" -> value, via the introspection /
+        // port-default dispatch. Unknown modules/params are skipped so hand-edited or
+        // legacy files degrade gracefully rather than failing to load. Applied before
+        // compile so port-default overrides are baked into the routing.
+        for (key, &value) in &def.parameters {
+            if let Some((module_name, param_id)) = key.split_once('.') {
+                if let Some(handle) = name_to_handle.get(module_name) {
+                    patch.set_param_by_id(handle.id(), param_id, value);
+                }
+            }
         }
+
+        // Set the output node. Honor the serialized `output` field when present (Q087),
+        // otherwise fall back to the legacy heuristic for patches written before it existed.
+        let output_set = def
+            .output
+            .as_ref()
+            .and_then(|name| name_to_handle.get(name))
+            .map(|handle| patch.set_output(handle.id()))
+            .is_some();
+        if !output_set {
+            if let Some(handle) = name_to_handle.get("output") {
+                patch.set_output(handle.id());
+            } else if let Some(handle) = name_to_handle.values().find(|h| {
+                h.spec()
+                    .outputs
+                    .iter()
+                    .any(|p| p.name == "left" || p.name == "right")
+            }) {
+                patch.set_output(handle.id());
+            }
+        }
+
+        // Preserve patch metadata (Q090) so a subsequent to_def round-trips it.
+        patch.set_meta(crate::graph::PatchMeta {
+            name: Some(def.name.clone()),
+            author: def.author.clone(),
+            description: def.description.clone(),
+            tags: def.tags.clone(),
+        });
 
         patch.compile()?;
         Ok(patch)
@@ -1879,6 +2032,24 @@ mod tests {
     }
 
     #[test]
+    fn test_remediation_modules_registered_and_instantiate() {
+        let registry = ModuleRegistry::new();
+        // Each new module (Q142/Q148/Q150) must instantiate and report the
+        // matching type_id it registered under.
+        for id in [
+            "sample_player",
+            "ducker",
+            "mid_side_encode",
+            "mid_side_decode",
+        ] {
+            let module = registry
+                .instantiate(id, 44100.0)
+                .unwrap_or_else(|| panic!("module '{id}' not registered"));
+            assert_eq!(module.type_id(), id, "type_id mismatch for '{id}'");
+        }
+    }
+
+    #[test]
     fn test_catalog_categories() {
         let registry = ModuleRegistry::new();
         let catalog = registry.catalog();
@@ -2031,5 +2202,503 @@ mod tests {
 
         // VCO should have "essential" tag
         assert!(metadata.tags.contains(&"essential".to_string()));
+    }
+
+    #[test]
+    fn test_from_def_mistyped_cable_port_returns_err() {
+        // Q180: a valid module type with a mistyped port name in a cable must return Err
+        // from from_def (no panic via the convenience out()/in_() methods).
+        let registry = ModuleRegistry::new();
+        let mut def = PatchDef::new("Bad Ports");
+        def.modules.push(ModuleDef::new("vco", "vco"));
+        def.modules.push(ModuleDef::new("output", "stereo_output"));
+        // "definitely_not_a_port" is not a real VCO output port.
+        def.cables
+            .push(CableDef::new("vco.definitely_not_a_port", "output.left"));
+
+        let result = Patch::from_def(&def, &registry, 44100.0);
+        assert!(result.is_err(), "expected Err for mistyped cable port");
+        match result {
+            Err(PatchError::CompilationFailed(msg)) => {
+                assert!(
+                    msg.contains("definitely_not_a_port") && msg.contains("vco"),
+                    "error should name the bad port and module: {}",
+                    msg
+                );
+            }
+            other => panic!("expected CompilationFailed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_from_def_unknown_module_type_returns_err() {
+        // Q180 sweep: an unknown module type must be a descriptive Err, never a panic.
+        let registry = ModuleRegistry::new();
+        let mut def = PatchDef::new("Bad Type");
+        def.modules.push(ModuleDef::new("x", "not_a_real_module"));
+        match Patch::from_def(&def, &registry, 44100.0) {
+            Err(PatchError::CompilationFailed(msg)) => {
+                assert!(msg.contains("not_a_real_module"), "msg: {msg}");
+            }
+            other => panic!("expected CompilationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_def_malformed_cable_ref_returns_err() {
+        // Q180 sweep: a cable reference missing the "module.port" dot must Err, not panic.
+        let registry = ModuleRegistry::new();
+        let mut def = PatchDef::new("Malformed");
+        def.modules.push(ModuleDef::new("vco", "vco"));
+        def.modules.push(ModuleDef::new("output", "stereo_output"));
+        def.cables.push(CableDef::new("no_dot_here", "output.left"));
+        assert!(Patch::from_def(&def, &registry, 44100.0).is_err());
+    }
+
+    #[test]
+    fn test_from_def_rejects_newer_version() {
+        // Q090: a patch from a newer schema version must be rejected with a clear error.
+        let registry = ModuleRegistry::new();
+        let mut def = PatchDef::new("Future");
+        def.version = CURRENT_PATCH_VERSION + 1;
+        def.modules.push(ModuleDef::new("output", "stereo_output"));
+        match Patch::from_def(&def, &registry, 44100.0) {
+            Err(PatchError::CompilationFailed(msg)) => {
+                assert!(msg.contains("version"), "msg: {msg}");
+            }
+            other => panic!("expected version rejection, got {other:?}"),
+        }
+        // A patch at the current version still loads.
+        def.version = CURRENT_PATCH_VERSION;
+        assert!(Patch::from_def(&def, &registry, 44100.0).is_ok());
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_params_and_output() {
+        // Q086: build a patch, change parameters (port-backed and internal), round-trip
+        // through JSON, and verify parameters survive AND the audio output is identical.
+        use crate::modules::{Distortion, StereoOutput, Svf, Vco};
+
+        let build = || -> (Patch, crate::graph::NodeId, crate::graph::NodeId, crate::graph::NodeId) {
+            let mut patch = Patch::new(44100.0);
+            let osc = patch.add("osc", Vco::new(44100.0));
+            let dist = patch.add("dist", Distortion::new(44100.0));
+            let flt = patch.add("flt", Svf::new(44100.0));
+            let out = patch.add("output", StereoOutput::new());
+            patch.connect(osc.out("saw"), dist.in_("in")).unwrap();
+            patch.connect(dist.out("out"), flt.in_("in")).unwrap();
+            patch.connect(flt.out("lp"), out.in_("left")).unwrap();
+            patch.connect(flt.out("lp"), out.in_("right")).unwrap();
+            patch.set_output(out.id());
+            (patch, osc.id(), dist.id(), flt.id())
+        };
+
+        let (mut original, osc_id, dist_id, flt_id) = build();
+        // Port-backed params: filter cutoff and oscillator pitch (V/Oct).
+        assert!(original.set_param_by_id(flt_id, "cutoff", 0.35));
+        assert!(original.set_param_by_id(osc_id, "voct", 1.0));
+        // Internal (non-port) param dispatched through ModuleIntrospection: oversampling.
+        assert!(original.set_param_by_id(dist_id, "oversample", 1.0));
+        // A bogus id must be rejected.
+        assert!(!original.set_param_by_id(flt_id, "no_such_param", 1.0));
+
+        // Serialize -> JSON -> deserialize -> rebuild.
+        let def = original.to_def("Round Trip");
+        assert_eq!(def.output.as_deref(), Some("output"));
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let mut rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+
+        // Params survive, read back through the live-patch introspection getters.
+        let r_osc = rebuilt.get_node_id_by_name("osc").unwrap();
+        let r_dist = rebuilt.get_node_id_by_name("dist").unwrap();
+        let r_flt = rebuilt.get_node_id_by_name("flt").unwrap();
+        assert!((rebuilt.get_param_by_id(r_flt, "cutoff").unwrap() - 0.35).abs() < 1e-9);
+        assert!((rebuilt.get_param_by_id(r_osc, "voct").unwrap() - 1.0).abs() < 1e-9);
+        assert!((rebuilt.get_param_by_id(r_dist, "oversample").unwrap() - 1.0).abs() < 1e-9);
+        // The rebuilt output node is honored from the serialized field.
+        assert_eq!(rebuilt.output_node(), Some(r_out_of(&rebuilt)));
+
+        // Deterministic output must match sample-for-sample.
+        for i in 0..256 {
+            let a = original.tick();
+            let b = rebuilt.tick();
+            assert!(
+                (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9,
+                "sample {i} diverged: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    // Helper: the output node id of a patch (its module named "output").
+    fn r_out_of(p: &Patch) -> crate::graph::NodeId {
+        p.get_node_id_by_name("output").unwrap()
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_metadata() {
+        // Q090: name/author/description/tags survive a to_def -> JSON -> from_def round-trip.
+        use crate::graph::PatchMeta;
+        use crate::modules::StereoOutput;
+
+        let mut patch = Patch::new(44100.0);
+        let out = patch.add("output", StereoOutput::new());
+        patch.set_output(out.id());
+        patch.set_meta(PatchMeta {
+            name: Some("My Patch".into()),
+            author: Some("Ada".into()),
+            description: Some("A lovely patch".into()),
+            tags: vec!["demo".into(), "test".into()],
+        });
+
+        let def = patch.to_def("My Patch");
+        assert_eq!(def.author.as_deref(), Some("Ada"));
+        assert_eq!(def.description.as_deref(), Some("A lovely patch"));
+        assert_eq!(def.tags, vec!["demo".to_string(), "test".to_string()]);
+
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+        let meta = rebuilt.meta();
+        assert_eq!(meta.author.as_deref(), Some("Ada"));
+        assert_eq!(meta.description.as_deref(), Some("A lovely patch"));
+        assert_eq!(meta.tags, vec!["demo".to_string(), "test".to_string()]);
+    }
+
+    #[test]
+    fn test_old_json_without_output_field_still_loads() {
+        // Q087 back-compat: JSON predating the `output` field must deserialize (serde default)
+        // and fall back to the output heuristic.
+        let json = r#"{
+            "version": 1,
+            "name": "Legacy",
+            "author": null,
+            "description": null,
+            "tags": [],
+            "modules": [
+                {"name": "vco", "module_type": "vco", "position": null, "state": null},
+                {"name": "output", "module_type": "stereo_output", "position": null, "state": null}
+            ],
+            "cables": [
+                {"from": "vco.saw", "to": "output.left", "attenuation": null, "offset": null}
+            ],
+            "parameters": {}
+        }"#;
+        let def = PatchDef::from_json(json).unwrap();
+        assert!(def.output.is_none());
+        let registry = ModuleRegistry::new();
+        let patch = Patch::from_def(&def, &registry, 44100.0).unwrap();
+        // Heuristic still selects the stereo output node named "output".
+        assert_eq!(patch.output_node(), patch.get_node_id_by_name("output"));
+    }
+
+    /// Q088 drift-guard: the shipped JSON schema's `module_type` enum and the
+    /// `ModuleRegistry` built-ins must stay in exact 1:1 correspondence. Reads the schema
+    /// file via `include_str!` so a stale schema (or a newly registered module with no enum
+    /// entry) fails the build instead of shipping a patch that valid code cannot round-trip.
+    #[test]
+    fn test_schema_enum_matches_registry() {
+        const SCHEMA: &str = include_str!("../schemas/patch.schema.json");
+        let schema: serde_json::Value =
+            serde_json::from_str(SCHEMA).expect("patch.schema.json must be valid JSON");
+        let enum_vals = schema["$defs"]["ModuleDef"]["properties"]["module_type"]["enum"]
+            .as_array()
+            .expect("schema module_type must define an enum array");
+        let enum_ids: Vec<&str> = enum_vals
+            .iter()
+            .map(|v| v.as_str().expect("enum entries must be strings"))
+            .collect();
+
+        let registry = ModuleRegistry::new();
+        let registry_ids: Vec<String> =
+            registry.list_modules().map(|m| m.type_id.clone()).collect();
+
+        // Every registered type must appear in the schema enum.
+        for id in &registry_ids {
+            assert!(
+                enum_ids.contains(&id.as_str()),
+                "registry type '{id}' is missing from the schema module_type enum"
+            );
+        }
+        // And no schema enum entry may be a dead type unknown to the registry.
+        for id in &enum_ids {
+            assert!(
+                registry_ids.iter().any(|r| r == id),
+                "schema module_type enum lists '{id}', which the registry does not register"
+            );
+        }
+        // Counts must match exactly (guards against duplicate enum entries too).
+        assert_eq!(
+            enum_ids.len(),
+            registry_ids.len(),
+            "schema enum ({}) and registry ({}) type counts diverge",
+            enum_ids.len(),
+            registry_ids.len()
+        );
+    }
+
+    // ---- Q162: round-trip with a modulated cable + a mult, behavioral equality ----
+
+    #[test]
+    fn test_roundtrip_modulated_cable_and_mult_behavioral_equality() {
+        // The existing round-trip test covers plain cables + a mult; this one
+        // closes the remaining gap: a modulated cable (with attenuation AND
+        // offset) must survive to_def -> JSON -> from_def, and the reloaded
+        // patch must produce a bit-identical tick() sequence on a multi-module
+        // graph that also contains a mult (one output -> two inputs).
+        use crate::modules::{Lfo, StereoOutput, Svf, Vco};
+
+        let build = || -> Patch {
+            let mut patch = Patch::new(44100.0);
+            let lfo = patch.add("lfo", Lfo::new(44100.0));
+            let osc = patch.add("osc", Vco::new(44100.0));
+            let flt = patch.add("flt", Svf::new(44100.0));
+            let out = patch.add("output", StereoOutput::new());
+            // Plain audio cable.
+            patch.connect(osc.out("saw"), flt.in_("in")).unwrap();
+            // Modulated cable: attenuation 0.5, offset +0.1V into the filter FM
+            // input (both endpoints are CvBipolar, so no signal-kind warning).
+            patch
+                .connect_modulated(lfo.out("sin"), flt.in_("fm"), 0.5, 0.1)
+                .unwrap();
+            // Mult: the filter's low-pass output feeds BOTH stereo inputs.
+            patch.connect(flt.out("lp"), out.in_("left")).unwrap();
+            patch.connect(flt.out("lp"), out.in_("right")).unwrap();
+            patch.set_output(out.id());
+            // A non-default modulation rate so the LFO actually moves.
+            let lfo_id = lfo.id();
+            assert!(patch.set_param_by_id(lfo_id, "rate", 0.6));
+            patch
+        };
+
+        let mut original = build();
+
+        // Serialize -> JSON -> deserialize -> rebuild.
+        let def = original.to_def("Modulated Round Trip");
+        assert_eq!(def.cables.len(), 4, "all four cables must serialize");
+        // Exactly one cable carries modulation (attenuation AND offset).
+        let modulated: Vec<_> = def
+            .cables
+            .iter()
+            .filter(|c| c.attenuation.is_some() && c.offset.is_some())
+            .collect();
+        assert_eq!(modulated.len(), 1, "the modulated cable must be preserved");
+        assert!((modulated[0].attenuation.unwrap() - 0.5).abs() < 1e-9);
+        assert!((modulated[0].offset.unwrap() - 0.1).abs() < 1e-9);
+        // The mult shows up as two cables sharing the same source port.
+        let from_lp = def.cables.iter().filter(|c| c.from == "flt.lp").count();
+        assert_eq!(
+            from_lp, 2,
+            "the mult must serialize as two cables from flt.lp"
+        );
+
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let mut rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+
+        assert_eq!(rebuilt.cable_count(), original.cable_count());
+
+        // Behavioral equality: identical stereo output sample-for-sample.
+        for i in 0..512 {
+            let a = original.tick();
+            let b = rebuilt.tick();
+            assert!(
+                (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9,
+                "sample {i} diverged after round-trip: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    // ---- Schema/serde agreement: minimal JSON without tags/parameters loads ----
+
+    #[test]
+    fn test_minimal_json_without_tags_or_parameters_loads() {
+        // The published schema marks `tags` and `parameters` optional (defaults `[]`/`{}`), so a
+        // hand-authored/tool-generated patch that omits them must deserialize (serde defaults)
+        // and load. Before `#[serde(default)]` this failed with "missing field `tags`".
+        let json = r#"{
+            "version": 1,
+            "name": "Minimal",
+            "modules": [
+                {"name": "output", "module_type": "stereo_output", "position": null, "state": null}
+            ],
+            "cables": []
+        }"#;
+        let def = PatchDef::from_json(json).expect("minimal schema-valid JSON must deserialize");
+        assert!(def.tags.is_empty());
+        assert!(def.parameters.is_empty());
+        assert!(def.author.is_none());
+
+        let registry = ModuleRegistry::new();
+        let patch = Patch::from_def(&def, &registry, 44100.0).expect("minimal patch must load");
+        assert_eq!(patch.output_node(), patch.get_node_id_by_name("output"));
+    }
+
+    // ---- StepSequencer: a muted (gate-off) step must survive round-trip ----
+
+    #[test]
+    fn test_step_sequencer_gate_off_survives_roundtrip() {
+        use crate::modules::{StepSequencer, StereoOutput};
+
+        let mut patch = Patch::new(44100.0);
+        let seq = patch.add("seq", StepSequencer::new());
+        let out = patch.add("output", StereoOutput::new());
+        patch.set_output(out.id());
+        let seq_id = seq.id();
+
+        // Mute step 3 (gate OFF) with a non-zero CV, and mute step 5 at default CV. All other
+        // steps keep their (ON) defaults.
+        assert!(patch.set_param_by_id(seq_id, "step_3_cv", 2.0));
+        assert!(patch.set_param_by_id(seq_id, "step_3_gate", 0.0));
+        assert!(patch.set_param_by_id(seq_id, "step_5_gate", 0.0));
+
+        // A gate turned OFF (value 0.0) must be recorded: the toggle default is now 1.0 (gates
+        // default ON), so the "differs from default" filter no longer drops it.
+        let def = patch.to_def("Seq");
+        assert_eq!(def.parameters.get("seq.step_3_gate"), Some(&0.0));
+        assert_eq!(def.parameters.get("seq.step_3_cv"), Some(&2.0));
+        assert_eq!(def.parameters.get("seq.step_5_gate"), Some(&0.0));
+        // An ON (default) gate equals its default and is correctly omitted.
+        assert!(!def.parameters.contains_key("seq.step_0_gate"));
+
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+        let rid = rebuilt.get_node_id_by_name("seq").unwrap();
+
+        // Muted steps stay muted and step CV survives; untouched steps stay ON.
+        assert_eq!(rebuilt.get_param_by_id(rid, "step_3_gate"), Some(0.0));
+        assert_eq!(rebuilt.get_param_by_id(rid, "step_3_cv"), Some(2.0));
+        assert_eq!(rebuilt.get_param_by_id(rid, "step_5_gate"), Some(0.0));
+        assert_eq!(rebuilt.get_param_by_id(rid, "step_0_gate"), Some(1.0));
+    }
+
+    // ---- Ducker: depth/threshold knobs reachable via Patch and round-trip ----
+
+    #[test]
+    fn test_ducker_knobs_reachable_and_survive_roundtrip() {
+        use crate::modules::{Ducker, StereoOutput};
+
+        let mut patch = Patch::new(44100.0);
+        let d = patch.add("duck", Ducker::default());
+        let out = patch.add("output", StereoOutput::new());
+        patch.connect(d.out("out"), out.in_("left")).unwrap();
+        patch.set_output(out.id());
+        let did = d.id();
+
+        // The depth/thresh KNOBS (introspection) are discoverable, distinct from the same-named
+        // bipolar CV input PORTS which remain exposed alongside them.
+        let ids: Vec<String> = patch.param_infos(did).into_iter().map(|p| p.id).collect();
+        assert!(
+            ids.iter().any(|i| i == "depth"),
+            "depth knob missing: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|i| i == "thresh"),
+            "thresh knob missing: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|i| i == "amount"),
+            "amount CV port missing: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|i| i == "threshold"),
+            "threshold CV port missing: {ids:?}"
+        );
+
+        // Setting the knob moves the knob (not the CV port).
+        assert!(patch.set_param_by_id(did, "depth", 0.4));
+        assert!(patch.set_param_by_id(did, "thresh", 0.7));
+        assert_eq!(patch.get_param_by_id(did, "depth"), Some(0.4));
+        assert_eq!(patch.get_param_by_id(did, "thresh"), Some(0.7));
+
+        let def = patch.to_def("Duck");
+        assert_eq!(def.parameters.get("duck.depth"), Some(&0.4));
+        assert_eq!(def.parameters.get("duck.thresh"), Some(&0.7));
+
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+        let rid = rebuilt.get_node_id_by_name("duck").unwrap();
+        assert_eq!(rebuilt.get_param_by_id(rid, "depth"), Some(0.4));
+        assert_eq!(rebuilt.get_param_by_id(rid, "thresh"), Some(0.7));
+    }
+
+    // ---- ScaleQuantizer: a custom/microtuning scale must survive round-trip ----
+
+    #[test]
+    fn test_scale_quantizer_custom_scale_survives_roundtrip() {
+        use crate::modules::{ScaleQuantizer, StereoOutput};
+
+        // Whole-tone tuning, distinct from the built-in 12-TET chromatic default.
+        let whole_tone = [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0];
+        let test_voct = 0.1; // 120 cents: quantizes differently under whole-tone vs 12-TET.
+
+        // Build a patch whose ScaleQuantizer has the custom scale installed, with its "in"
+        // pitch parked at `test_voct` and "out" wired downstream so it gets ticked.
+        let build_custom = || -> Patch {
+            let mut patch = Patch::new(44100.0);
+            let mut q = ScaleQuantizer::new(44100.0);
+            q.set_custom_scale(&whole_tone);
+            let qh = patch.add("q", q);
+            let out = patch.add("output", StereoOutput::new());
+            patch.connect(qh.out("out"), out.in_("left")).unwrap();
+            patch.set_output(out.id());
+            assert!(patch.set_param_by_id(qh.id(), "in", test_voct));
+            patch.compile().unwrap();
+            patch
+        };
+
+        let mut original = build_custom();
+        let qid_o = original.get_node_id_by_name("q").unwrap();
+
+        // The custom scale must ride in ModuleDef.state (not the scalar parameters map).
+        let def = original.to_def("Tuned");
+        let q_state = &def.modules.iter().find(|m| m.name == "q").unwrap().state;
+        assert!(
+            q_state.is_some(),
+            "custom scale must serialize into ModuleDef.state"
+        );
+
+        let json = def.to_json().unwrap();
+        let reloaded = PatchDef::from_json(&json).unwrap();
+        let registry = ModuleRegistry::new();
+        let mut rebuilt = Patch::from_def(&reloaded, &registry, 44100.0).unwrap();
+        let qid_r = rebuilt.get_node_id_by_name("q").unwrap();
+
+        // Reference: an untuned (12-TET) quantizer at the same input.
+        let mut plain = {
+            let mut patch = Patch::new(44100.0);
+            let qh = patch.add("q", ScaleQuantizer::new(44100.0));
+            let out = patch.add("output", StereoOutput::new());
+            patch.connect(qh.out("out"), out.in_("left")).unwrap();
+            patch.set_output(out.id());
+            assert!(patch.set_param_by_id(qh.id(), "in", test_voct));
+            patch.compile().unwrap();
+            patch
+        };
+        let qid_p = plain.get_node_id_by_name("q").unwrap();
+
+        original.tick();
+        rebuilt.tick();
+        plain.tick();
+        // Port id 10 is the ScaleQuantizer "out" (V/Oct).
+        let o = original.get_output_value(qid_o, 10).unwrap();
+        let r = rebuilt.get_output_value(qid_r, 10).unwrap();
+        let p = plain.get_output_value(qid_p, 10).unwrap();
+
+        assert!(
+            (o - r).abs() < 1e-9,
+            "custom scale must survive round-trip: {o} vs {r}"
+        );
+        assert!(
+            (o - p).abs() > 1e-6,
+            "custom (whole-tone) quantization must differ from default 12-TET: {o} vs {p}"
+        );
     }
 }

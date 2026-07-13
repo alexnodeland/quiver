@@ -5,10 +5,18 @@
 //!
 //! # Features
 //!
-//! - `SimdBlock` - SIMD-friendly audio buffer for vectorized operations
+//! - [`AudioBlock`] - audio buffer for block/vectorized operations
 //! - Block processing utilities
 //! - Lazy evaluation framework
-//! - SIMD-optimized common operations (when `simd` feature enabled)
+//! - SIMD-accelerated block operations (when the `simd` feature is enabled),
+//!   backed by the no_std-compatible `wide` crate (`f64x4`)
+//!
+//! # Alignment
+//!
+//! Buffers are backed by a plain `Vec<f64>`, which the global allocator aligns
+//! to `align_of::<f64>()` = 8 bytes. The `simd` path uses unaligned lane loads
+//! (`f64x4::new`) over `chunks_exact(4)` with a scalar remainder, so no
+//! over-alignment of the backing storage is required or guaranteed.
 
 use crate::port::{BlockPortValues, GraphModule, PortValues};
 use alloc::vec;
@@ -16,15 +24,21 @@ use alloc::vec::Vec;
 use core::f64::consts::PI;
 use libm::Libm;
 
+#[cfg(feature = "simd")]
+use wide::f64x4;
+
 /// Block size for SIMD operations (typically 4 or 8 for SSE/AVX)
 pub const SIMD_BLOCK_SIZE: usize = 4;
 
 /// Default processing block size
 pub const DEFAULT_BLOCK_SIZE: usize = 64;
 
-/// SIMD-aligned audio buffer
+/// Audio buffer for block/vectorized operations.
 ///
-/// Provides efficient storage and operations for audio blocks.
+/// Provides efficient storage and operations for audio blocks. The backing
+/// store is a plain `Vec<f64>` (8-byte aligned); the `simd` feature accelerates
+/// the block ops with `wide::f64x4` unaligned loads and therefore imposes no
+/// over-alignment requirement on the storage.
 #[derive(Clone)]
 pub struct AudioBlock {
     /// Sample data
@@ -138,80 +152,81 @@ impl AudioBlock {
         }
     }
 
-    /// SIMD-accelerated scalar addition (when simd feature enabled)
+    /// SIMD-accelerated scalar addition (when the `simd` feature is enabled).
+    ///
+    /// Processes four lanes at a time with `wide::f64x4` over
+    /// `chunks_exact(4)`, with a scalar remainder. Because IEEE-754 addition is
+    /// correctly rounded per lane, the result is bit-for-bit identical to the
+    /// scalar path.
     #[cfg(feature = "simd")]
     pub fn add_scalar(&mut self, value: f64) {
-        // Process in SIMD blocks
-        let chunks = self.size / SIMD_BLOCK_SIZE;
-
-        for chunk in 0..chunks {
-            let base = chunk * SIMD_BLOCK_SIZE;
-            // Manual unroll for SIMD-friendly code
-            self.samples[base] += value;
-            self.samples[base + 1] += value;
-            self.samples[base + 2] += value;
-            self.samples[base + 3] += value;
+        let mut chunks = self.samples.chunks_exact_mut(SIMD_BLOCK_SIZE);
+        for c in &mut chunks {
+            let r = (f64x4::new([c[0], c[1], c[2], c[3]]) + value).to_array();
+            c.copy_from_slice(&r);
         }
-
-        // Handle remainder
-        for i in (chunks * SIMD_BLOCK_SIZE)..self.size {
-            self.samples[i] += value;
+        for x in chunks.into_remainder() {
+            *x += value;
         }
     }
 
-    /// SIMD-accelerated scalar multiplication (when simd feature enabled)
+    /// SIMD-accelerated scalar multiplication (when the `simd` feature is
+    /// enabled). Bit-for-bit identical to the scalar path.
     #[cfg(feature = "simd")]
     pub fn mul_scalar(&mut self, value: f64) {
-        let chunks = self.size / SIMD_BLOCK_SIZE;
-
-        for chunk in 0..chunks {
-            let base = chunk * SIMD_BLOCK_SIZE;
-            self.samples[base] *= value;
-            self.samples[base + 1] *= value;
-            self.samples[base + 2] *= value;
-            self.samples[base + 3] *= value;
+        let mut chunks = self.samples.chunks_exact_mut(SIMD_BLOCK_SIZE);
+        for c in &mut chunks {
+            let r = (f64x4::new([c[0], c[1], c[2], c[3]]) * value).to_array();
+            c.copy_from_slice(&r);
         }
-
-        for i in (chunks * SIMD_BLOCK_SIZE)..self.size {
-            self.samples[i] *= value;
+        for x in chunks.into_remainder() {
+            *x *= value;
         }
     }
 
-    /// SIMD-accelerated block addition (when simd feature enabled)
+    /// SIMD-accelerated element-wise block addition (when the `simd` feature is
+    /// enabled). Bit-for-bit identical to the scalar path.
     #[cfg(feature = "simd")]
     pub fn add_block(&mut self, other: &AudioBlock) {
         let len = self.size.min(other.size);
-        let chunks = len / SIMD_BLOCK_SIZE;
-
-        for chunk in 0..chunks {
-            let base = chunk * SIMD_BLOCK_SIZE;
-            self.samples[base] += other.samples[base];
-            self.samples[base + 1] += other.samples[base + 1];
-            self.samples[base + 2] += other.samples[base + 2];
-            self.samples[base + 3] += other.samples[base + 3];
+        let a = &mut self.samples[..len];
+        let b = &other.samples[..len];
+        let mut a_chunks = a.chunks_exact_mut(SIMD_BLOCK_SIZE);
+        let mut b_chunks = b.chunks_exact(SIMD_BLOCK_SIZE);
+        for (ca, cb) in a_chunks.by_ref().zip(b_chunks.by_ref()) {
+            let va = f64x4::new([ca[0], ca[1], ca[2], ca[3]]);
+            let vb = f64x4::new([cb[0], cb[1], cb[2], cb[3]]);
+            ca.copy_from_slice(&(va + vb).to_array());
         }
-
-        for i in (chunks * SIMD_BLOCK_SIZE)..len {
-            self.samples[i] += other.samples[i];
+        for (x, y) in a_chunks
+            .into_remainder()
+            .iter_mut()
+            .zip(b_chunks.remainder())
+        {
+            *x += *y;
         }
     }
 
-    /// SIMD-accelerated block multiplication (when simd feature enabled)
+    /// SIMD-accelerated element-wise block multiplication (when the `simd`
+    /// feature is enabled). Bit-for-bit identical to the scalar path.
     #[cfg(feature = "simd")]
     pub fn mul_block(&mut self, other: &AudioBlock) {
         let len = self.size.min(other.size);
-        let chunks = len / SIMD_BLOCK_SIZE;
-
-        for chunk in 0..chunks {
-            let base = chunk * SIMD_BLOCK_SIZE;
-            self.samples[base] *= other.samples[base];
-            self.samples[base + 1] *= other.samples[base + 1];
-            self.samples[base + 2] *= other.samples[base + 2];
-            self.samples[base + 3] *= other.samples[base + 3];
+        let a = &mut self.samples[..len];
+        let b = &other.samples[..len];
+        let mut a_chunks = a.chunks_exact_mut(SIMD_BLOCK_SIZE);
+        let mut b_chunks = b.chunks_exact(SIMD_BLOCK_SIZE);
+        for (ca, cb) in a_chunks.by_ref().zip(b_chunks.by_ref()) {
+            let va = f64x4::new([ca[0], ca[1], ca[2], ca[3]]);
+            let vb = f64x4::new([cb[0], cb[1], cb[2], cb[3]]);
+            ca.copy_from_slice(&(va * vb).to_array());
         }
-
-        for i in (chunks * SIMD_BLOCK_SIZE)..len {
-            self.samples[i] *= other.samples[i];
+        for (x, y) in a_chunks
+            .into_remainder()
+            .iter_mut()
+            .zip(b_chunks.remainder())
+        {
+            *x *= *y;
         }
     }
 
@@ -482,51 +497,86 @@ impl Default for StereoBlock {
     }
 }
 
-/// Ring buffer for delay lines and lookahead
+/// Ring buffer for delay lines and lookahead.
+///
+/// # Capacity semantics
+///
+/// `capacity` is the requested capacity and the maximum valid delay tap:
+/// [`read`](Self::read) returns `0.0` for any `delay >= capacity`, so taps
+/// beyond the requested capacity stay bounded even though the internal storage
+/// may be larger. Internally the backing storage is rounded up to a power of
+/// two so the per-sample wrap is a bitmask (`& (len - 1)`) rather than a modulo
+/// — the slowest integer op — in the real-time audio path. A requested
+/// capacity of `0` is clamped to a single-slot internal buffer so
+/// [`write`](Self::write)/[`read`](Self::read) never index an empty `Vec` or
+/// divide by zero; `len`/`is_empty` still report the requested capacity.
 pub struct RingBuffer {
     buffer: Vec<f64>,
     write_pos: usize,
-    size: usize,
+    /// Requested capacity (public delay-tap bound).
+    capacity: usize,
+    /// `buffer.len() - 1`; `buffer.len()` is a power of two, so this is a mask.
+    mask: usize,
 }
 
 impl RingBuffer {
-    /// Create a new ring buffer with the given capacity
+    /// Create a new ring buffer with the given capacity.
+    ///
+    /// The internal storage is rounded up to a power of two (and to at least
+    /// one slot when `capacity == 0`) so wrapping uses a bitmask; the public
+    /// capacity reported by [`len`](Self::len) is the value requested here.
     pub fn new(capacity: usize) -> Self {
+        // Clamp internal storage to at least one slot so a zero-capacity buffer
+        // (nonsensical but constructible via the public API) cannot panic on
+        // write()/read(); round up to a power of two for masked wrapping.
+        let internal = capacity.max(1).next_power_of_two();
         Self {
-            buffer: vec![0.0; capacity],
+            buffer: vec![0.0; internal],
             write_pos: 0,
-            size: capacity,
+            capacity,
+            mask: internal - 1,
         }
     }
 
-    /// Get the buffer size
+    /// Get the requested buffer capacity (maximum valid delay tap).
     pub fn len(&self) -> usize {
-        self.size
+        self.capacity
     }
 
-    /// Check if empty
+    /// Check if empty (requested capacity is zero).
     pub fn is_empty(&self) -> bool {
-        self.size == 0
+        self.capacity == 0
     }
 
-    /// Write a sample and return the oldest sample
+    /// Write a sample and return the oldest sample.
     pub fn write(&mut self, sample: f64) -> f64 {
         let old = self.buffer[self.write_pos];
         self.buffer[self.write_pos] = sample;
-        self.write_pos = (self.write_pos + 1) % self.size;
+        // Power-of-two mask wrap instead of `% size`.
+        self.write_pos = (self.write_pos + 1) & self.mask;
         old
     }
 
-    /// Read a sample with the given delay (in samples)
+    /// Read a sample with the given delay (in samples).
+    ///
+    /// Returns `0.0` for `delay >= capacity` (the requested capacity), so taps
+    /// beyond the requested capacity are bounded.
     pub fn read(&self, delay: usize) -> f64 {
-        if delay >= self.size {
+        if delay >= self.capacity {
             return 0.0;
         }
-        let read_pos = (self.write_pos + self.size - delay - 1) % self.size;
+        // buffer.len() == mask + 1 is a power of two, so masking equals modulo.
+        let read_pos = (self.write_pos + self.buffer.len() - delay - 1) & self.mask;
         self.buffer[read_pos]
     }
 
-    /// Read with fractional delay using linear interpolation
+    /// Read with fractional delay using linear interpolation.
+    ///
+    /// The interpolated result is passed through
+    /// `flush_denorm`: this is the
+    /// read side of feedback delay lines, where a decaying loop asymptotes to
+    /// subnormals that incur large CPU penalties. Flushing sub-threshold values
+    /// to exactly `0.0` keeps the feedback path real-time-safe.
     pub fn read_interp(&self, delay: f64) -> f64 {
         let delay_floor = Libm::<f64>::floor(delay);
         let delay_int = delay_floor as usize;
@@ -535,7 +585,7 @@ impl RingBuffer {
         let s1 = self.read(delay_int);
         let s2 = self.read(delay_int + 1);
 
-        s1 + frac * (s2 - s1)
+        crate::modules::common::flush_denorm(s1 + frac * (s2 - s1))
     }
 
     /// Clear the buffer
@@ -911,5 +961,103 @@ mod tests {
 
         ctx.reset();
         assert_eq!(ctx.sample_position, 0);
+    }
+
+    // Q061: a zero-capacity ring buffer must not panic on write/read.
+    #[test]
+    fn test_ring_buffer_zero_capacity_no_panic() {
+        let mut ring = RingBuffer::new(0);
+        assert!(ring.is_empty());
+        assert_eq!(ring.len(), 0);
+        // Previously: OOB index into an empty Vec + modulo-by-zero.
+        let old = ring.write(1.0);
+        assert_eq!(old, 0.0);
+        assert_eq!(ring.read(0), 0.0); // delay >= capacity(0) -> bounded to 0.0
+        assert_eq!(ring.read_interp(0.0), 0.0);
+    }
+
+    // Q060: power-of-two internal storage preserves read/write index semantics
+    // and bounds delay taps to the requested capacity.
+    #[test]
+    fn test_ring_buffer_power_of_two_wrap_semantics() {
+        // Requested capacity 3 rounds internal storage up to 4.
+        let mut ring = RingBuffer::new(3);
+        assert_eq!(ring.len(), 3);
+        for v in [1.0, 2.0, 3.0, 4.0, 5.0] {
+            ring.write(v);
+        }
+        // Most-recent-first within the requested capacity.
+        assert_eq!(ring.read(0), 5.0);
+        assert_eq!(ring.read(1), 4.0);
+        assert_eq!(ring.read(2), 3.0);
+        // Delay at or beyond the requested capacity stays bounded to 0.0.
+        assert_eq!(ring.read(3), 0.0);
+        assert_eq!(ring.read(100), 0.0);
+    }
+
+    // Q057: the feedback read path flushes sub-threshold values to exactly 0.0.
+    #[test]
+    fn test_ring_buffer_read_interp_flushes_denormals() {
+        let mut ring = RingBuffer::new(8);
+
+        // A single sub-threshold value read back must flush to exactly 0.0.
+        ring.write(1e-300); // far below the 1e-20 flush threshold
+        ring.write(1e-300);
+        assert_eq!(ring.read_interp(0.5), 0.0);
+
+        // A decaying feedback loop must settle at exactly 0.0 rather than
+        // lingering at a tiny (denormal-prone) value. Without flushing, `out`
+        // would be ~0.5^200 (a nonzero normal number), not 0.0.
+        ring.clear();
+        ring.write(1.0);
+        let feedback = 0.5;
+        let mut out = 0.0;
+        for _ in 0..200 {
+            let delayed = ring.read_interp(0.0);
+            out = delayed * feedback;
+            ring.write(out);
+        }
+        assert_eq!(out, 0.0, "decaying feedback loop must reach exactly 0.0");
+    }
+
+    // Q062: the SIMD block ops must agree bit-for-bit with a scalar reference
+    // over random-length, non-multiple-of-4 blocks (exercising the vectorized
+    // chunks and the scalar remainder). Gated on `simd` so the AudioBlock
+    // methods here are the vectorized `wide::f64x4` path.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn test_simd_scalar_equivalence_nonmultiple_of_four() {
+        use crate::rng::Rng;
+
+        let mut rng = Rng::from_seed(0xC0FFEE);
+        for &len in &[1usize, 2, 3, 5, 6, 7, 9, 13, 17, 31, 63, 100, 127] {
+            let data: Vec<f64> = (0..len).map(|_| rng.next_f64_bipolar()).collect();
+            let other: Vec<f64> = (0..len).map(|_| rng.next_f64_bipolar()).collect();
+            let s = rng.next_f64_bipolar();
+
+            // add_scalar
+            let mut blk = AudioBlock::from_samples(data.clone());
+            blk.add_scalar(s);
+            let expect: Vec<f64> = data.iter().map(|x| x + s).collect();
+            assert_eq!(blk.as_slice(), expect.as_slice(), "add_scalar len={len}");
+
+            // mul_scalar
+            let mut blk = AudioBlock::from_samples(data.clone());
+            blk.mul_scalar(s);
+            let expect: Vec<f64> = data.iter().map(|x| x * s).collect();
+            assert_eq!(blk.as_slice(), expect.as_slice(), "mul_scalar len={len}");
+
+            // add_block
+            let mut blk = AudioBlock::from_samples(data.clone());
+            blk.add_block(&AudioBlock::from_samples(other.clone()));
+            let expect: Vec<f64> = data.iter().zip(&other).map(|(a, b)| a + b).collect();
+            assert_eq!(blk.as_slice(), expect.as_slice(), "add_block len={len}");
+
+            // mul_block
+            let mut blk = AudioBlock::from_samples(data.clone());
+            blk.mul_block(&AudioBlock::from_samples(other.clone()));
+            let expect: Vec<f64> = data.iter().zip(&other).map(|(a, b)| a * b).collect();
+            assert_eq!(blk.as_slice(), expect.as_slice(), "mul_block len={len}");
+        }
     }
 }

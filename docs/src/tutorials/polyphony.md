@@ -49,6 +49,51 @@ stateDiagram-v2
 {{#include ../../../examples/tutorial_polyphony.rs}}
 ```
 
+## The `PolyPatch` API
+
+`PolyPatch::with_voice_fn(voices, sample_rate, build)` builds one voice graph per voice by
+calling your closure. The closure receives a fresh `Patch` and a **voice controller**
+(`ctrl`) whose outputs — `voct`, `gate`, `trigger`, and `velocity` — carry the allocator's
+per-voice control values into the graph:
+
+```rust,ignore
+use quiver::prelude::*;
+
+let sr = 48_000.0;
+let mut poly = PolyPatch::with_voice_fn(4, sr, |patch, ctrl| {
+    let sr = patch.sample_rate();
+    let vco = patch.add("vco", Vco::new(sr));
+    let adsr = patch.add("adsr", Adsr::new(sr));
+    let vca = patch.add("vca", Vca::new());
+    let out = patch.add("out", StereoOutput::new());
+
+    // The controller exposes voct / gate / trigger / velocity.
+    patch.connect(ctrl.out("voct"), vco.in_("voct"))?;
+    patch.connect(ctrl.out("gate"), adsr.in_("gate"))?;
+    patch.connect(vco.out("saw"), vca.in_("in"))?;
+    patch.connect(adsr.out("env"), vca.in_("cv"))?;
+    patch.connect(vca.out("out"), out.in_("left"))?;
+    patch.set_output(out.id());
+    Ok(())
+})
+.unwrap();
+
+poly.note_on(60, 100); // MIDI note, velocity (0-127)
+let (_l, _r) = poly.tick();
+poly.note_off(60);
+```
+
+What `PolyPatch` handles for you:
+
+- **Automatic voice freeing**: each voice's real output level is tracked by an amplitude
+  follower, so a voice returns to `Free` only once its release tail has actually decayed —
+  not the instant the gate falls.
+- **Releasing-first voice stealing**: when all voices are busy, voices already in
+  `Releasing` are stolen before sounding ones (see the [allocation modes](#voice-allocation)
+  for how a sounding victim is then chosen).
+- **`1/sqrt(N)` level compensation**: the mix is scaled by an equal-power factor that is
+  *smoothed*, so stacking or releasing voices never steps the master level.
+
 ## Per-Voice Signals
 
 Each voice receives its own:
@@ -67,15 +112,16 @@ flowchart LR
 
 ## Unison and Detune
 
-For thicker sounds, stack multiple oscillators per voice:
+For thicker sounds, stack multiple detuned voices with `UnisonConfig`:
 
 ```rust,ignore
-let config = UnisonConfig::new(3)  // 3 oscillators per voice
-    .with_detune(0.1)              // Slight detune between them
-    .with_spread(0.5);             // Stereo spread
+// 3 voices per note, spread 12 cents apart.
+let config = UnisonConfig::new(3, 12.0);
+poly.set_unison(config);
 ```
 
-The slight detuning creates a chorus-like richness.
+The slight detuning creates a chorus-like richness. `detune_offset(i)` and
+`pan_position(i)` give the per-voice pitch offset and stereo pan.
 
 ## MIDI Note to V/Oct
 

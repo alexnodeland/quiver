@@ -19,8 +19,12 @@ pub type PortId = u32;
 pub type ParamId = u32;
 
 /// Semantic signal classification following hardware modular conventions
+///
+/// Serialized in `snake_case` (e.g. `"cv_bipolar"`, `"volt_per_octave"`) to match
+/// the JSON schema (`schemas/patch.schema.json`) and all TypeScript consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[serde(rename_all = "snake_case")]
 pub enum SignalKind {
     /// Audio signal, AC-coupled, typically ±5V peak
     Audio,
@@ -209,36 +213,24 @@ pub enum Compatibility {
 /// - Exact: Same signal types
 /// - Allowed: Different but compatible types
 /// - Warning: Works but may cause issues (e.g., clicks, tuning problems)
+///
+/// # Single source of truth
+///
+/// This function is a thin adapter over the authoritative
+/// [`SignalKind::is_compatible_with`] implementation used by
+/// the patch graph's validation. Both APIs therefore always agree: a warning from one
+/// is a [`Compatibility::Warning`] from the other, and a clean verdict maps to
+/// [`Compatibility::Allowed`] (or [`Compatibility::Exact`] for identical kinds). Keep
+/// the compatibility rules in `is_compatible_with` only; do not fork them here.
 pub fn ports_compatible(from: SignalKind, to: SignalKind) -> Compatibility {
-    use SignalKind::*;
+    if from == to {
+        return Compatibility::Exact;
+    }
 
-    match (from, to) {
-        // Exact match
-        (a, b) if a == b => Compatibility::Exact,
-
-        // Audio can go anywhere
-        (Audio, _) => Compatibility::Allowed,
-
-        // CV interoperability
-        (CvBipolar, CvUnipolar) | (CvUnipolar, CvBipolar) => Compatibility::Allowed,
-
-        // V/Oct to CV is allowed
-        (VoltPerOctave, CvBipolar) | (VoltPerOctave, CvUnipolar) => Compatibility::Allowed,
-
-        // Gate/Trigger/Clock interoperability
-        (Gate, Trigger) | (Trigger, Gate) => Compatibility::Allowed,
-        (Clock, Gate) | (Clock, Trigger) => Compatibility::Allowed,
-
-        // Warnings for potentially problematic connections
-        (Gate, Audio) | (Trigger, Audio) => Compatibility::Warning {
-            message: "Gate/Trigger to Audio may cause clicks".into(),
-        },
-        (CvBipolar, VoltPerOctave) | (CvUnipolar, VoltPerOctave) => Compatibility::Warning {
-            message: "CV to V/Oct may cause tuning issues".into(),
-        },
-
-        // Default: allow other combinations
-        _ => Compatibility::Allowed,
+    // Delegate to the authoritative compatibility check (defined in `graph`).
+    match from.is_compatible_with(&to).warning {
+        None => Compatibility::Allowed,
+        Some(message) => Compatibility::Warning { message },
     }
 }
 
@@ -391,15 +383,35 @@ impl BlockPortValues {
 
     pub fn frame(&self, index: usize) -> PortValues {
         let mut values = PortValues::new();
-        for (&port, buffer) in &self.buffers {
-            if index < buffer.len() {
-                values.set(port, buffer[index]);
-            }
-        }
+        self.frame_into(index, &mut values);
         values
     }
 
+    /// Read frame `index` into an existing [`PortValues`], reusing its allocation.
+    ///
+    /// Clears `dst` and refills it from each port buffer at `index`. Unlike [`Self::frame`], this
+    /// performs no allocation once `dst` has been warmed with the same key set, which lets
+    /// block loops (e.g. the default [`GraphModule::process_block`]) avoid a fresh
+    /// [`PortValues`] per frame.
+    pub fn frame_into(&self, index: usize, dst: &mut PortValues) {
+        dst.clear();
+        for (&port, buffer) in &self.buffers {
+            if index < buffer.len() {
+                dst.set(port, buffer[index]);
+            }
+        }
+    }
+
     pub fn set_frame(&mut self, index: usize, values: PortValues) {
+        self.set_frame_ref(index, &values);
+    }
+
+    /// Write a borrowed [`PortValues`] into frame `index`, without taking ownership.
+    ///
+    /// The by-reference companion to [`Self::set_frame`], so a caller can reuse a single output
+    /// [`PortValues`] across every frame of a block instead of moving (and reallocating) one
+    /// per frame.
+    pub fn set_frame_ref(&mut self, index: usize, values: &PortValues) {
         for (&port, &value) in &values.values {
             let buffer = self.get_buffer_mut(port);
             if index < buffer.len() {
@@ -434,11 +446,16 @@ impl ParamRange {
             ParamRange::Linear { min, max } => min + normalized.clamp(0.0, 1.0) * (max - min),
             ParamRange::Exponential { min, max } => {
                 let clamped = normalized.clamp(0.0, 1.0);
-                if *min <= 0.0 {
-                    // Handle edge case where min is zero or negative
-                    clamped * max
-                } else {
+                // Exponential interpolation `min * (max/min)^t` is only defined for a
+                // strictly positive domain (0 < min, 0 < max). If either bound is
+                // non-positive, `max/min` can be negative and `pow(neg, frac)` yields
+                // NaN, so fall back to a plain linear interpolation which is always
+                // finite. This guards callers that construct e.g. Exponential{min:20,
+                // max:-1} from silently poisoning frequency/time controls with NaN.
+                if *min > 0.0 && *max > 0.0 {
                     min * Libm::<f64>::pow(max / min, clamped)
+                } else {
+                    min + clamped * (max - min)
                 }
             }
             ParamRange::VoltPerOctave { base_freq } => {
@@ -454,7 +471,11 @@ pub struct ModulatedParam {
     /// Base value from panel knob (typically 0.0–1.0 normalized)
     pub base: f64,
 
-    /// Incoming CV voltage (set during tick)
+    /// Incoming CV **voltage** (set during tick).
+    ///
+    /// Interpreted on the bipolar ±5 V scale: [`value`](Self::value) normalizes it by
+    /// [`CV_FULL_SCALE_VOLTS`](Self::CV_FULL_SCALE_VOLTS) so that a full +5 V of CV
+    /// (with attenuverter at +1.0) contributes +1.0 to the normalized parameter.
     pub cv: f64,
 
     /// Attenuverter setting (-1.0 to 1.0)
@@ -467,6 +488,12 @@ pub struct ModulatedParam {
 }
 
 impl ModulatedParam {
+    /// Full-scale CV voltage used to normalize [`cv`](Self::cv) into the 0–1 base domain.
+    ///
+    /// Bipolar CV spans ±5 V, so dividing by 5 V maps a full-swing CV signal onto the
+    /// same normalized 0–1 range as `base` before the two are combined.
+    pub const CV_FULL_SCALE_VOLTS: f64 = 5.0;
+
     pub fn new(range: ParamRange) -> Self {
         Self {
             base: 0.5,
@@ -481,9 +508,15 @@ impl ModulatedParam {
         self
     }
 
-    /// Compute the effective parameter value
+    /// Compute the effective parameter value.
+    ///
+    /// `base` is a normalized 0–1 knob position; `cv` is a voltage that is normalized by
+    /// [`CV_FULL_SCALE_VOLTS`](Self::CV_FULL_SCALE_VOLTS) before being scaled by the
+    /// attenuverter (±1.0) and summed with `base`. This keeps CV modulation proportional:
+    /// a full +5 V of CV shifts the normalized value by at most ±1.0 rather than slamming
+    /// the parameter to its rail. The combined value is then mapped through `range`.
     pub fn value(&self) -> f64 {
-        let modulated = self.base + (self.cv * self.attenuverter);
+        let modulated = self.base + (self.cv / Self::CV_FULL_SCALE_VOLTS) * self.attenuverter;
         self.range.apply(modulated)
     }
 
@@ -510,18 +543,28 @@ pub trait GraphModule: Send + Sync {
     /// Process one sample given port values
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues);
 
-    /// Process a block of samples (optional optimization)
+    /// Process a block of samples (optional optimization).
+    ///
+    /// The default drives [`tick`](Self::tick) frame-by-frame. It reuses a single input and
+    /// output [`PortValues`] across the whole block (via
+    /// [`BlockPortValues::frame_into`]/[`set_frame_ref`](BlockPortValues::set_frame_ref)), so
+    /// it does **not** allocate per frame — only once per call to warm the reused buffers.
+    ///
+    /// For the graph engine, prefer [`Patch::tick_block`](crate::graph::Patch::tick_block),
+    /// which is fully allocation-free after compile.
     fn process_block(
         &mut self,
         inputs: &BlockPortValues,
         outputs: &mut BlockPortValues,
         frames: usize,
     ) {
+        let mut in_frame = PortValues::new();
+        let mut out_frame = PortValues::new();
         for i in 0..frames {
-            let in_frame = inputs.frame(i);
-            let mut out_frame = PortValues::new();
+            inputs.frame_into(i, &mut in_frame);
+            out_frame.clear();
             self.tick(&in_frame, &mut out_frame);
-            outputs.set_frame(i, out_frame);
+            outputs.set_frame_ref(i, &out_frame);
         }
     }
 
@@ -531,17 +574,48 @@ pub trait GraphModule: Send + Sync {
     /// Set sample rate
     fn set_sample_rate(&mut self, sample_rate: f64);
 
-    /// Get parameter definitions for UI binding
+    /// Whether this module breaks a feedback cycle in the patch graph.
+    ///
+    /// The graph normally rejects any cable cycle with [`PatchError::CycleDetected`].
+    /// A module that returns `true` (delay-style modules such as `UnitDelay` and
+    /// `DelayLine`) is treated as a one-sample delay boundary: [`Patch::compile`] excludes
+    /// the edges feeding *into* it from the topological sort, so a loop routed through it
+    /// compiles. At runtime such a module reads its inputs from the previous tick's output
+    /// buffers, giving the classic single-sample feedback delay. Cycles that contain no
+    /// cycle-breaker still fail to compile.
+    ///
+    /// [`PatchError::CycleDetected`]: crate::graph::PatchError::CycleDetected
+    /// [`Patch::compile`]: crate::graph::Patch::compile
+    fn breaks_feedback_cycle(&self) -> bool {
+        false
+    }
+
+    /// Get parameter definitions for UI binding.
+    ///
+    /// **Most built-in modules do not use this API.** Nearly all of them expose their
+    /// controllable quantities as **input ports** (see [`port_spec`](Self::port_spec)) —
+    /// e.g. a VCO's frequency, an SVF's cutoff, or an ADSR's stage times are all input
+    /// ports driven by cables or their `default` values — and leave this method at its
+    /// empty default. The authoritative way to discover and drive parameters for GUIs is
+    /// the `ModuleIntrospection` API (available with the `alloc` feature), not this
+    /// trait-default no-op. It remains here only for the handful of modules whose
+    /// parameters are genuinely not ports.
     fn params(&self) -> &[ParamDef] {
         &[]
     }
 
-    /// Get a parameter value
+    /// Get a parameter value.
+    ///
+    /// Defaults to `None`. See [`params`](Self::params): most modules surface their state
+    /// through input ports and `ModuleIntrospection`, not through this method.
     fn get_param(&self, _id: ParamId) -> Option<f64> {
         None
     }
 
-    /// Set a parameter value
+    /// Set a parameter value.
+    ///
+    /// Defaults to a no-op. See [`params`](Self::params): most modules surface their state
+    /// through input ports and `ModuleIntrospection`, not through this method.
     fn set_param(&mut self, _id: ParamId, _value: f64) {}
 
     /// Get module type identifier for serialization
@@ -563,6 +637,51 @@ pub trait GraphModule: Send + Sync {
     ) -> Result<(), alloc::string::String> {
         Ok(())
     }
+
+    /// Downcast this module to its [`ModuleIntrospection`](crate::introspection::ModuleIntrospection) view, if it exposes one.
+    ///
+    /// A `Box<dyn GraphModule>` (as stored inside a [`Patch`](crate::graph::Patch)) cannot
+    /// otherwise reach the module's `ModuleIntrospection` impl, so this hook bridges the two
+    /// trait objects. It returns `None` by default; modules with genuine internal (non-port)
+    /// parameters override it — typically via [`impl_introspect!`](crate::impl_introspect) —
+    /// to return `Some(self)`. Parameters that are input ports are discovered and driven
+    /// through the port system instead (see [`Patch::param_infos`](crate::graph::Patch::param_infos)),
+    /// so most modules leave this at the default.
+    ///
+    /// Gated on `alloc` because `ModuleIntrospection` (and its `Vec`/`String` payloads) live
+    /// in the alloc tier; pure `no_std` builds never see this method.
+    #[cfg(feature = "alloc")]
+    fn introspect(&self) -> Option<&dyn crate::introspection::ModuleIntrospection> {
+        None
+    }
+
+    /// Mutable companion to [`introspect`](Self::introspect), used to set internal parameters.
+    #[cfg(feature = "alloc")]
+    fn introspect_mut(&mut self) -> Option<&mut dyn crate::introspection::ModuleIntrospection> {
+        None
+    }
+}
+
+/// Wire a module's [`ModuleIntrospection`](crate::introspection::ModuleIntrospection) impl into the [`GraphModule`] trait object.
+///
+/// Invoke once inside a module's `impl GraphModule for T { .. }` block. It expands to the
+/// `introspect`/`introspect_mut` overrides (both `alloc`-gated) returning `Some(self)`, so a
+/// live [`Patch`](crate::graph::Patch) can reach the module's parameter metadata through its
+/// boxed trait object. Requires `T: ModuleIntrospection` (satisfied under `alloc`).
+#[macro_export]
+macro_rules! impl_introspect {
+    () => {
+        #[cfg(feature = "alloc")]
+        fn introspect(&self) -> Option<&dyn $crate::introspection::ModuleIntrospection> {
+            Some(self)
+        }
+        #[cfg(feature = "alloc")]
+        fn introspect_mut(
+            &mut self,
+        ) -> Option<&mut dyn $crate::introspection::ModuleIntrospection> {
+            Some(self)
+        }
+    };
 }
 
 #[cfg(test)]
@@ -639,13 +758,43 @@ mod tests {
         // No CV: should return base * range
         assert!((param.value() - 50.0).abs() < 1e-10);
 
-        // Add CV
-        param.set_cv(0.2);
+        // Realistic CV is a *voltage*, normalized by 5 V full scale.
+        // +1 V of CV shifts the normalized value by 1/5 = 0.2 -> 0.7 -> 70.
+        param.set_cv(1.0);
         assert!((param.value() - 70.0).abs() < 1e-10);
 
-        // Invert attenuverter
+        // Invert attenuverter: +1 V CV now subtracts -> 0.3 -> 30.
         param.attenuverter = -1.0;
         assert!((param.value() - 30.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_modulated_param_full_scale_cv_is_proportional() {
+        // Q081 regression: a full ±5 V CV must map to a full ±1.0 normalized swing,
+        // not slam the parameter to a rail from any modest voltage.
+        let mut param = ModulatedParam::new(ParamRange::Linear {
+            min: 0.0,
+            max: 100.0,
+        })
+        .with_base(0.5);
+
+        // A modest +1 V of CV should move the param proportionally to
+        // 0.5 + (1/5)*1 = 0.7 -> 70, NOT slam to the maximum (the pre-fix behavior added
+        // the raw voltage: 0.5 + 1.0 = 1.5 -> clamped to 100).
+        param.set_cv(1.0);
+        assert!(
+            (param.value() - 70.0).abs() < 1e-10,
+            "1 V CV should be proportional, got {}",
+            param.value()
+        );
+
+        // Full +5 V reaches exactly the top of the range.
+        param.set_cv(5.0);
+        assert!((param.value() - 100.0).abs() < 1e-10);
+
+        // Full -5 V reaches the bottom.
+        param.set_cv(-5.0);
+        assert!((param.value() - 0.0).abs() < 1e-10);
     }
 
     #[test]
@@ -756,6 +905,30 @@ mod tests {
         assert!((above - 20000.0).abs() < 1e-10);
     }
 
+    #[test]
+    fn test_param_range_exponential_invalid_domain_no_nan() {
+        // Q082 regression: min>0 with max<=0 makes max/min negative, and
+        // pow(negative, fractional) is NaN. The guard must fall back to linear.
+        let range = ParamRange::Exponential {
+            min: 20.0,
+            max: -1.0,
+        };
+        for &t in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+            let v = range.apply(t);
+            assert!(v.is_finite(), "apply({}) produced non-finite {}", t, v);
+        }
+        // Endpoints match the linear fallback.
+        assert!((range.apply(0.0) - 20.0).abs() < 1e-10);
+        assert!((range.apply(1.0) - (-1.0)).abs() < 1e-10);
+
+        // max == 0 (also invalid for exponential) must stay finite too.
+        let zero_max = ParamRange::Exponential {
+            min: 10.0,
+            max: 0.0,
+        };
+        assert!(zero_max.apply(0.5).is_finite());
+    }
+
     // =============================================================================
     // Signal Semantics Tests (Phase 2)
     // =============================================================================
@@ -823,26 +996,30 @@ mod tests {
 
     #[test]
     fn test_ports_compatible_audio_to_anything() {
-        assert_eq!(
+        // Unified with graph::SignalKind::is_compatible_with: Audio->CV / Audio->Gate are
+        // permitted but flagged with a warning ("ensure this is intentional").
+        assert!(matches!(
             ports_compatible(SignalKind::Audio, SignalKind::CvBipolar),
-            Compatibility::Allowed
-        );
-        assert_eq!(
+            Compatibility::Warning { .. }
+        ));
+        assert!(matches!(
             ports_compatible(SignalKind::Audio, SignalKind::Gate),
-            Compatibility::Allowed
-        );
+            Compatibility::Warning { .. }
+        ));
     }
 
     #[test]
     fn test_ports_compatible_cv_interop() {
-        assert_eq!(
+        // Bipolar<->Unipolar CV crossings warn (possible clip/offset).
+        assert!(matches!(
             ports_compatible(SignalKind::CvBipolar, SignalKind::CvUnipolar),
-            Compatibility::Allowed
-        );
-        assert_eq!(
+            Compatibility::Warning { .. }
+        ));
+        assert!(matches!(
             ports_compatible(SignalKind::CvUnipolar, SignalKind::CvBipolar),
-            Compatibility::Allowed
-        );
+            Compatibility::Warning { .. }
+        ));
+        // V/Oct -> bipolar CV is a clean, warning-free pitch extraction.
         assert_eq!(
             ports_compatible(SignalKind::VoltPerOctave, SignalKind::CvBipolar),
             Compatibility::Allowed
@@ -851,29 +1028,101 @@ mod tests {
 
     #[test]
     fn test_ports_compatible_gate_trigger_interop() {
-        assert_eq!(
+        // Gate<->Trigger warn about timing differences.
+        assert!(matches!(
             ports_compatible(SignalKind::Gate, SignalKind::Trigger),
-            Compatibility::Allowed
-        );
-        assert_eq!(
+            Compatibility::Warning { .. }
+        ));
+        assert!(matches!(
             ports_compatible(SignalKind::Trigger, SignalKind::Gate),
+            Compatibility::Warning { .. }
+        ));
+        // Clock->Trigger is clean; Clock->Gate warns about duty cycle.
+        assert_eq!(
+            ports_compatible(SignalKind::Clock, SignalKind::Trigger),
             Compatibility::Allowed
         );
-        assert_eq!(
+        assert!(matches!(
             ports_compatible(SignalKind::Clock, SignalKind::Gate),
+            Compatibility::Warning { .. }
+        ));
+    }
+
+    #[test]
+    fn test_ports_compatible_warnings() {
+        // Gate to Audio: unusual connection -> warning.
+        let compat = ports_compatible(SignalKind::Gate, SignalKind::Audio);
+        assert!(matches!(compat, Compatibility::Warning { .. }));
+
+        // Bipolar CV -> V/Oct is treated as clean pitch modulation (no warning).
+        assert_eq!(
+            ports_compatible(SignalKind::CvBipolar, SignalKind::VoltPerOctave),
             Compatibility::Allowed
         );
     }
 
     #[test]
-    fn test_ports_compatible_warnings() {
-        // Gate to Audio warning
-        let compat = ports_compatible(SignalKind::Gate, SignalKind::Audio);
-        assert!(matches!(compat, Compatibility::Warning { .. }));
+    fn test_ports_compatible_agrees_with_is_compatible_with() {
+        // Q124: the two public compatibility APIs must never disagree. Pin the
+        // Audio -> CvBipolar case explicitly, then cross-check every ordered pair.
+        // `is_compatible_with` (defined in `graph`) is the single source of truth.
+        let audio_cv = SignalKind::Audio.is_compatible_with(&SignalKind::CvBipolar);
+        assert!(
+            audio_cv.warning.is_some(),
+            "is_compatible_with should warn on Audio->CvBipolar"
+        );
+        assert!(
+            matches!(
+                ports_compatible(SignalKind::Audio, SignalKind::CvBipolar),
+                Compatibility::Warning { .. }
+            ),
+            "ports_compatible should agree and warn on Audio->CvBipolar"
+        );
 
-        // CV to V/Oct warning
-        let compat = ports_compatible(SignalKind::CvBipolar, SignalKind::VoltPerOctave);
-        assert!(matches!(compat, Compatibility::Warning { .. }));
+        let all = [
+            SignalKind::Audio,
+            SignalKind::CvBipolar,
+            SignalKind::CvUnipolar,
+            SignalKind::VoltPerOctave,
+            SignalKind::Gate,
+            SignalKind::Trigger,
+            SignalKind::Clock,
+        ];
+        for &a in &all {
+            for &b in &all {
+                let low = ports_compatible(a, b);
+                let high = a.is_compatible_with(&b);
+                // Warning verdicts must match exactly between the two APIs.
+                let low_warns = matches!(low, Compatibility::Warning { .. });
+                assert_eq!(
+                    low_warns,
+                    high.warning.is_some(),
+                    "compatibility APIs disagree for {:?} -> {:?}",
+                    a,
+                    b
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_signal_kind_serializes_snake_case() {
+        // Q091: SignalKind must serialize snake_case to match the JSON schema and TS.
+        assert_eq!(
+            serde_json::to_string(&SignalKind::CvBipolar).unwrap(),
+            "\"cv_bipolar\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SignalKind::VoltPerOctave).unwrap(),
+            "\"volt_per_octave\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SignalKind::Audio).unwrap(),
+            "\"audio\""
+        );
+        // Round-trips from snake_case.
+        let k: SignalKind = serde_json::from_str("\"cv_unipolar\"").unwrap();
+        assert_eq!(k, SignalKind::CvUnipolar);
     }
 
     #[test]

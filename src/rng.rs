@@ -1,7 +1,7 @@
 //! Seedable Random Number Generation for `no_std`
 //!
 //! This module provides a seedable RNG implementation that works in `no_std`
-//! environments. It uses the Xorshift128+ algorithm which is fast and produces
+//! environments. It uses the xoroshiro128+ algorithm which is fast and produces
 //! good quality random numbers suitable for audio synthesis applications.
 //!
 //! When the `std` feature is enabled, the default seed is derived from the
@@ -20,12 +20,32 @@ std::thread_local! {
 }
 
 #[cfg(not(feature = "std"))]
-static mut RNG_STATE: Rng = Rng::new(0x853c49e6748fea9b, 0xda3e39cb94b95bdb);
+use core::sync::atomic::Ordering;
+// `AtomicU64` from `portable-atomic`, not `core`: the latter is absent on
+// targets with `max_atomic_width < 64` (e.g. `thumbv7em-none-eabihf`).
+#[cfg(not(feature = "std"))]
+use portable_atomic::AtomicU64;
 
-/// A seedable random number generator using Xorshift128+.
+/// Global RNG state for `no_std` builds (a splitmix64 counter).
+///
+/// A single `AtomicU64` replaces the previous `static mut Rng`: it removes the
+/// `static_mut_refs` lint and is sound to read/update from any context. Each
+/// [`random`] call `fetch_add`s the splitmix64 increment and scrambles the
+/// advanced state with [`splitmix64`], so successive draws form a splitmix64
+/// sequence; [`seed`] stores a fresh state.
+#[cfg(not(feature = "std"))]
+static RNG_STATE: AtomicU64 = AtomicU64::new(0x853c49e6748fea9b);
+
+/// A seedable random number generator using xoroshiro128+.
 ///
 /// This RNG is fast, has a period of 2^128 - 1, and passes most statistical
 /// tests. It is suitable for audio applications like noise generation.
+///
+/// The update uses the Blackman/Vigna xoroshiro128+ constants (rotations
+/// 24/16/37) with the matching 2^64 jump polynomial in [`Rng::jump`].
+/// Note that, as with all `+`-scrambled generators, the low-order bits have
+/// low linear complexity; consumers wanting a single random bit should prefer
+/// [`Rng::next_bool`], which draws from the high bit.
 #[derive(Debug, Clone, Copy)]
 pub struct Rng {
     s0: u64,
@@ -95,9 +115,14 @@ impl Rng {
     }
 
     /// Generate a random bool with 50% probability.
+    ///
+    /// Uses the most-significant bit of `next_u64`. In `+`-scrambled
+    /// generators like xoroshiro128+ the low-order bits (especially the LSB)
+    /// have low linear complexity and fail linear-complexity/matrix-rank
+    /// tests, so the top bit is drawn instead of the LSB.
     #[inline]
     pub fn next_bool(&mut self) -> bool {
-        self.next_u64() & 1 == 1
+        (self.next_u64() >> 63) == 1
     }
 
     /// Generate a random bool with the given probability (0.0 to 1.0).
@@ -196,8 +221,13 @@ pub fn random() -> f64 {
     }
     #[cfg(not(feature = "std"))]
     {
-        // Safety: Single-threaded no_std contexts only
-        unsafe { RNG_STATE.next_f64() }
+        // `fetch_add` the splitmix64 increment, then scramble the advanced
+        // state. `splitmix64` re-adds the same increment internally, so passing
+        // the pre-increment value yields `scramble(new_state)` — exactly one
+        // splitmix64 step. Uses the upper 53 bits for the f64 mantissa, matching
+        // `Rng::next_f64`.
+        let z = splitmix64(RNG_STATE.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed));
+        (z >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 }
 
@@ -218,10 +248,7 @@ pub fn seed(seed: u64) {
     }
     #[cfg(not(feature = "std"))]
     {
-        // Safety: Single-threaded no_std contexts only
-        unsafe {
-            RNG_STATE = Rng::from_seed(seed);
-        }
+        RNG_STATE.store(seed, Ordering::Relaxed);
     }
 }
 
@@ -350,5 +377,77 @@ mod tests {
         let mut rng = Rng::new(0, 0);
         let v = rng.next_f64();
         assert!((0.0..1.0).contains(&v));
+    }
+
+    // Q062: known-answer test for next_u64 against the reference xoroshiro128+.
+    //
+    // Expected outputs were computed by an independent Python reference of the
+    // Blackman/Vigna xoroshiro128+ update (constants 24/16/37) seeded with the
+    // exact same state, not by re-running this implementation. A typo in a
+    // rotation/shift constant would change these literals and fail the test.
+    #[test]
+    fn test_rng_known_answer_direct_state() {
+        // Rng::new(1, 2) -> fixed state s0=1, s1=2 (not both zero, unmodified).
+        let mut rng = Rng::new(1, 2);
+        let expected: [u64; 8] = [
+            0x0000000000000003,
+            0x0000006001030003,
+            0x20c102c302000c03,
+            0x810180670d23ad61,
+            0x26d13a4941333a42,
+            0x538a501c02f58b2e,
+            0x2ab2076dee382f7e,
+            0x30dfcfb722fecd9c,
+        ];
+        for (i, &want) in expected.iter().enumerate() {
+            let got = rng.next_u64();
+            assert_eq!(got, want, "next_u64 mismatch at index {i}: {got:#018x}");
+        }
+    }
+
+    #[test]
+    fn test_rng_known_answer_from_seed() {
+        // splitmix64-derived state from a fixed seed, cross-checked by the
+        // independent reference script.
+        let mut rng = Rng::from_seed(0x0123456789ABCDEF);
+        let expected: [u64; 4] = [
+            0xeaed8aa2d9317b30,
+            0xb300b6f0786253c8,
+            0x4753ec6d32d7fadf,
+            0x371c7ae10fed1d49,
+        ];
+        for (i, &want) in expected.iter().enumerate() {
+            let got = rng.next_u64();
+            assert_eq!(got, want, "from_seed next_u64 mismatch at index {i}");
+        }
+    }
+
+    // Q058: next_bool draws the top (strongest) bit, not the LSB.
+    #[test]
+    fn test_next_bool_uses_top_bit() {
+        // Reference top-bit sequence for Rng::new(1, 2), computed independently.
+        let mut rng = Rng::new(1, 2);
+        let expected = [false, false, false, true, false, false, false, false];
+        for (i, &want) in expected.iter().enumerate() {
+            assert_eq!(rng.next_bool(), want, "next_bool mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn test_next_bool_balanced() {
+        // The top-bit bool should be roughly balanced over many draws.
+        let mut rng = Rng::from_seed(0xBEEF);
+        let mut trues = 0usize;
+        let count = 20_000;
+        for _ in 0..count {
+            if rng.next_bool() {
+                trues += 1;
+            }
+        }
+        let ratio = trues as f64 / count as f64;
+        assert!(
+            (ratio - 0.5).abs() < 0.02,
+            "next_bool ratio {ratio} not ~0.5"
+        );
     }
 }

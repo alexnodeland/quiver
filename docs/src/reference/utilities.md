@@ -259,6 +259,56 @@ let input = patch.add("pitch", ExternalInput::voct(Arc::clone(&cv)));
 
 ---
 
+## Mid/Side Encode
+
+Encodes an L/R stereo pair to mid/side. `type_id`: `mid_side_encode`.
+
+```rust,ignore
+let ms = patch.add("ms", MidSideEncode::new());
+```
+
+### Inputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `left` | Audio | Left channel |
+| `right` | Audio | Right channel |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `mid` | Audio | (L + R) / 2 |
+| `side` | Audio | (L − R) / 2 |
+
+---
+
+## Mid/Side Decode
+
+Decodes mid/side back to L/R with an adjustable stereo width; at width 1.0 it exactly
+inverts `MidSideEncode`. `type_id`: `mid_side_decode`.
+
+```rust,ignore
+let ms = patch.add("ms", MidSideDecode::new());
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `mid` | Audio | ±5V | Mid channel |
+| `side` | Audio | ±5V | Side channel |
+| `width` | Unipolar CV | 0-10V | Stereo width (0 = mono, 1 = identity, 2 = doubled), default 1.0 |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `left` | Audio | M + S·width |
+| `right` | Audio | M − S·width |
+
+---
+
 ## Common Patterns
 
 ### Voltage Processing Chain

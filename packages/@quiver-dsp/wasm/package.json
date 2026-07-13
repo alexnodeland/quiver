@@ -1,0 +1,70 @@
+{
+  "name": "@quiver-dsp/wasm",
+  "version": "0.1.0",
+  "description": "Quiver modular synthesizer WASM bindings and AudioWorklet helpers",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./audio": {
+      "types": "./dist/audio.d.ts",
+      "import": "./dist/audio.js"
+    },
+    "./worklet": "./dist/worklet.js",
+    "./quiver": {
+      "types": "./quiver.d.ts",
+      "import": "./quiver.js"
+    },
+    "./quiver_bg.wasm": "./quiver_bg.wasm",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "quiver.js",
+    "quiver.d.ts",
+    "quiver_bg.wasm",
+    "quiver_bg.wasm.d.ts",
+    "src"
+  ],
+  "scripts": {
+    "build:wasm": "cd ../../.. && make wasm",
+    "build:wasm:dev": "cd ../../.. && make wasm-dev",
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "tsup"
+  },
+  "keywords": [
+    "wasm",
+    "webassembly",
+    "audio",
+    "synthesizer",
+    "modular",
+    "quiver",
+    "audioworklet"
+  ],
+  "author": "Alex Nodeland",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alexnodeland/quiver"
+  },
+  "homepage": "https://github.com/alexnodeland/quiver#readme",
+  "bugs": {
+    "url": "https://github.com/alexnodeland/quiver/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
+}

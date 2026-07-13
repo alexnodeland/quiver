@@ -23,7 +23,9 @@ fn main() {
     // External inputs
     let pitch = patch.add("midi_pitch", ExternalInput::voct(Arc::clone(&pitch_cv)));
     let gate = patch.add("midi_gate", ExternalInput::gate(Arc::clone(&gate_cv)));
-    let velocity = patch.add("midi_vel", ExternalInput::cv(Arc::clone(&velocity_cv)));
+    // Not wired into the voice below (this demo only shows how to *receive*
+    // velocity as CV); a real patch would feed it into a VCA or filter stage.
+    let _velocity = patch.add("midi_vel", ExternalInput::cv(Arc::clone(&velocity_cv)));
     let mod_wheel = patch.add("mod_wheel", ExternalInput::cv(Arc::clone(&mod_wheel_cv)));
 
     // Synth voice

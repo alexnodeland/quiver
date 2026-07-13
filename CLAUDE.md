@@ -44,10 +44,11 @@ src/
     └── error.rs
 
 examples/               # Runnable Rust example patches
-├── quick_taste.rs          # Minimal getting-started example
-├── first_patch.rs          # First patch tutorial
-├── simple_patch.rs         # Simple patch demonstration
-├── tutorial_subtractive.rs # Subtractive synthesis tutorial
+├── quick_taste.rs          # Minimal getting-started example; writes a .wav file
+├── first_patch.rs          # Full subtractive voice: VCO -> VCF -> VCA with ADSR + gate
+├── simple_patch.rs         # The smallest possible patch: VCO -> output
+├── render_wav.rs           # Flagship "hear Quiver make sound": sequenced phrase rendered to WAV
+├── tutorial_subtractive.rs # Subtractive synthesis tutorial; writes a .wav file
 ├── tutorial_envelope.rs    # Envelope usage tutorial
 ├── tutorial_filter_mod.rs  # Filter modulation tutorial
 ├── tutorial_fm.rs          # FM synthesis tutorial
@@ -71,7 +72,7 @@ schemas/                # JSON schemas for patch format
 
 docs/                   # mdbook documentation source
 
-packages/@quiver/       # TypeScript/React packages for WASM
+packages/@quiver-dsp/       # TypeScript/React packages for WASM
 ├── wasm/               # WASM bindings package
 ├── types/              # TypeScript type definitions
 └── react/              # React hooks and components
@@ -286,6 +287,7 @@ On main branch only (expensive checks):
 - `Wavetable` - Wavetable oscillator with morphing
 - `FormantOsc` - Formant oscillator for vocal sounds
 - `KarplusStrong` - Physical modeling string synthesis
+- `SamplePlayer` - Mono sample playback with V/Oct pitch, start position, and looping
 
 ### Filters
 - `Svf` - State-variable filter (LP, HP, BP, Notch)
@@ -294,9 +296,10 @@ On main branch only (expensive checks):
 ### Envelopes & Dynamics
 - `Adsr` - Attack-Decay-Sustain-Release envelope
 - `EnvelopeFollower` - Amplitude follower
-- `Compressor` - Dynamic range compressor
-- `Limiter` - Brick-wall limiter
-- `NoiseGate` - Noise gate
+- `Compressor` - Dynamic range compressor (sidechain input)
+- `Limiter` - Brick-wall limiter (sidechain input)
+- `NoiseGate` - Noise gate (sidechain input)
+- `Ducker` - Sidechain ducking driven by a key input
 
 ### Amplifiers & Mixers
 - `Vca` - Voltage-controlled amplifier
@@ -310,7 +313,8 @@ On main branch only (expensive checks):
 - `Phaser` - Phaser effect
 - `Tremolo` - Amplitude modulation tremolo
 - `Vibrato` - Pitch modulation vibrato
-- `Distortion` - Various distortion algorithms
+- `Distortion` - Various distortion algorithms (opt-in 2x/4x oversampling via `set_oversample`)
+- `Wavefolder` - West-coast wavefolder for complex harmonics (opt-in oversampling)
 - `Bitcrusher` - Bit depth and sample rate reduction
 - `Reverb` - Algorithmic reverb
 - `PitchShifter` - Pitch shifting
@@ -332,6 +336,9 @@ On main branch only (expensive checks):
 - `Rectifier` - Full/half-wave rectifier
 - `PrecisionAdder` - Precision CV adder
 - `ParametricEq` - Parametric equalizer
+- `MidSideEncode` - Left/right to mid/side encoder
+- `MidSideDecode` - Mid/side to left/right decoder with width control
+- `ScaleQuantizer` - Musical scale quantizer with alloc-gated microtuning (`set_custom_scale`, `load_scala`)
 
 ### Logic & CV
 - `Comparator` - Voltage comparator
@@ -381,10 +388,10 @@ The `wasm` feature enables JavaScript bindings via `wasm-bindgen` and TypeScript
 
 ### TypeScript Packages
 
-The `packages/@quiver/` directory contains npm packages:
-- `@quiver/wasm` - Core WASM bindings and audio worklet
-- `@quiver/types` - TypeScript type definitions
-- `@quiver/react` - React hooks for Quiver integration
+The `packages/@quiver-dsp/` directory contains npm packages:
+- `@quiver-dsp/wasm` - Core WASM bindings and audio worklet
+- `@quiver-dsp/types` - TypeScript type definitions
+- `@quiver-dsp/react` - React hooks for Quiver integration
 
 ## Documentation
 

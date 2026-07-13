@@ -8,6 +8,6 @@ export default defineConfig({
     outDir: 'dist',
   },
   optimizeDeps: {
-    exclude: ['@quiver/wasm'],
+    exclude: ['@quiver-dsp/wasm'],
   },
 });

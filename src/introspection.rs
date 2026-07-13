@@ -72,7 +72,7 @@ impl ValueFormat {
             }
             ValueFormat::NoteName => {
                 // Convert voltage to MIDI note number (0V = C4 = 60)
-                let midi_note = ((value * 12.0) + 60.0).round() as i32;
+                let midi_note = libm::Libm::<f64>::round((value * 12.0) + 60.0) as i32;
                 let note_names = [
                     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
                 ];
@@ -138,7 +138,7 @@ impl ParamCurve {
             }
             ParamCurve::Stepped { steps } => {
                 let step_size = (max - min) / (*steps as f64);
-                let step_index = (n * (*steps as f64)).floor() as u32;
+                let step_index = libm::Libm::<f64>::floor(n * (*steps as f64)) as u32;
                 min + (step_index.min(*steps - 1) as f64) * step_size
             }
         }
@@ -173,7 +173,7 @@ impl ParamCurve {
             }
             ParamCurve::Stepped { steps } => {
                 let step_size = (max - min) / (*steps as f64);
-                let step_index = ((value - min) / step_size).round() as u32;
+                let step_index = libm::Libm::<f64>::round((value - min) / step_size) as u32;
                 (step_index as f64 / *steps as f64).clamp(0.0, 1.0)
             }
         }
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn test_value_format_decimal() {
         let fmt = ValueFormat::Decimal { places: 2 };
-        assert_eq!(fmt.format(3.14159), "3.14");
+        assert_eq!(fmt.format(1.23456), "1.23");
     }
 
     #[test]

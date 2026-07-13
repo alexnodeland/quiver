@@ -14,17 +14,25 @@ let env = patch.add("env", Adsr::new(44100.0));
 
 | Port | Signal | Range | Description |
 |------|--------|-------|-------------|
-| `gate` | Gate | 0/5V | Trigger/sustain signal |
-| `attack` | Unipolar CV | 0-10V | Attack time (ms-s) |
-| `decay` | Unipolar CV | 0-10V | Decay time (ms-s) |
-| `sustain` | Unipolar CV | 0-10V | Sustain level (0-100%) |
-| `release` | Unipolar CV | 0-10V | Release time (ms-s) |
+| `gate` | Gate | 0/5V | Gate on/off |
+| `retrig` | Trigger | 0/5V | Retrigger (restarts attack from the current level) |
+| `attack` | Unipolar CV | 0-10V | Attack time, default 0.1 |
+| `decay` | Unipolar CV | 0-10V | Decay time (true segment duration), default 0.3 |
+| `sustain` | Unipolar CV | 0-10V | Sustain level, default 0.7 |
+| `release` | Unipolar CV | 0-10V | Release time (true segment duration), default 0.4 |
+| `shape` | Gate | 0/5V | 0V = linear ramps, high = exponential one-pole |
 
-### Output
+### Outputs
 
 | Port | Signal | Description |
 |------|--------|-------------|
-| `env` | Unipolar CV | Envelope output (0-5V) |
+| `env` | Unipolar CV | Envelope output (0-10V) |
+| `inv` | Unipolar CV | Inverted envelope |
+| `eoc` | Trigger | End-of-cycle trigger |
+
+`decay` and `release` are **true segment durations** — the envelope traverses its span
+in the set time regardless of the sustain level. The `shape` input toggles between
+linear and exponential curves.
 
 ### Envelope Stages
 
@@ -56,6 +64,33 @@ $$v(t) = (v_{start} - v_{end}) \cdot e^{-t/\tau} + v_{end}$$
 | Pad | 1s | 500ms | 80% | 2s |
 | Brass | 50ms | 100ms | 70% | 200ms |
 | Perc | 1ms | 50ms | 0% | 50ms |
+
+---
+
+## Envelope Follower
+
+Extracts the amplitude envelope of an audio signal, with adjustable attack/release
+ballistics. `type_id`: `envelope_follower`.
+
+```rust,ignore
+let follower = patch.add("follow", EnvelopeFollower::new(44100.0));
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `in` | Audio | ±5V | Audio input |
+| `attack` | Unipolar CV | 0-10V | Detector attack time, default 0.2 |
+| `release` | Unipolar CV | 0-10V | Detector release time, default 0.3 |
+| `gain` | Unipolar CV | 0-10V | Output gain (×4), default 0.5 |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `out` | Unipolar CV | Amplitude envelope (0-10V) |
+| `inv` | Unipolar CV | Inverted envelope |
 
 ---
 
@@ -97,7 +132,7 @@ let sh = patch.add("sh", SampleAndHold::new());
 
 ```rust,ignore
 // Random stepped modulation
-patch.connect(noise.out("white_left"), sh.in_("in"))?;
+patch.connect(noise.out("white"), sh.in_("in"))?;
 patch.connect(clock.out("div_8"), sh.in_("trigger"))?;
 patch.connect(sh.out("out"), vcf.in_("cutoff"))?;
 ```
@@ -147,18 +182,19 @@ flowchart LR
 
 ## Quantizer
 
-Snaps continuous CV to scale degrees.
+Snaps a V/Oct input to the nearest degree of a fixed scale. The scale is chosen at
+construction (not a port). `type_id`: `quantizer`.
 
 ```rust,ignore
-let quant = patch.add("quant", Quantizer::new());
+let quant = patch.add("quant", Quantizer::major());
+// Also: Quantizer::new(Scale::Dorian), Quantizer::chromatic(), Quantizer::minor()
 ```
 
-### Inputs
+### Input
 
 | Port | Signal | Description |
 |------|--------|-------------|
 | `in` | V/Oct | Unquantized pitch |
-| `scale` | CV | Scale selection |
 
 ### Output
 
@@ -168,13 +204,44 @@ let quant = patch.add("quant", Quantizer::new());
 
 ### Available Scales
 
-| Scale | Notes |
-|-------|-------|
-| Chromatic | All 12 semitones |
-| Major | 1 2 3 4 5 6 7 |
-| Minor | 1 2 ♭3 4 5 ♭6 ♭7 |
-| Pentatonic | 1 2 3 5 6 |
-| Blues | 1 ♭3 4 ♭5 5 ♭7 |
+`Scale`: `Chromatic`, `Major`, `Minor`, `PentatonicMajor`, `PentatonicMinor`, `Dorian`,
+`Mixolydian`, `Blues`. Change at runtime with `quantizer.set_scale(Scale::Minor)`.
+
+---
+
+## Scale Quantizer
+
+A quantizer with CV-selectable root and scale, boundary hysteresis, a note-change
+trigger, and optional microtuning. `type_id`: `scale_quantizer`.
+
+```rust,ignore
+let sq = patch.add("sq", ScaleQuantizer::new(44100.0));
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `in` | V/Oct | ±5V | Pitch to quantize |
+| `root` | Unipolar CV | 0-10V | Root note (0–11 semitones) |
+| `scale` | Unipolar CV | 0-10V | Scale select (7 built-in scales) |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `out` | V/Oct | Quantized pitch |
+| `trigger` | Trigger | Fires on a committed note change |
+
+### Microtuning (with the `alloc` feature)
+
+```rust,ignore
+// Install a custom scale from cents offsets within an octave:
+sq_module.set_custom_scale(&[0.0, 200.0, 350.0, 700.0, 900.0]);
+
+// Or load a Scala .scl file body:
+sq_module.load_scala(scl_source)?;
+```
 
 ---
 

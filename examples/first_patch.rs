@@ -3,6 +3,13 @@
 //! A complete subtractive synthesizer voice demonstrating the core
 //! Quiver workflow: VCO → VCF → VCA with ADSR envelope shaping.
 //!
+//! How this differs from `simple_patch.rs`: that example is the bare-minimum
+//! patch (just a VCO wired to the output, no envelope or gate at all). This
+//! one is the fuller voice you'd actually use in a synth — a gate signal
+//! triggers an ADSR envelope, which shapes both the filter's cutoff and the
+//! VCA's amplitude, so a "note" has a distinct attack and release instead of
+//! playing as a static, unchanging tone.
+//!
 //! Run with: cargo run --example first_patch
 
 use quiver::prelude::*;

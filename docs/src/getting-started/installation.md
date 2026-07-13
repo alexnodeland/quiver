@@ -4,7 +4,7 @@ Getting Quiver into your project is straightforward. The library is pure Rust wi
 
 ## Prerequisites
 
-- **Rust 1.70+** (2021 edition)
+- **Rust 1.78+** (2021 edition) — this is Quiver's MSRV (Minimum Supported Rust Version)
 - **Cargo** (comes with Rust)
 
 Verify your installation:
@@ -18,18 +18,28 @@ cargo --version
 
 ### As a Dependency
 
-Add to your `Cargo.toml`:
+Add to your `Cargo.toml`. The package is published on crates.io as
+**`quiver-dsp`** (the bare name `quiver` was already taken by an unrelated
+crate), but the *library* name is still `quiver` — so your code writes
+`use quiver::prelude::*` regardless:
 
 ```toml
 [dependencies]
-quiver = { git = "https://github.com/alexnodeland/quiver" }
+quiver-dsp = "0.1"
 ```
 
 Or with specific features:
 
 ```toml
 [dependencies]
-quiver = { git = "https://github.com/alexnodeland/quiver", features = ["simd"] }
+quiver-dsp = { version = "0.1", features = ["simd"] }
+```
+
+To track the development branch instead, use a git dependency:
+
+```toml
+[dependencies]
+quiver-dsp = { git = "https://github.com/alexnodeland/quiver" }
 ```
 
 ### Available Features
@@ -39,6 +49,7 @@ quiver = { git = "https://github.com/alexnodeland/quiver", features = ["simd"] }
 | `std` | Yes | Full functionality including OSC, visualization (implies `alloc`) |
 | `alloc` | No | Serialization, presets, and I/O for `no_std` + heap environments |
 | `simd` | No | SIMD vectorization for block processing (works with any tier) |
+| `wasm` | No | WebAssembly bindings via `wasm-bindgen` + TypeScript types via `tsify` (implies `alloc`). See [Browser & App Integration](../how-to/browser-integration.md). |
 
 ### Feature Tiers
 
@@ -46,11 +57,13 @@ Quiver supports three tiers for different environments:
 
 #### Tier 1: Core Only (`default-features = false`)
 
-For bare-metal embedded systems without heap allocation:
+`no_std`, but still requires a global allocator — the core patch graph uses
+`Box`/`Vec`/`String`, so you must provide a `#[global_allocator]` (there is no
+allocator-free tier). Suitable for embedded systems that have a heap:
 
 ```toml
 [dependencies]
-quiver = { git = "https://github.com/alexnodeland/quiver", default-features = false }
+quiver-dsp = { version = "0.1", default-features = false }
 ```
 
 Includes all core DSP modules: oscillators, filters, envelopes, amplifiers, mixers, utilities, logic modules, analog modeling, polyphony, and the patch graph.
@@ -61,7 +74,7 @@ For WASM web apps and embedded systems with heap:
 
 ```toml
 [dependencies]
-quiver = { git = "https://github.com/alexnodeland/quiver", default-features = false, features = ["alloc"] }
+quiver-dsp = { version = "0.1", default-features = false, features = ["alloc"] }
 ```
 
 Adds:
@@ -75,7 +88,7 @@ For desktop applications:
 
 ```toml
 [dependencies]
-quiver = { git = "https://github.com/alexnodeland/quiver" }
+quiver-dsp = "0.1"
 ```
 
 Adds:

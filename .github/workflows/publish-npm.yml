@@ -47,16 +47,20 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build WASM package
+      # 1. Compile Rust -> wasm-bindgen glue into packages/@quiver-dsp/wasm/ (quiver.js,
+      #    quiver.d.ts, quiver_bg.wasm). The TypeScript build depends on this.
+      - name: Build WASM glue
         run: make wasm
 
+      # 2. Install the whole workspace from the committed root lockfile.
       - name: Install npm dependencies
         run: npm ci
 
+      # 3. Build the TypeScript packages in dependency order:
+      #    @quiver-dsp/wasm (tsup, needs the glue from step 1) -> @quiver-dsp/types ->
+      #    @quiver-dsp/react (imports the built @quiver-dsp/wasm + @quiver-dsp/types types).
       - name: Build TypeScript packages
-        run: |
-          cd packages/@quiver/types && npm run build
-          cd ../react && npm run build
+        run: npm run build:ts
 
       - name: Verify package versions
         run: |
@@ -64,7 +68,7 @@ jobs:
           echo "Tag version: $TAG_VERSION"
 
           # Check each package version matches
-          for pkg in packages/@quiver/wasm packages/@quiver/types packages/@quiver/react; do
+          for pkg in packages/@quiver-dsp/wasm packages/@quiver-dsp/types packages/@quiver-dsp/react; do
             PKG_VERSION=$(node -p "require('./$pkg/package.json').version")
             echo "$pkg version: $PKG_VERSION"
             if [ "$PKG_VERSION" != "$TAG_VERSION" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
@@ -73,27 +77,31 @@ jobs:
             fi
           done
 
-      - name: Publish @quiver/wasm
-        if: ${{ github.event.inputs.dry_run != 'true' }}
+      # Dry-run proof that each package tarball assembles (runs on every trigger).
+      - name: Pack packages (dry run)
         run: |
-          cd packages/@quiver/wasm
-          npm publish --access public --provenance
+          npm pack --dry-run --workspace @quiver-dsp/types
+          npm pack --dry-run --workspace @quiver-dsp/wasm
+          npm pack --dry-run --workspace @quiver-dsp/react
+
+      # Publish in dependency order: @quiver-dsp/types and @quiver-dsp/wasm first, then
+      # @quiver-dsp/react (which depends on both). --provenance is optional; it needs the
+      # `id-token: write` permission set above and public npm.
+      - name: Publish @quiver-dsp/types
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: npm publish --workspace @quiver-dsp/types --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish @quiver/types
+      - name: Publish @quiver-dsp/wasm
         if: ${{ github.event.inputs.dry_run != 'true' }}
-        run: |
-          cd packages/@quiver/types
-          npm publish --access public --provenance
+        run: npm publish --workspace @quiver-dsp/wasm --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish @quiver/react
+      - name: Publish @quiver-dsp/react
         if: ${{ github.event.inputs.dry_run != 'true' }}
-        run: |
-          cd packages/@quiver/react
-          npm publish --access public --provenance
+        run: npm publish --workspace @quiver-dsp/react --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -105,7 +113,7 @@ jobs:
             echo "**Dry run** - packages were not published" >> $GITHUB_STEP_SUMMARY
           else
             echo "Successfully published:" >> $GITHUB_STEP_SUMMARY
-            echo "- @quiver/wasm" >> $GITHUB_STEP_SUMMARY
-            echo "- @quiver/types" >> $GITHUB_STEP_SUMMARY
-            echo "- @quiver/react" >> $GITHUB_STEP_SUMMARY
+            echo "- @quiver-dsp/wasm" >> $GITHUB_STEP_SUMMARY
+            echo "- @quiver-dsp/types" >> $GITHUB_STEP_SUMMARY
+            echo "- @quiver-dsp/react" >> $GITHUB_STEP_SUMMARY
           fi
