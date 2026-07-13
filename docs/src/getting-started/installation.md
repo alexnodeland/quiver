@@ -18,18 +18,28 @@ cargo --version
 
 ### As a Dependency
 
-Add to your `Cargo.toml`:
+Add to your `Cargo.toml`. The package is published on crates.io as
+**`quiver-dsp`** (the bare name `quiver` was already taken by an unrelated
+crate), but the *library* name is still `quiver` — so your code writes
+`use quiver::prelude::*` regardless:
 
 ```toml
 [dependencies]
-quiver = { git = "https://github.com/alexnodeland/quiver" }
+quiver-dsp = "0.1"
 ```
 
 Or with specific features:
 
 ```toml
 [dependencies]
-quiver = { git = "https://github.com/alexnodeland/quiver", features = ["simd"] }
+quiver-dsp = { version = "0.1", features = ["simd"] }
+```
+
+To track the development branch instead, use a git dependency:
+
+```toml
+[dependencies]
+quiver-dsp = { git = "https://github.com/alexnodeland/quiver" }
 ```
 
 ### Available Features
@@ -53,7 +63,7 @@ allocator-free tier). Suitable for embedded systems that have a heap:
 
 ```toml
 [dependencies]
-quiver = { git = "https://github.com/alexnodeland/quiver", default-features = false }
+quiver-dsp = { version = "0.1", default-features = false }
 ```
 
 Includes all core DSP modules: oscillators, filters, envelopes, amplifiers, mixers, utilities, logic modules, analog modeling, polyphony, and the patch graph.
@@ -64,7 +74,7 @@ For WASM web apps and embedded systems with heap:
 
 ```toml
 [dependencies]
-quiver = { git = "https://github.com/alexnodeland/quiver", default-features = false, features = ["alloc"] }
+quiver-dsp = { version = "0.1", default-features = false, features = ["alloc"] }
 ```
 
 Adds:
@@ -78,7 +88,7 @@ For desktop applications:
 
 ```toml
 [dependencies]
-quiver = { git = "https://github.com/alexnodeland/quiver" }
+quiver-dsp = "0.1"
 ```
 
 Adds:

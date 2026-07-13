@@ -1,12 +1,16 @@
 [package]
-name = "quiver"
+# crates.io package name. The bare name `quiver` is taken on crates.io by an
+# unrelated Apache-Arrow crate, so the package publishes as `quiver-dsp` while
+# the LIBRARY name stays `quiver` (see `[lib] name` below): consumers
+# `cargo add quiver-dsp` but still write `use quiver::prelude::*`.
+name = "quiver-dsp"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.78"
 authors = ["Alex Nodeland"]
 description = "A modular audio synthesis library using Arrow-style combinators and graph-based patching"
 readme = "README.md"
-documentation = "https://docs.rs/quiver"
+documentation = "https://docs.rs/quiver-dsp"
 license = "MIT"
 repository = "https://github.com/alexnodeland/quiver"
 keywords = ["audio", "synthesis", "modular", "dsp", "music"]
@@ -24,6 +28,10 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
+# Keep the library (import) name `quiver` even though the package is published
+# as `quiver-dsp` — all code, docs, and examples use `use quiver::...`, and
+# wasm-pack's generated JS glue keeps its `quiver.js`/`quiver_bg.wasm` names.
+name = "quiver"
 # `cdylib` is required by wasm-pack (Q140): wasm-bindgen's build pipeline links
 # a `cdylib` artifact to produce the `.wasm` binary consumed by JS. Keeping it
 # declared unconditionally means every native (non-wasm) build also produces an
