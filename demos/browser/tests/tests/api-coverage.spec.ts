@@ -394,20 +394,22 @@ test.describe('Processing API', () => {
       engine.set_param('env', 0, 0.001); // Attack
       engine.set_param('env', 4, 5.0); // Gate on
 
-      // Process to advance envelope
+      // Process to advance envelope. Copy each block immediately:
+      // process_block returns a view into WASM memory that the next engine
+      // call overwrites, so retaining the raw views would alias before/after.
       engine.process_block(1024);
-      const before = engine.process_block(128);
+      const before = Array.from(engine.process_block(128));
 
       // Reset
       engine.reset();
 
       // Process after reset
-      const after = engine.process_block(128);
+      const after = Array.from(engine.process_block(128));
 
       engine.free();
       return {
-        beforeSum: Array.from(before).reduce((a, b) => a + Math.abs(b), 0),
-        afterSum: Array.from(after).reduce((a, b) => a + Math.abs(b), 0)
+        beforeSum: before.reduce((a, b) => a + Math.abs(b), 0),
+        afterSum: after.reduce((a, b) => a + Math.abs(b), 0)
       };
     });
 

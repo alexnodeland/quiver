@@ -196,19 +196,21 @@ test.describe('AudioWorklet Message Passing', () => {
       engine.set_output('out');
       engine.compile();
 
-      // Process with initial offset
+      // Process with initial offset. process_block returns a VIEW into WASM
+      // memory (reused by the next engine call), so copy each block
+      // immediately — retaining the raw view would alias block1 and block2.
       engine.set_param('offset1', 0, 1.0);
-      const block1 = engine.process_block(128);
+      const block1 = Array.from(engine.process_block(128));
 
       // Change offset mid-stream
       engine.set_param('offset1', 0, 2.0);
-      const block2 = engine.process_block(128);
+      const block2 = Array.from(engine.process_block(128));
 
       engine.free();
 
       // First block should be around 1.0, second around 2.0
-      const avg1 = Array.from(block1).reduce((a, b) => a + b, 0) / block1.length;
-      const avg2 = Array.from(block2).reduce((a, b) => a + b, 0) / block2.length;
+      const avg1 = block1.reduce((a, b) => a + b, 0) / block1.length;
+      const avg2 = block2.reduce((a, b) => a + b, 0) / block2.length;
 
       return { avg1, avg2, changed: Math.abs(avg2 - avg1) > 0.5 };
     });

@@ -189,7 +189,10 @@ test.describe('Effects Modules', () => {
       engine.set_output('out');
       engine.compile();
 
-      // Process some audio
+      // Warm up past the chorus's 7ms base delay (~309 samples at 44.1kHz) plus
+      // modulation depth: until the delay lines fill, the wet signal is silence
+      // and both channels correctly emit the identical dry signal.
+      engine.process_block(4096);
       const output = engine.process_block(256);
       const samples = Array.from(output);
 
