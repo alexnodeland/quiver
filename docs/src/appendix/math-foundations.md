@@ -66,9 +66,9 @@ Where \\( p = e^{-2\pi f_c / f_s} \\)
 
 **State-Variable Filter:**
 \\[ \begin{aligned}
-\text{LP} &= \text{LP}_{n-1} + f \cdot \text{BP}_{n-1} \\\\
-\text{HP} &= \text{input} - \text{LP} - q \cdot \text{BP}_{n-1} \\\\
-\text{BP} &= f \cdot \text{HP} + \text{BP}_{n-1}
+\text{LP} &= \text{LP}\_{n-1} + f \cdot \text{BP}\_{n-1} \\\\
+\text{HP} &= \text{input} - \text{LP} - q \cdot \text{BP}\_{n-1} \\\\
+\text{BP} &= f \cdot \text{HP} + \text{BP}\_{n-1}
 \end{aligned} \\]
 
 ## Waveform Mathematics
