@@ -626,20 +626,64 @@ function setupKeyboard() {
     }
   });
 
+  // Pointer events cover mouse AND touch. Mouse-only handling breaks phones:
+  // a tap synthesizes mousedown+mouseup back-to-back after the finger lifts
+  // (note on/off in the same instant — silence), and press-and-hold fires
+  // nothing at all. Each active pointer tracks its own note so multi-touch
+  // chords and glissando (sliding a finger across keys) both work.
   const keyboard = document.getElementById('keyboard')!;
-  keyboard.addEventListener('mousedown', (e) => {
+  const pointerNotes = new Map<number, number>();
+
+  const noteFromPoint = (x: number, y: number): number | null => {
+    const key = document.elementFromPoint(x, y)?.closest('.key');
+    return key ? parseInt(key.getAttribute('data-note')!) : null;
+  };
+
+  keyboard.addEventListener('pointerdown', (e) => {
     const key = (e.target as HTMLElement).closest('.key');
-    if (key) {
-      const note = parseInt(key.getAttribute('data-note')!);
+    if (!key) return;
+    e.preventDefault();
+    const note = parseInt(key.getAttribute('data-note')!);
+    pointerNotes.set(e.pointerId, note);
+    noteOn(note);
+  });
+
+  keyboard.addEventListener('pointermove', (e) => {
+    const held = pointerNotes.get(e.pointerId);
+    if (held === undefined) return;
+    // elementFromPoint, not e.target: touch pointers are implicitly captured
+    // by the key they started on, so the event target never changes.
+    const note = noteFromPoint(e.clientX, e.clientY);
+    if (note !== null && note !== held) {
+      noteOff(held);
+      pointerNotes.set(e.pointerId, note);
       noteOn(note);
     }
   });
 
-  document.addEventListener('mouseup', () => {
-    for (const [note] of noteToVoice) {
-      noteOff(note);
-    }
-  });
+  const releasePointer = (e: PointerEvent) => {
+    const held = pointerNotes.get(e.pointerId);
+    if (held === undefined) return;
+    pointerNotes.delete(e.pointerId);
+    noteOff(held);
+  };
+  window.addEventListener('pointerup', releasePointer);
+  window.addEventListener('pointercancel', releasePointer);
+}
+
+// Scale the key strip down to fit narrow viewports (phones). A CSS transform
+// keeps the keys' hit areas proportional; the container height follows the
+// scale because transforms don't reflow layout.
+function fitKeyboard() {
+  const container = document.querySelector<HTMLElement>('.keyboard');
+  const inner = document.querySelector<HTMLElement>('.keyboard-inner');
+  if (!container || !inner) return;
+  const natural = inner.scrollWidth;
+  if (!natural) return;
+  const scale = Math.min(1, container.clientWidth / natural);
+  inner.style.transform = scale < 1 ? `scale(${scale})` : '';
+  inner.style.transformOrigin = 'top center';
+  container.style.height = `${Math.ceil(180 * scale)}px`;
 }
 
 // Setup visualization mode buttons
@@ -740,6 +784,7 @@ function handleResize() {
   if (spectrumCanvas && spectrumCtx) {
     setupCanvas(spectrumCanvas, spectrumCtx);
   }
+  fitKeyboard();
 }
 
 // Web MIDI API support
