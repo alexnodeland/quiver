@@ -45,6 +45,10 @@ name = "quiver"
 # `cargo rustc --crate-type rlib ...` to override the declared crate-type for
 # that one invocation instead of removing it from the manifest.
 crate-type = ["cdylib", "rlib"]
+# Without this, `cargo bench` also runs the lib's default libtest harness,
+# which rejects criterion CLI flags like `--warm-up-time` (breaks the CI
+# Benchmarks job). Only benches/audio_performance.rs (harness = false) benches.
+bench = false
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
