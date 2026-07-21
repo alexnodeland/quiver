@@ -357,16 +357,21 @@
       gap: 25px;
     }
 
+    /* min-width: 0 breaks the min-content sizing chain: without it the 432px
+       key strip stretches these grid/flex items past the viewport on phones,
+       and fitKeyboard() measures the stretched width instead of the real one. */
     .left-column {
       display: flex;
       flex-direction: column;
       gap: 25px;
+      min-width: 0;
     }
 
     .right-column {
       display: flex;
       flex-direction: column;
       gap: 25px;
+      min-width: 0;
     }
 
     /* Visualization area */
@@ -761,6 +766,10 @@
       position: relative;
       height: 180px;
       user-select: none;
+      -webkit-user-select: none;
+      /* Playing must not scroll/zoom the page; pointer events do the work. */
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
     }
 
     .keyboard-inner {
@@ -1241,6 +1250,45 @@
       text-transform: uppercase;
     }
 
+    /* Remove the double-tap-to-zoom delay on controls (not on sliders — they
+       need default pointer handling for dragging). */
+    button, select, .patch-btn, .key {
+      touch-action: manipulation;
+    }
+
+    .key {
+      touch-action: none; /* keys handle their own pointers (slides) */
+    }
+
+    /* Finger-sized controls on touch devices */
+    @media (pointer: coarse) {
+      input[type="range"] {
+        height: 10px;
+      }
+
+      input[type="range"]::-webkit-slider-thumb {
+        width: 26px;
+        height: 26px;
+      }
+
+      input[type="range"]::-moz-range-thumb {
+        width: 26px;
+        height: 26px;
+      }
+
+      .compact-control {
+        gap: 14px;
+      }
+
+      .viz-mode-btn, .category-tab {
+        padding: 10px 14px;
+      }
+
+      .module-item {
+        padding: 12px 10px;
+      }
+    }
+
     /* Responsive */
     @media (max-width: 1200px) {
       .main-layout {
@@ -1274,14 +1322,29 @@
         grid-template-columns: 1fr;
       }
 
-      .keyboard {
-        transform: scale(0.85);
-        transform-origin: center;
-      }
+      /* Keyboard scaling is handled by fitKeyboard() in main.ts, which
+         measures the actual container width instead of guessing here. */
 
       h1 {
         font-size: 1.5rem;
         letter-spacing: 4px;
+      }
+
+      #scope {
+        height: 180px;
+      }
+
+      #spectrum {
+        height: 110px;
+      }
+
+      .keyboard-panel, .viz-container, .panel, .compact-panel {
+        padding: 15px;
+      }
+
+      .compact-control label {
+        width: 64px;
+        font-size: 0.55rem;
       }
     }
   </style>
