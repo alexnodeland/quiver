@@ -1,6 +1,9 @@
 # Live Playground
 
-<a class="qv-playground-link" href="/quiver/playground/" target="_blank" rel="noopener">**Open the Playground &rarr;**</a>
+<!-- Relative href: the site serves from / on quiver-dsp.com but /quiver/ on
+     github.io, so an absolute path would 404 on one of them. This page sits at
+     the book root, so "playground/" resolves correctly on both. -->
+<a class="qv-playground-link" href="playground/" target="_blank" rel="noopener">**Open the Playground &rarr;**</a>
 
 The playground is a full polyphonic synthesizer running **Quiver's actual WASM engine**
 — the same compiled Rust that ships in the [`@quiver-dsp/wasm`](https://www.npmjs.com/package/@quiver-dsp/wasm)
