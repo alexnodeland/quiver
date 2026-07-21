@@ -38,7 +38,7 @@
 </script>
 </div>
 
-*Diagrams like this one are backed by live, hearable versions — [start with the Explorables](./explorables/index.md).*
+*Diagrams like this one are backed by live, hearable versions — [start with the Explorables](./explorables/index.md). Or patch the real compiled engine right now in the [Live Playground](./playground.md).*
 
 ## Why Quiver?
 

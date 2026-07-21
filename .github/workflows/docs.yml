@@ -7,10 +7,16 @@ on:
       - 'docs/**'
       - 'src/**'
       - 'Cargo.toml'
+      - 'demos/browser/**'
+      - 'packages/@quiver-dsp/**'
+      - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'docs/**'
       - 'src/**'
+      - 'demos/browser/**'
+      - 'packages/@quiver-dsp/**'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 # Cancel outdated runs for the same branch/PR
@@ -29,9 +35,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Setup Rust for rustdoc
+      # Setup Rust for rustdoc + the wasm playground build
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       # Install mdBook tools (taiki-e ships prebuilt binaries; peaceiris/actions-mdbook
       # is stuck on the deprecated node20 runtime)
@@ -71,12 +88,21 @@ jobs:
           # [package.metadata.docs.rs] in Cargo.toml.
           RUSTDOCFLAGS: -D warnings
 
+      # Build the WASM playground (the browser synth demo running the real engine)
+      - name: Build playground
+        run: |
+          npm ci
+          make wasm
+          npm run build:wasm:ts
+          npm run build --workspace @quiver-dsp/demo-browser-synth
+
       # Combine into single site structure
       - name: Prepare site
         run: |
           mkdir -p site
           cp -r docs/book/* site/
           cp -r target/doc site/api
+          cp -r demos/browser/dist site/playground
 
       - name: Upload site artifact
         uses: actions/upload-artifact@v7
@@ -121,6 +147,10 @@ jobs:
           # Check for index files
           [ -f "site/index.html" ] || { echo "Missing site/index.html"; exit 1; }
           [ -f "site/api/quiver/index.html" ] || { echo "Missing API index"; exit 1; }
+
+          # Check the WASM playground shipped with its engine binary
+          [ -f "site/playground/index.html" ] || { echo "Missing playground index"; exit 1; }
+          ls site/playground/assets/*.wasm >/dev/null 2>&1 || { echo "Missing playground wasm binary"; exit 1; }
 
           echo "Documentation validation passed!"
 

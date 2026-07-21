@@ -216,6 +216,13 @@ wasm-dev:
 	cp pkg/quiver.js pkg/quiver.d.ts pkg/quiver_bg.wasm pkg/quiver_bg.wasm.d.ts packages/@quiver-dsp/wasm/
 	@echo "WASM package built (dev): packages/@quiver-dsp/wasm/"
 
+# Build the @quiver-dsp/wasm TS wrapper (dist/worklet.js etc.) on top of the
+# wasm-pack output. The worklet integration test loads dist/worklet.js, so the
+# browser test targets depend on this, not just `wasm`.
+wasm-ts: wasm
+	npm install --silent
+	npm run build:wasm:ts
+
 # Check WASM compilation without building
 wasm-check:
 	cargo check --target wasm32-unknown-unknown --no-default-features --features wasm
@@ -227,12 +234,12 @@ ts-check:
 	@echo "TypeScript OK"
 
 # Run browser tests with Playwright
-test-browser: wasm
+test-browser: wasm-ts
 	@echo "Running browser tests..."
 	@cd demos/browser/tests && npm install --silent && npx playwright install --with-deps chromium && npx playwright test --project=chromium
 
 # Run browser tests on all browsers
-test-browser-all: wasm
+test-browser-all: wasm-ts
 	@echo "Running browser tests on all browsers..."
 	@cd demos/browser/tests && npm install --silent && npx playwright install --with-deps && npx playwright test
 

@@ -13,6 +13,12 @@
 
 ---
 
+# Playground
+
+- [Live Playground](./playground.md)
+
+---
+
 # Explorables
 
 - [About the Explorables](./explorables/README.md)

@@ -45,10 +45,15 @@ The dev server runs at `http://localhost:3000` (set in `vite.config.ts`). Build 
 `@quiver-dsp/wasm` package first (`make wasm` then `npm run build:wasm:ts` at the repo
 root) so Vite can resolve the worklet/wasm assets.
 
-> Note: the Playwright E2E tests under `tests/` run against a **separate** static
+> Note: most Playwright E2E tests under `tests/` run against a **separate** static
 > fixture (`tests/fixtures/index.html`, served by `vite fixtures` on port 5173) that
-> exercises the raw `QuiverEngine` API directly on the main thread. They do not load
-> this demo's worklet path.
+> exercises the raw `QuiverEngine` API directly on the main thread. The real worklet
+> path (the bundle in `dist/worklet.js`) is covered by
+> `tests/tests/worklet-integration.spec.ts`, which registers the actual processor and
+> boots the engine inside an AudioWorkletGlobalScope — keep that test passing; it is
+> the only thing that catches worklet-scope-only failures (e.g. the missing
+> TextDecoder/TextEncoder globals shimmed by `src/worklet-polyfill.ts` in the wasm
+> package).
 
 ## Testing
 
@@ -121,3 +126,8 @@ cd demos/browser
 npm run build           # Creates optimized build in dist/
 npm run preview         # Preview production build
 ```
+
+Vite is configured with `base: './'` (relative asset URLs) because the built demo is
+deployed by the Documentation workflow to GitHub Pages at `/quiver/playground/` — the
+docs site links to it as the "Live Playground" (`docs/src/playground.md`). Keep the
+base relative or the deployed assets 404.
