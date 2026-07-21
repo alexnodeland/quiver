@@ -51,10 +51,10 @@ Level
 All stages use exponential curves:
 
 **Attack:**
-$$v(t) = 5 \cdot (1 - e^{-t/\tau_a})$$
+\\[ v(t) = 5 \cdot (1 - e^{-t/\tau_a}) \\]
 
 **Decay/Release:**
-$$v(t) = (v_{start} - v_{end}) \cdot e^{-t/\tau} + v_{end}$$
+\\[ v(t) = (v_{start} - v_{end}) \cdot e^{-t/\tau} + v_{end} \\]
 
 ### Typical Settings
 

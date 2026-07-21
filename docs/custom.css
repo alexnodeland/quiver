@@ -16,14 +16,9 @@ code {
     margin: 1em 0;
 }
 
-/* Signal type colors in documentation */
-.signal-audio { color: #4a9eff; }
-.signal-cv { color: #ff6b6b; }
-.signal-gate { color: #51cf66; }
-.signal-voct { color: #ffd43b; }
-
-/* Module category styling */
-.module-oscillator { border-left: 3px solid #4a9eff; padding-left: 1em; }
-.module-filter { border-left: 3px solid #ff6b6b; padding-left: 1em; }
-.module-modulator { border-left: 3px solid #51cf66; padding-left: 1em; }
-.module-utility { border-left: 3px solid #868e96; padding-left: 1em; }
+/*
+ * Signal-type colors: the canonical classes are the .qv-c-* helpers in
+ * quiver-viz.css (.qv-c-audio, .qv-c-cv, .qv-c-gate, .qv-c-voct, .qv-c-mod),
+ * driven by the --qv-* custom properties. The old .signal-* / .module-*
+ * classes were unused and have been removed.
+ */

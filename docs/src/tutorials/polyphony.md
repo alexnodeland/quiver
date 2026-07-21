@@ -127,7 +127,7 @@ The slight detuning creates a chorus-like richness. `detune_offset(i)` and
 
 Quiver uses the standard conversion:
 
-$$V_{oct} = \frac{\text{MIDI} - 60}{12}$$
+\\[ V_{oct} = \frac{\text{MIDI} - 60}{12} \\]
 
 | MIDI Note | Name | V/Oct |
 |-----------|------|-------|

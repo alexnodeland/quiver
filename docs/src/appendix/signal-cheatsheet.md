@@ -28,17 +28,25 @@ pub enum SignalKind {
 }
 ```
 
-## PortDef Factory Methods
+## Defining Ports
 
-| Method | Signal Kind | Default | Attenuverter |
-|--------|-------------|---------|--------------|
-| `::audio()` | Audio | 0.0 | No |
-| `::cv_unipolar()` | CvUnipolar | 0.0 | Yes |
-| `::cv_bipolar()` | CvBipolar | 0.0 | Yes |
-| `::voct()` | VoltPerOctave | 0.0 | No |
-| `::gate()` | Gate | 0.0 | No |
-| `::trigger()` | Trigger | 0.0 | No |
-| `::clock()` | Clock | 0.0 | No |
+Ports are declared with `PortDef::new(id, name, kind)` plus chainable
+builders:
+
+```rust,ignore
+PortDef::new(0, "in", SignalKind::Audio)
+PortDef::new(1, "cutoff", SignalKind::CvUnipolar)
+    .with_default(5.0)       // Value when unpatched (default 0.0)
+    .with_attenuverter()     // Flag an attenuverter control for UIs
+PortDef::new(2, "right", SignalKind::Audio)
+    .normalled_to(1)         // Falls back to port 1 when unpatched
+```
+
+| Builder | Effect |
+|---------|--------|
+| `.with_default(v)` | Sets the value used when no cable is connected |
+| `.with_attenuverter()` | Marks the input as having an attenuverter |
+| `.normalled_to(port_id)` | Internal fallback source when unpatched |
 
 ## Compatibility Quick Reference
 
@@ -114,9 +122,11 @@ fn bend_to_voct(bend: i16) -> f64 {
 ## Cable Attenuation
 
 ```rust,ignore
-Cable::new()
-    .with_attenuation(0.5)   // Scale signal
-    .with_offset(2.0)        // Add DC offset
+// Scale the signal (0.0-1.0)
+patch.connect_attenuated(from, to, 0.5)?;
+
+// Full modulation controls: attenuverter (-2.0 to 2.0) + DC offset (±10V)
+patch.connect_modulated(from, to, 0.5, 2.0)?;
 ```
 
 ## Input Summing
@@ -134,5 +144,6 @@ LFO2 (+3V) ─┘
 When input is unpatched, uses normalled source:
 
 ```rust,ignore
-PortDef::audio().with_normalled_to("other_port")
+// Port 1 ("right") falls back to port 0 ("left") when unpatched
+PortDef::new(1, "right", SignalKind::Audio).normalled_to(0)
 ```

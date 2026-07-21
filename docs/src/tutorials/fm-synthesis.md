@@ -2,26 +2,45 @@
 
 Frequency Modulation (FM) synthesis creates complex timbres by modulating one oscillator's frequency with another. It's the technology behind the DX7 and countless digital synths.
 
-```mermaid
-flowchart LR
-    MOD[Modulator<br/>Oscillator] -->|FM| CAR[Carrier<br/>Oscillator]
-    CAR --> OUT[Output]
+<div class="quiver-explorable" data-viz="patchgraph">
+<script type="application/json">
+{
+  "modules": [
+    {"id": "modulator", "label": "MODULATOR (VCO)", "x": 0, "y": 2.6,
+     "outputs": [{"name": "sin", "kind": "mod"}]},
+    {"id": "mod_depth", "label": "MOD DEPTH", "x": 1, "y": 2.6,
+     "inputs": [{"name": "in", "kind": "mod"}],
+     "outputs": [{"name": "out", "kind": "mod"}]},
+    {"id": "carrier", "label": "CARRIER (VCO)", "x": 2, "y": 0,
+     "inputs": [{"name": "voct", "kind": "voct"}, {"name": "fm_lin", "kind": "mod"}],
+     "outputs": [{"name": "sin", "kind": "audio"}]},
+    {"id": "output", "label": "OUTPUT", "x": 3, "y": 0,
+     "inputs": [{"name": "left", "kind": "audio"}, {"name": "right", "kind": "audio"}]}
+  ],
+  "cables": [
+    {"from": "modulator.sin", "to": "mod_depth.in", "kind": "mod"},
+    {"from": "mod_depth.out", "to": "carrier.fm_lin", "kind": "mod"},
+    {"from": "carrier.sin", "to": "output.left", "kind": "audio"},
+    {"from": "carrier.sin", "to": "output.right", "kind": "audio"}
+  ],
+  "caption": "tutorial_fm: the modulator's sine, scaled by an attenuverter, drives the carrier's linear FM input — only the carrier is heard."
+}
+</script>
+</div>
 
-    style MOD fill:#f9a826,color:#000
-    style CAR fill:#4a9eff,color:#fff
-```
+*See the sidebands appear as you scrub ratio and index in [Sidebands from Nothing](../explorables/fm.md).*
 
 ## The Mathematics
 
 In FM synthesis, the carrier frequency is modulated by the modulator:
 
-$$y(t) = A \sin(2\pi f_c t + I \sin(2\pi f_m t))$$
+\\[ y(t) = A \sin(2\pi f_c t + I \sin(2\pi f_m t)) \\]
 
 Where:
-- $f_c$ = carrier frequency (the pitch you hear)
-- $f_m$ = modulator frequency
-- $I$ = modulation index (depth)
-- $A$ = amplitude
+- \\( f_c \\) = carrier frequency (the pitch you hear)
+- \\( f_m \\) = modulator frequency
+- \\( I \\) = modulation index (depth)
+- \\( A \\) = amplitude
 
 The **modulation index** controls harmonic richness:
 
@@ -60,13 +79,15 @@ graph TD
 {{#include ../../../examples/tutorial_fm.rs}}
 ```
 
+Run it with `cargo run --example tutorial_fm`.
+
 ## Sideband Theory
 
 FM creates **sidebands** around the carrier frequency:
 
-$$f_{sidebands} = f_c \pm n \cdot f_m$$
+\\[ f_{sidebands} = f_c \pm n \cdot f_m \\]
 
-Where $n = 1, 2, 3, ...$
+Where \\( n = 1, 2, 3, ... \\)
 
 ```
        ▲
@@ -77,7 +98,7 @@ Where $n = 1, 2, 3, ...$
   -2fm -fm  fc  +fm +2fm
 ```
 
-The modulation index determines how many sidebands have significant amplitude (roughly $I + 1$ sidebands on each side).
+The modulation index determines how many sidebands have significant amplitude (roughly \\( I + 1 \\) sidebands on each side).
 
 ## Envelope the Index
 

@@ -2,20 +2,47 @@
 
 Let's create something musical: a step sequencer driving a bass synthesizer. This is the foundation of countless electronic music tracks.
 
-```mermaid
-flowchart LR
-    CLK[Clock] -->|tempo| SEQ[Step<br/>Sequencer]
-    SEQ -->|V/Oct| VCO[VCO]
-    SEQ -->|gate| ENV[ADSR]
-    VCO --> VCF[VCF]
-    ENV --> VCF
-    ENV --> VCA[VCA]
-    VCF --> VCA
-    VCA --> OUT[Output]
+<div class="quiver-explorable" data-viz="patchgraph">
+<script type="application/json">
+{
+  "modules": [
+    {"id": "clock", "label": "CLOCK", "x": 0, "y": 3.4,
+     "outputs": [{"name": "out", "kind": "clock"}]},
+    {"id": "seq", "label": "STEP SEQ", "x": 1, "y": 3.4,
+     "inputs": [{"name": "clock", "kind": "clock"}],
+     "outputs": [{"name": "cv", "kind": "voct"}, {"name": "gate", "kind": "gate"}]},
+    {"id": "vco", "label": "VCO", "x": 2, "y": 0,
+     "inputs": [{"name": "voct", "kind": "voct"}],
+     "outputs": [{"name": "saw", "kind": "audio"}]},
+    {"id": "env", "label": "ADSR", "x": 2, "y": 3.4,
+     "inputs": [{"name": "gate", "kind": "gate"}],
+     "outputs": [{"name": "env", "kind": "cv"}]},
+    {"id": "vcf", "label": "VCF (SVF)", "x": 3, "y": 0,
+     "inputs": [{"name": "in", "kind": "audio"}, {"name": "cutoff", "kind": "cv"}],
+     "outputs": [{"name": "lp", "kind": "audio"}]},
+    {"id": "vca", "label": "VCA", "x": 4, "y": 0,
+     "inputs": [{"name": "in", "kind": "audio"}, {"name": "cv", "kind": "cv"}],
+     "outputs": [{"name": "out", "kind": "audio"}]},
+    {"id": "output", "label": "OUTPUT", "x": 5, "y": 0,
+     "inputs": [{"name": "left", "kind": "audio"}, {"name": "right", "kind": "audio"}]}
+  ],
+  "cables": [
+    {"from": "clock.out", "to": "seq.clock", "kind": "clock"},
+    {"from": "seq.cv", "to": "vco.voct", "kind": "voct"},
+    {"from": "seq.gate", "to": "env.gate", "kind": "gate"},
+    {"from": "vco.saw", "to": "vcf.in", "kind": "audio"},
+    {"from": "vcf.lp", "to": "vca.in", "kind": "audio"},
+    {"from": "env.env", "to": "vcf.cutoff", "kind": "cv"},
+    {"from": "env.env", "to": "vca.cv", "kind": "cv"},
+    {"from": "vca.out", "to": "output.left", "kind": "audio"},
+    {"from": "vca.out", "to": "output.right", "kind": "audio"}
+  ],
+  "caption": "tutorial_sequenced_bass: the clock steps the sequencer, which sends V/Oct pitch to the VCO and gates to the ADSR that shapes filter and amp."
+}
+</script>
+</div>
 
-    style SEQ fill:#e74c3c,color:#fff
-    style CLK fill:#50c878,color:#fff
-```
+*Why does one volt equal one octave? Scrub the pitch yourself in [The Geometry of Pitch](../explorables/voct.md).*
 
 ## The Step Sequencer
 
@@ -48,13 +75,15 @@ Converting notes to voltages:
 
 The formula:
 
-$$V = \frac{\text{MIDI} - 60}{12}$$
+\\[ V = \frac{\text{MIDI} - 60}{12} \\]
 
 ## Building the Patch
 
 ```rust,ignore
 {{#include ../../../examples/tutorial_sequenced_bass.rs}}
 ```
+
+Run it with `cargo run --example tutorial_sequenced_bass`.
 
 ## Clock Divisions
 

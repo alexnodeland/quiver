@@ -72,9 +72,9 @@ Input:   ╱╲
         ╱      ╲
 ```
 
-$$y = \sin(f \cdot \pi \cdot x)$$
+\\[ y = \sin(f \cdot \pi \cdot x) \\]
 
-Where $f$ is the fold amount.
+Where \\( f \\) is the fold amount.
 
 ---
 
@@ -103,8 +103,8 @@ let crosstalk = patch.add("xtalk", Crosstalk::new());
 
 ### The Effect
 
-$$L_{out} = L_{in} + \text{amount} \cdot R_{in}$$
-$$R_{out} = R_{in} + \text{amount} \cdot L_{in}$$
+\\[ L_{out} = L_{in} + \text{amount} \cdot R_{in} \\]
+\\[ R_{out} = R_{in} + \text{amount} \cdot L_{in} \\]
 
 Adds subtle width and analog character.
 
@@ -142,91 +142,22 @@ Mix very subtly for vintage authenticity.
 
 ---
 
-## Scope
+## Signal Monitoring (Scope, Spectrum Analyzer, Level Meter)
 
-Real-time waveform visualization.
-
-```rust,ignore
-let scope = patch.add("scope", Scope::new(44100.0));
-```
-
-### Inputs
-
-| Port | Signal | Description |
-|------|--------|-------------|
-| `in` | Audio | Signal to display |
-| `trigger` | Gate | Trigger sync |
-
-### Trigger Modes
-
-| Mode | Description |
-|------|-------------|
-| `Free` | Continuous display |
-| `RisingEdge` | Sync on positive zero-cross |
-| `FallingEdge` | Sync on negative zero-cross |
-| `Single` | One-shot capture |
-
-### Reading the Buffer
+`Scope`, `SpectrumAnalyzer`, and `LevelMeter` are standalone visual tools, not
+graph modules—they cannot be added to a patch with `patch.add(...)`. Instead,
+feed them samples from `patch.tick()`:
 
 ```rust,ignore
-let waveform = scope.buffer();
-// Vec<f64> of recent samples
+let mut scope = Scope::new(1024);
+let mut meter = LevelMeter::new(44100.0);
+
+let (left, _right) = patch.tick();
+scope.tick(left);
+meter.tick(left);
 ```
 
----
-
-## Spectrum Analyzer
-
-FFT-based frequency analysis.
-
-```rust,ignore
-let analyzer = patch.add("spectrum", SpectrumAnalyzer::new(44100.0));
-```
-
-### Input
-
-| Port | Signal | Description |
-|------|--------|-------------|
-| `in` | Audio | Signal to analyze |
-
-### Reading Data
-
-```rust,ignore
-let bins = analyzer.bins();           // Frequency bins
-let mags = analyzer.magnitudes();     // dB values
-let peak = analyzer.peak_frequency(); // Dominant frequency
-```
-
----
-
-## Level Meter
-
-RMS and peak level monitoring.
-
-```rust,ignore
-let meter = patch.add("meter", LevelMeter::new(44100.0));
-```
-
-### Input
-
-| Port | Signal | Description |
-|------|--------|-------------|
-| `in` | Audio | Signal to meter |
-
-### Reading Levels
-
-```rust,ignore
-let rms = meter.rms();       // RMS level in volts
-let peak = meter.peak();     // Peak level
-let rms_db = meter.rms_db(); // RMS in dB
-```
-
-### Peak Hold
-
-```rust,ignore
-let meter = LevelMeter::new(44100.0)
-    .with_peak_hold(500.0);  // 500ms hold time
-```
+See [Visualize Your Patch](../how-to/visualization.md) for the full API.
 
 ---
 

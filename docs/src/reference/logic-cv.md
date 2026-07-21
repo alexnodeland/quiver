@@ -116,7 +116,7 @@ Outputs the lower of two signals.
 let min = patch.add("min", Min::new());
 ```
 
-$$\text{out} = \min(a, b)$$
+\\[ \text{out} = \min(a, b) \\]
 
 ### Max
 
@@ -126,7 +126,7 @@ Outputs the higher of two signals.
 let max = patch.add("max", Max::new());
 ```
 
-$$\text{out} = \max(a, b)$$
+\\[ \text{out} = \max(a, b) \\]
 
 ### Use Case: Limiting
 
@@ -152,10 +152,10 @@ let rect = patch.add("rect", Rectifier::new());
 
 | Port | Description | Formula |
 |------|-------------|---------|
-| `full` | Full-wave rectified | $|x|$ |
-| `half_pos` | Positive half only | $\max(x, 0)$ |
-| `half_neg` | Negative half only | $\min(x, 0)$ |
-| `abs` | Absolute value | $|x|$ |
+| `full` | Full-wave rectified | \\( \vert x \vert \\) |
+| `half_pos` | Positive half only | \\( \max(x, 0) \\) |
+| `half_neg` | Negative half only | \\( \min(x, 0) \\) |
+| `abs` | Absolute value | \\( \vert x \vert \\) |
 
 ```
 Input:      ╱╲  ╱╲
@@ -267,10 +267,10 @@ let ring = patch.add("ring", RingModulator::new());
 
 ### Mathematics
 
-$$\text{out} = \text{carrier} \times \text{modulator}$$
+\\[ \text{out} = \text{carrier} \times \text{modulator} \\]
 
 Creates sum and difference frequencies:
-$$\cos(f_1 t) \cdot \cos(f_2 t) = \frac{1}{2}[\cos((f_1-f_2)t) + \cos((f_1+f_2)t)]$$
+\\[ \cos(f_1 t) \cdot \cos(f_2 t) = \frac{1}{2}[\cos((f_1-f_2)t) + \cos((f_1+f_2)t)] \\]
 
 ### Sound Character
 

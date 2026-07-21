@@ -31,13 +31,13 @@ A **category** consists of:
 
 ### The Laws
 
-For any morphisms $f: A \to B$, $g: B \to C$, $h: C \to D$:
+For any morphisms \\( f: A \to B \\), \\( g: B \to C \\), \\( h: C \to D \\):
 
 **Identity:**
-$$\text{id}_B \circ f = f = f \circ \text{id}_A$$
+\\[ \text{id}_B \circ f = f = f \circ \text{id}_A \\]
 
 **Associativity:**
-$$(h \circ g) \circ f = h \circ (g \circ f)$$
+\\[ (h \circ g) \circ f = h \circ (g \circ f) \\]
 
 ## In Quiver's Terms
 
@@ -55,18 +55,18 @@ $$(h \circ g) \circ f = h \circ (g \circ f)$$
 let id = Identity::<f64>::new();
 
 // f >>> id = f
-let same1 = vco.chain(id);
+let same1 = vco.then(id);
 
 // id >>> f = f
-let same2 = id.chain(vco);
+let same2 = id.then(vco);
 ```
 
 ### The Associativity Law
 
 ```rust,ignore
 // These produce identical behavior:
-let way1 = (vco.chain(vcf)).chain(vca);
-let way2 = vco.chain(vcf.chain(vca));
+let way1 = (vco.then(vcf)).then(vca);
+let way2 = vco.then(vcf.then(vca));
 
 // Grouping doesn't matter—only the order
 ```
@@ -91,7 +91,7 @@ let process_right = filter.second();  // Filter right channel only
 
 Process two signals independently:
 
-$$f \otimes g : (A, C) \to (B, D)$$
+\\[ f \otimes g : (A, C) \to (B, D) \\]
 
 ```rust,ignore
 // Process stereo with different filters
@@ -103,7 +103,7 @@ let stereo = left_filter.parallel(right_filter);
 
 Duplicate input to multiple processors:
 
-$$\Delta_f^g : A \to (B, C)$$
+\\[ \Delta_f^g : A \to (B, C) \\]
 
 ```rust,ignore
 // Send same input to two effects
@@ -113,16 +113,16 @@ let split = reverb.fanout(delay);
 
 ## The Arrow Laws
 
-For arrows $f$, $g$, $h$:
+For arrows \\( f \\), \\( g \\), \\( h \\):
 
 **Composition with `first`:**
-$$\text{first}(f \ggg g) = \text{first}(f) \ggg \text{first}(g)$$
+\\[ \text{first}(f \ggg g) = \text{first}(f) \ggg \text{first}(g) \\]
 
 **Identity with `first`:**
-$$\text{first}(\text{id}) = \text{id}$$
+\\[ \text{first}(\text{id}) = \text{id} \\]
 
 **Commutativity:**
-$$\text{first}(f) \ggg (\text{id} \times g) = (\text{id} \times g) \ggg \text{first}(f)$$
+\\[ \text{first}(f) \ggg (\text{id} \times g) = (\text{id} \times g) \ggg \text{first}(f) \\]
 
 These laws ensure that complex compositions behave predictably.
 
@@ -134,8 +134,8 @@ The laws guarantee that refactoring preserves behavior:
 
 ```rust,ignore
 // These are equivalent by associativity
-let v1 = a.chain(b.chain(c));
-let v2 = a.chain(b).chain(c);
+let v1 = a.then(b.then(c));
+let v2 = a.then(b).then(c);
 // Safe to refactor between them
 ```
 
@@ -145,7 +145,7 @@ Types prevent invalid connections:
 
 ```rust,ignore
 // Type error: can't chain mono into stereo
-let bad = mono_module.chain(stereo_module);
+let bad = mono_module.then(stereo_module);
 //        ^^^^^^^^^^^ f64
 //                    ^^^^^^^^^^^^^^^^^ (f64, f64)
 ```
@@ -156,9 +156,9 @@ Build complex systems from simple parts:
 
 ```rust,ignore
 // Each piece is simple
-let voice = vco.chain(vcf).chain(vca);
-let effects = delay.chain(reverb);
-let mixer = voice.fanout(effects).chain(mix);
+let voice = vco.then(vcf).then(vca);
+let effects = delay.then(reverb);
+let mixer = voice.fanout(effects).then(mix);
 
 // Composition creates complexity
 ```

@@ -1,6 +1,8 @@
 # Visualize Your Patch
 
-Quiver provides tools to visualize patch topology and analyze signals.
+Quiver provides tools to visualize patch topology and analyze signals. These
+are standalone helpers, not graph modules—you feed them samples from
+`patch.tick()` rather than patching them into the graph.
 
 ## DOT/GraphViz Export
 
@@ -11,11 +13,13 @@ use quiver::prelude::*;
 
 let patch = /* your patch */;
 
-// Create exporter with default style
-let exporter = DotExporter::new(&patch);
-let dot = exporter.to_dot();
-
+// Export with the default (dark) style
+let dot = DotExporter::export_default(&patch);
 println!("{}", dot);
+
+// Or pass an explicit style
+let style = DotStyle::default();
+let dot = DotExporter::export(&patch, &style);
 ```
 
 Save to file and render:
@@ -31,16 +35,24 @@ dot -Tsvg patch.dot -o patch.svg
 
 ## Styling Options
 
-Customize the visualization:
+`DotStyle` has preset constructors and a couple of builder methods:
 
 ```rust,ignore
-let style = DotStyle::new()
-    .with_theme("dark")          // dark, light, minimal
-    .with_rankdir("LR")          // LR (left-right) or TB (top-bottom)
-    .with_show_port_names(true)
-    .with_signal_colors(true);   // Color-code by signal type
+// Presets: default() is a dark theme
+let style = DotStyle::light();      // Light theme
+let style = DotStyle::minimal();    // No port names, no signal colors
 
-let exporter = DotExporter::with_style(&patch, style);
+// Builders
+let style = DotStyle::default()
+    .with_rankdir("LR")             // LR, TB, BT, RL
+    .with_node_shape("box");
+
+// All fields are public for full control
+let style = DotStyle {
+    show_port_names: true,
+    color_by_signal: true,          // Color-code edges by signal type
+    ..DotStyle::default()
+};
 ```
 
 Signal type colors:
@@ -81,42 +93,49 @@ flowchart LR
 
 ## Oscilloscope
 
-Monitor signals in real-time:
+Monitor signals in real-time. `Scope::new` takes the buffer size in samples;
+trigger settings are configured with setters:
 
 ```rust,ignore
-let scope = Scope::new(44100.0)
-    .with_buffer_size(1024)
-    .with_trigger_mode(TriggerMode::RisingEdge);
+let mut scope = Scope::new(1024);   // Buffer size in samples
+scope.set_trigger_mode(TriggerMode::RisingEdge);
+scope.set_trigger_level(0.0);
 
 // In your audio loop
-let sample = patch.tick().0;
-scope.write(sample);
+let (left, _right) = patch.tick();
+scope.tick(left);
 
 // Get waveform for display
-let waveform = scope.buffer();
+let waveform = scope.buffer_vec();          // Vec<f64>
+let points = scope.get_display_data();      // Vec<(x 0.0-1.0, voltage)>
 ```
 
 Trigger modes:
 - `Free`: Continuous display
-- `RisingEdge`: Trigger on positive zero-crossing
-- `FallingEdge`: Trigger on negative zero-crossing
-- `Single`: One-shot capture
+- `RisingEdge`: Trigger on positive crossing of the trigger level
+- `FallingEdge`: Trigger on negative crossing
+- `AnyEdge`: Trigger on either crossing
+- `Single`: One-shot capture (buffer freezes after trigger)
 
 ## Spectrum Analyzer
 
-View frequency content:
+View frequency content. The constructor takes the FFT size (rounded up to a
+power of two) and the sample rate:
 
 ```rust,ignore
-let analyzer = SpectrumAnalyzer::new(44100.0);
+let mut analyzer = SpectrumAnalyzer::new(2048, 44100.0);
+analyzer.set_smoothing(0.8);        // 0.0 = none, up to 0.99
 
-// Feed samples
+// Feed samples; the spectrum recomputes each time the buffer fills
 for sample in samples.iter() {
-    analyzer.write(*sample);
+    analyzer.tick(*sample);
 }
 
-// Get spectrum data
-let bins = analyzer.bins();        // Frequency bins
-let magnitudes = analyzer.magnitudes();  // dB values
+// Get (frequency_hz, magnitude_db) pairs
+let spectrum = analyzer.get_spectrum();
+
+// Query a specific frequency
+let db_at_440 = analyzer.magnitude_at(440.0);
 
 // Find dominant frequency
 let peak_freq = analyzer.peak_frequency();
@@ -125,40 +144,61 @@ println!("Fundamental: {:.1} Hz", peak_freq);
 
 ## Level Meter
 
-Monitor audio levels:
+Monitor audio levels. All readings are in dB; peak hold defaults to 1.5
+seconds and is adjusted with a setter:
 
 ```rust,ignore
-let mut meter = LevelMeter::new(44100.0)
-    .with_peak_hold(500.0);  // 500ms peak hold
+let mut meter = LevelMeter::new(44100.0);
+meter.set_peak_hold_time(0.5, 44100.0);  // 500ms peak hold
 
 // Process samples
 for sample in samples.iter() {
-    meter.write(*sample);
+    meter.tick(*sample);
 }
 
-println!("RMS: {:.1} dB", meter.rms_db());
-println!("Peak: {:.1} dB", meter.peak_db());
+println!("RMS: {:.1} dB", meter.rms());
+println!("Peak: {:.1} dB", meter.peak());
+println!("Peak hold: {:.1} dB", meter.peak_hold());
+if meter.is_clipping() {
+    println!("Clipping!");
+}
 ```
 
 ## Automation Recording
 
-Record parameter changes:
+Record parameter changes over time. The recorder samples parameter values at a
+configurable interval via a closure; times are in samples:
 
 ```rust,ignore
-let mut recorder = AutomationRecorder::new();
+let mut recorder = AutomationRecorder::new(44100.0);
+recorder.set_interval(441);              // Sample every 441 ticks (10ms)
+recorder.add_track("filter_cutoff");
+recorder.start();
 
-// Create a track for filter cutoff
-let track_id = recorder.create_track("filter_cutoff");
+// In your audio loop: the closure supplies the current value per track
+for _ in 0..44100 {
+    patch.tick();
+    recorder.tick(|param_id| match param_id {
+        "filter_cutoff" => Some(current_cutoff),
+        _ => None,
+    });
+}
 
-// Record automation points
-recorder.record(track_id, 0.0, 0.5);    // Time 0s: 0.5
-recorder.record(track_id, 1.0, 0.8);    // Time 1s: 0.8
-recorder.record(track_id, 2.0, 0.2);    // Time 2s: 0.2
+recorder.stop();
 
-// Get automation data
-let data = recorder.data();
+// Inspect or export
+if let Some(track) = recorder.get_track("filter_cutoff") {
+    println!("Duration: {:.2}s", track.duration_seconds());
+    let value = track.value_at(22050);   // Interpolated value at sample 22050
+}
+
+let data = recorder.export();            // AutomationData (serde-serializable)
 let json = serde_json::to_string(&data)?;
 ```
+
+You can also build tracks by hand with `AutomationTrack::new(param_id,
+sample_rate)` and `track.record(time_in_samples, value)`, then thin dense data
+with `simplify(tolerance)`.
 
 ## Example: Complete Visualization
 
@@ -172,15 +212,11 @@ The visualization data is designed for easy GUI integration:
 
 ```rust,ignore
 // For immediate-mode GUIs (egui, imgui)
-for (i, magnitude) in analyzer.magnitudes().enumerate() {
-    let freq = i as f64 * sample_rate / fft_size;
-    draw_bar(freq, magnitude);
+for (freq, magnitude_db) in analyzer.get_spectrum() {
+    draw_bar(freq, magnitude_db);
 }
 
 // For retained-mode GUIs
-let path: Vec<(f64, f64)> = scope.buffer()
-    .enumerate()
-    .map(|(i, sample)| (i as f64, *sample))
-    .collect();
+let path: Vec<(f64, f64)> = scope.get_display_data();
 draw_path(&path);
 ```

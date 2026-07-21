@@ -21,7 +21,7 @@ Quiver provides several saturation models:
 
 Smooth, tube-like warmth:
 
-$$y = \tanh(x \cdot \text{drive})$$
+\\[ y = \tanh(x \cdot \text{drive}) \\]
 
 ```rust,ignore
 use quiver::analog::saturation;
@@ -41,10 +41,10 @@ graph LR
 
 Adjustable knee:
 
-$$y = \begin{cases}
-x & |x| < k \\
+\\[ y = \begin{cases}
+x & |x| < k \\\\
 \text{sign}(x) \cdot (k + (1-k) \cdot \tanh(\frac{|x|-k}{1-k})) & |x| \geq k
-\end{cases}$$
+\end{cases} \\]
 
 ```rust,ignore
 let output = saturation::soft_clip(input, knee);
@@ -54,7 +54,7 @@ let output = saturation::soft_clip(input, knee);
 
 Even harmonics from asymmetry (like tubes):
 
-$$y = \tanh(a \cdot x^+) - \tanh(b \cdot x^-)$$
+\\[ y = \tanh(a \cdot x^+) - \tanh(b \cdot x^-) \\]
 
 ```rust,ignore
 let output = saturation::asym_sat(input, pos_drive, neg_drive);
@@ -64,11 +64,11 @@ let output = saturation::asym_sat(input, pos_drive, neg_drive);
 
 Hard edges like guitar pedals:
 
-$$y = \begin{cases}
-\text{threshold} & x > \text{threshold} \\
-x & |x| \leq \text{threshold} \\
+\\[ y = \begin{cases}
+\text{threshold} & x > \text{threshold} \\\\
+x & |x| \leq \text{threshold} \\\\
 -\text{threshold} & x < -\text{threshold}
-\end{cases}$$
+\end{cases} \\]
 
 ### Wave Folding
 
@@ -82,7 +82,7 @@ graph TB
     end
 ```
 
-$$y = \sin(\text{folds} \cdot \pi \cdot x)$$
+\\[ y = \sin(\text{folds} \cdot \pi \cdot x) \\]
 
 ## Component Modeling
 

@@ -27,15 +27,49 @@ Different waveforms have different harmonic content:
 The mathematical representation:
 
 **Sawtooth wave:**
-$$x(t) = \frac{2}{\pi} \sum_{k=1}^{\infty} \frac{(-1)^{k+1}}{k} \sin(2\pi k f t)$$
+\\[ x(t) = \frac{2}{\pi} \sum_{k=1}^{\infty} \frac{(-1)^{k+1}}{k} \sin(2\pi k f t) \\]
 
 This infinite sum of harmonics is what gives the sawtooth its brightness.
 
 ## Building the Patch
 
+The patch itself is three modules plus a fixed `Offset` that parks the filter cutoff at a musical spot:
+
+<div class="quiver-explorable" data-viz="patchgraph">
+<script type="application/json">
+{
+  "modules": [
+    {"id": "vco", "label": "VCO", "x": 0, "y": 0,
+     "outputs": [{"name": "saw", "kind": "audio"}]},
+    {"id": "cutoff", "label": "CUTOFF (Offset)", "x": 0, "y": 2.2,
+     "outputs": [{"name": "out", "kind": "cv"}]},
+    {"id": "vcf", "label": "VCF (SVF)", "x": 1, "y": 0,
+     "inputs": [{"name": "in", "kind": "audio"}, {"name": "cutoff", "kind": "cv"}],
+     "outputs": [{"name": "lp", "kind": "audio"}]},
+    {"id": "output", "label": "OUTPUT", "x": 2, "y": 0,
+     "inputs": [{"name": "left", "kind": "audio"}]}
+  ],
+  "cables": [
+    {"from": "vco.saw", "to": "vcf.in", "kind": "audio"},
+    {"from": "cutoff.out", "to": "vcf.cutoff", "kind": "cv"},
+    {"from": "vcf.lp", "to": "output.left", "kind": "audio"}
+  ],
+  "caption": "tutorial_subtractive: a fixed Offset sets the SVF cutoff; the lowpass output goes straight out."
+}
+</script>
+</div>
+
+*Hear the filter carve these exact harmonics away in [Sculpting the Spectrum](../explorables/filters.md).*
+
 ```rust,ignore
 {{#include ../../../examples/tutorial_subtractive.rs}}
 ```
+
+### Listen to It
+
+Run `cargo run --example tutorial_subtractive` and the example writes
+`target/tutorial_subtractive.wav`—open it in any audio player to hear the
+filter shape the raw sawtooth.
 
 ## Understanding the Filter
 
@@ -60,9 +94,9 @@ graph TB
 
 The lowpass filter attenuates frequencies above the cutoff:
 
-$$H(f) = \frac{1}{\sqrt{1 + (f/f_c)^{2n}}}$$
+\\[ H(f) = \frac{1}{\sqrt{1 + (f/f_c)^{2n}}} \\]
 
-Where $f_c$ is cutoff frequency and $n$ is filter order.
+Where \\( f_c \\) is cutoff frequency and \\( n \\) is filter order.
 
 Quiver's SVF is 12dB/octave (2-pole), meaning frequencies one octave above cutoff are reduced by 12dB.
 

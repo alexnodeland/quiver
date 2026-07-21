@@ -13,6 +13,18 @@
 
 ---
 
+# Explorables
+
+- [About the Explorables](./explorables/README.md)
+- [The Shape of a Wave](./explorables/oscillators.md)
+- [Sculpting the Spectrum](./explorables/filters.md)
+- [Envelopes Shape Time](./explorables/envelopes.md)
+- [The Geometry of Pitch](./explorables/voct.md)
+- [Sidebands from Nothing](./explorables/fm.md)
+- [Follow the Signal](./explorables/patch-flow.md)
+
+---
+
 # Tutorials
 
 - [Basic Subtractive Synthesis](./tutorials/subtractive-synthesis.md)
@@ -29,6 +41,7 @@
 - [Connect Modules](./how-to/connect-modules.md)
 - [Use External MIDI](./how-to/midi-input.md)
 - [Serialize and Save Patches](./how-to/serialization.md)
+- [Render Offline to WAV](./how-to/render-wav.md)
 - [Create Custom Modules](./how-to/custom-modules.md)
 - [Visualize Your Patch](./how-to/visualization.md)
 - [Browser & App Integration](./how-to/browser-integration.md)

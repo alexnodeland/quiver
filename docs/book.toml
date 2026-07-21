@@ -16,8 +16,20 @@ git-repository-url = "https://github.com/alexnodeland/quiver"
 edit-url-template = "https://github.com/alexnodeland/quiver/edit/main/docs/{path}"
 site-url = "/quiver/"
 no-section-label = false
-additional-css = ["custom.css"]
-additional-js = ["mermaid.min.js", "mermaid-init.js"]
+mathjax-support = true
+additional-css = ["custom.css", "quiver-viz.css"]
+additional-js = [
+    "mermaid.min.js",
+    "mermaid-init.js",
+    # Explorables: shared engine first, then one script per widget.
+    "quiver-viz.js",
+    "viz/oscillators.js",
+    "viz/filters.js",
+    "viz/envelopes.js",
+    "viz/voct.js",
+    "viz/fm.js",
+    "viz/patchflow.js",
+]
 
 [output.html.fold]
 enable = true

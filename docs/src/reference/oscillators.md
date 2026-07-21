@@ -32,16 +32,16 @@ let vco = patch.add("vco", Vco::new(44100.0));
 ### Waveform Mathematics
 
 **Sine:**
-$$y(t) = A \sin(2\pi f t)$$
+\\[ y(t) = A \sin(2\pi f t) \\]
 
 **Sawtooth (BLIT):**
-$$y(t) = 2 \left( \frac{t}{T} - \lfloor \frac{t}{T} + 0.5 \rfloor \right)$$
+\\[ y(t) = 2 \left( \frac{t}{T} - \lfloor \frac{t}{T} + 0.5 \rfloor \right) \\]
 
 **Triangle:**
-$$y(t) = 2 \left| 2 \left( \frac{t}{T} - \lfloor \frac{t}{T} + 0.5 \rfloor \right) \right| - 1$$
+\\[ y(t) = 2 \left| 2 \left( \frac{t}{T} - \lfloor \frac{t}{T} + 0.5 \rfloor \right) \right| - 1 \\]
 
 **Square/Pulse:**
-$$y(t) = \text{sign}(\sin(2\pi f t) - \cos(\pi \cdot \text{PW}))$$
+\\[ y(t) = \text{sign}(\sin(2\pi f t) - \cos(\pi \cdot \text{PW})) \\]
 
 ### Usage Example
 
@@ -87,7 +87,7 @@ let lfo = patch.add("lfo", Lfo::new(44100.0));
 ### Rate Mapping
 
 Default rate curve:
-$$f = 0.01 \cdot e^{(\text{CV}/10) \cdot \ln(3000)}$$
+\\[ f = 0.01 \cdot e^{(\text{CV}/10) \cdot \ln(3000)} \\]
 
 | CV | Frequency |
 |----|-----------|
@@ -124,11 +124,11 @@ let noise = patch.add("noise", NoiseGenerator::new());
 
 **White noise**: Equal energy per frequency (flat spectrum)
 
-$$S(f) = \text{constant}$$
+\\[ S(f) = \text{constant} \\]
 
 **Pink noise**: Equal energy per octave (-3dB/octave)
 
-$$S(f) \propto \frac{1}{f}$$
+\\[ S(f) \propto \frac{1}{f} \\]
 
 Pink noise is generated using the Voss-McCartney algorithm.
 

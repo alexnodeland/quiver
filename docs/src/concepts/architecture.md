@@ -76,14 +76,14 @@ The `ModuleExt` trait provides composition operations:
 
 ```rust,ignore
 // This compiles: types match
-let synth = vco.chain(vcf).chain(vca);
+let synth = vco.then(vcf).then(vca);
 // Vco: () → f64
 // Svf: f64 → f64
 // Vca: f64 → f64
 // Result: () → f64 ✓
 
 // This won't compile: type mismatch
-let bad = vco.chain(stereo_module);
+let bad = vco.then(stereo_module);
 // Vco: () → f64
 // StereoModule: (f64, f64) → (f64, f64)
 // Error: expected f64, found (f64, f64) ✗

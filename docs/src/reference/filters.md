@@ -33,13 +33,13 @@ let vcf = patch.add("vcf", Svf::new(44100.0));
 ### Transfer Functions
 
 **Lowpass:**
-$$H_{LP}(s) = \frac{\omega_c^2}{s^2 + \frac{\omega_c}{Q}s + \omega_c^2}$$
+\\[ H_{LP}(s) = \frac{\omega_c^2}{s^2 + \frac{\omega_c}{Q}s + \omega_c^2} \\]
 
 **Highpass:**
-$$H_{HP}(s) = \frac{s^2}{s^2 + \frac{\omega_c}{Q}s + \omega_c^2}$$
+\\[ H_{HP}(s) = \frac{s^2}{s^2 + \frac{\omega_c}{Q}s + \omega_c^2} \\]
 
 **Bandpass:**
-$$H_{BP}(s) = \frac{\frac{\omega_c}{Q}s}{s^2 + \frac{\omega_c}{Q}s + \omega_c^2}$$
+\\[ H_{BP}(s) = \frac{\frac{\omega_c}{Q}s}{s^2 + \frac{\omega_c}{Q}s + \omega_c^2} \\]
 
 ### Cutoff Mapping
 
