@@ -4,27 +4,41 @@
 
 **Quiver** is a Rust library for building modular audio synthesis systems. It combines the mathematical elegance of category theory with the tactile joy of patching a hardware modular synthesizer.
 
-```mermaid
-flowchart LR
-    subgraph "Oscillator"
-        VCO[🎵 VCO]
-    end
-    subgraph "Filter"
-        VCF[📊 VCF]
-    end
-    subgraph "Amplifier"
-        VCA[🔊 VCA]
-    end
-    subgraph "Envelope"
-        ADSR[📈 ADSR]
-    end
+<div class="quiver-explorable" data-viz="patchgraph">
+<script type="application/json">
+{
+  "modules": [
+    {"id": "vco", "label": "VCO", "x": 0, "y": 0,
+     "inputs": [{"name": "voct", "kind": "voct"}],
+     "outputs": [{"name": "saw", "kind": "audio"}]},
+    {"id": "gate", "label": "GATE", "x": 0, "y": 3.2,
+     "outputs": [{"name": "out", "kind": "gate"}]},
+    {"id": "vcf", "label": "VCF", "x": 1, "y": 0,
+     "inputs": [{"name": "in", "kind": "audio"}, {"name": "cutoff", "kind": "cv"}],
+     "outputs": [{"name": "lp", "kind": "audio"}]},
+    {"id": "adsr", "label": "ADSR", "x": 1, "y": 3.2,
+     "inputs": [{"name": "gate", "kind": "gate"}],
+     "outputs": [{"name": "env", "kind": "cv"}]},
+    {"id": "vca", "label": "VCA", "x": 2, "y": 0,
+     "inputs": [{"name": "in", "kind": "audio"}, {"name": "cv", "kind": "cv"}],
+     "outputs": [{"name": "out", "kind": "audio"}]},
+    {"id": "out", "label": "OUTPUT", "x": 3, "y": 0,
+     "inputs": [{"name": "left", "kind": "audio"}]}
+  ],
+  "cables": [
+    {"from": "vco.saw", "to": "vcf.in", "kind": "audio"},
+    {"from": "gate.out", "to": "adsr.gate", "kind": "gate"},
+    {"from": "vcf.lp", "to": "vca.in", "kind": "audio"},
+    {"from": "adsr.env", "to": "vcf.cutoff", "kind": "cv"},
+    {"from": "adsr.env", "to": "vca.cv", "kind": "cv"},
+    {"from": "vca.out", "to": "out.left", "kind": "audio"}
+  ],
+  "caption": "The canonical subtractive voice: audio flows VCO → VCF → VCA while one envelope shapes both timbre and loudness."
+}
+</script>
+</div>
 
-    VCO -->|saw| VCF
-    VCF -->|lowpass| VCA
-    ADSR -->|env| VCF
-    ADSR -->|env| VCA
-    VCA --> Output[🔈]
-```
+*Diagrams like this one are backed by live, hearable versions — [start with the Explorables](./explorables/index.md).*
 
 ## Why Quiver?
 
@@ -44,7 +58,7 @@ Voltages follow real modular conventions:
 
 Built on **Arrow-style functional combinators**, Quiver lets you compose DSP operations like mathematical functions:
 
-$$f \ggg g = g \circ f$$
+\\[ f \ggg g = g \circ f \\]
 
 Chain two modules and their types compose automatically.
 
@@ -78,6 +92,12 @@ graph TB
 ```rust,ignore
 {{#include ../../examples/quick_taste.rs}}
 ```
+
+Run it with `cargo run --example quick_taste`—it writes
+`target/quick_taste.wav`, so you can hear the result in any audio player. For
+a fuller sequenced phrase rendered to disk, see
+`cargo run --example render_wav` and the
+[Render Offline to WAV](./how-to/render-wav.md) guide.
 
 ## What You'll Learn
 

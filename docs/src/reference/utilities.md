@@ -50,7 +50,7 @@ let vca = patch.add("vca", Vca::new());
 ### Response
 
 Linear response:
-$$\text{out} = \text{in} \times \frac{\text{cv}}{10}$$
+\\[ \text{out} = \text{in} \times \frac{\text{cv}}{10} \\]
 
 ---
 
@@ -179,8 +179,8 @@ let xfade = patch.add("xfade", Crossfader::new());
 
 ### Equal Power Curve
 
-$$\text{gain}_A = \cos\left(\frac{\pi}{2} \cdot \text{mix}\right)$$
-$$\text{gain}_B = \sin\left(\frac{\pi}{2} \cdot \text{mix}\right)$$
+\\[ \text{gain}_A = \cos\left(\frac{\pi}{2} \cdot \text{mix}\right) \\]
+\\[ \text{gain}_B = \sin\left(\frac{\pi}{2} \cdot \text{mix}\right) \\]
 
 ---
 

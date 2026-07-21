@@ -1,0 +1,430 @@
+/*
+ * quiver-viz.css — styling for the Quiver Explorables shared infrastructure.
+ *
+ * Defines the semantic signal-color system as CSS custom properties, shared by
+ * prose, canvas plots, and patch-graph SVGs:
+ *   audio (blue) · cv (coral) · gate/trigger/clock (green) · voct (yellow)
+ *   mod (violet, LFO/secondary modulation)
+ * Theme-switched via mdbook's <html> theme class. Quiver's book default theme
+ * is `rust` (light), so the LIGHT palette is the :root default and the dark
+ * families (coal/navy/ayu/dark) override it.
+ */
+
+:root {
+  --qv-audio: #0969da;
+  --qv-cv: #cf222e;
+  --qv-gate: #1a7f37;
+  --qv-voct: #9a6700;
+  --qv-mod: #8250df;
+  --qv-ink: rgba(31, 35, 40, 0.9);
+  --qv-grid: rgba(31, 35, 40, 0.08);
+  --qv-panel: rgba(175, 184, 193, 0.12);
+}
+
+html.coal,
+html.navy,
+html.ayu,
+html.dark {
+  --qv-audio: #58a6ff;
+  --qv-cv: #ff7b72;
+  --qv-gate: #56d364;
+  --qv-voct: #f2cc60;
+  --qv-mod: #bc8cff;
+  --qv-ink: rgba(230, 237, 243, 0.9);
+  --qv-grid: rgba(230, 237, 243, 0.08);
+  --qv-panel: rgba(110, 118, 129, 0.08);
+}
+
+/* ---- The widget panel (full-width) ---------------------------------------- */
+
+.quiver-explorable {
+  border: 1px solid var(--qv-grid);
+  border-radius: 8px;
+  background: var(--qv-panel);
+  padding: 12px 14px;
+  margin: 1.4rem 0;
+  font-size: 0.8rem;
+}
+
+/* Bare mode: patch graphs and other figures sit flush, no panel chrome. */
+.quiver-explorable.qv-bare {
+  border: none;
+  background: transparent;
+  padding: 0;
+  text-align: center;
+}
+
+.qv-canvas {
+  display: block;
+  width: 100%;
+  border-radius: 6px;
+  touch-action: none; /* let pointer drags on canvas work on touch */
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+}
+
+.qv-btn,
+.qv-seg-btn {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation; /* kill the 300 ms double-tap-zoom delay */
+}
+
+/* ---- Controls row --------------------------------------------------------- */
+
+.qv-controls {
+  display: flex;
+  flex-flow: row wrap;
+  gap: 10px;
+  align-items: flex-end;
+  margin-bottom: 10px;
+}
+
+.qv-control {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.8rem;
+}
+
+.qv-control-label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.65;
+  font-size: 0.68rem;
+}
+
+.qv-control-value {
+  font-family: var(--mono-font, "Source Code Pro", monospace);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.9;
+}
+
+.qv-range {
+  width: 140px;
+  accent-color: var(--qv-audio);
+  cursor: pointer;
+}
+
+.qv-range:focus-visible {
+  outline: 2px solid var(--qv-audio);
+  outline-offset: 2px;
+}
+
+/* Toggle */
+.qv-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.qv-checkbox {
+  accent-color: var(--qv-gate);
+  cursor: pointer;
+}
+
+/* Buttons */
+.qv-buttons {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.qv-btn {
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--qv-grid);
+  background: transparent;
+  color: var(--qv-ink);
+  cursor: pointer;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.qv-btn:hover {
+  border-color: var(--qv-audio);
+}
+
+.qv-btn:focus-visible {
+  outline: 2px solid var(--qv-audio);
+  outline-offset: 2px;
+}
+
+.qv-btn.qv-primary {
+  background: var(--qv-audio);
+  border-color: var(--qv-audio);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+html.coal .qv-btn.qv-primary,
+html.navy .qv-btn.qv-primary,
+html.ayu .qv-btn.qv-primary,
+html.dark .qv-btn.qv-primary {
+  color: #0d1117;
+}
+
+/* Segmented pickers (waveform / filter-mode choices) */
+.qv-seg {
+  display: inline-flex;
+  border: 1px solid var(--qv-grid);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.qv-seg-btn {
+  font-size: 0.72rem;
+  padding: 4px 9px;
+  border: none;
+  background: transparent;
+  color: var(--qv-ink);
+  cursor: pointer;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.qv-seg-btn + .qv-seg-btn {
+  border-left: 1px solid var(--qv-grid);
+}
+
+.qv-seg-btn:hover {
+  background: var(--qv-panel);
+}
+
+.qv-seg-btn:focus-visible {
+  outline: 2px solid var(--qv-audio);
+  outline-offset: -2px;
+}
+
+.qv-seg-btn.qv-seg-active {
+  background: var(--qv-audio);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+html.coal .qv-seg-btn.qv-seg-active,
+html.navy .qv-seg-btn.qv-seg-active,
+html.ayu .qv-seg-btn.qv-seg-active,
+html.dark .qv-seg-btn.qv-seg-active {
+  color: #0d1117;
+}
+
+/* ---- Readouts row --------------------------------------------------------- */
+
+.qv-readouts {
+  display: flex;
+  flex-flow: row wrap;
+  gap: 16px;
+  margin-top: 10px;
+  align-items: baseline;
+}
+
+.qv-readout {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.qv-readout-label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.65;
+  font-size: 0.66rem;
+}
+
+.qv-readout-value {
+  font-family: var(--mono-font, "Source Code Pro", monospace);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.95rem;
+}
+
+/* ---- The Victor scrub number (in prose) ----------------------------------- */
+
+.qv-scrub {
+  border-bottom: 1px dashed var(--qv-audio);
+  cursor: ew-resize;
+  font-family: var(--mono-font, "Source Code Pro", monospace);
+  font-variant-numeric: tabular-nums;
+  color: var(--qv-audio);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none; /* a drag on the number must never scroll the page */
+  padding: 2px 3px;
+  margin: -2px -2px;
+  white-space: nowrap;
+}
+
+/* Fingers need bigger targets than mouse pointers. */
+@media (pointer: coarse) {
+  .qv-scrub {
+    padding: 6px 6px;
+    margin: -6px -5px;
+  }
+
+  .qv-btn,
+  .qv-seg-btn {
+    padding: 8px 14px;
+    font-size: 0.8rem;
+  }
+
+  .qv-range {
+    width: 170px;
+  }
+}
+
+.qv-scrub:focus-visible {
+  outline: 2px solid var(--qv-audio);
+  outline-offset: 2px;
+}
+
+.qv-scrub-active {
+  color: var(--qv-cv);
+  border-bottom-color: var(--qv-cv);
+}
+
+/* ---- Inline prose color classes (the signal algebra in text) -------------- */
+
+.qv-c-audio { color: var(--qv-audio); }
+.qv-c-cv { color: var(--qv-cv); }
+.qv-c-gate { color: var(--qv-gate); }
+.qv-c-voct { color: var(--qv-voct); }
+.qv-c-mod { color: var(--qv-mod); }
+
+/* ---- The "try this" hint -------------------------------------------------- */
+
+.qv-hint {
+  font-style: italic;
+  opacity: 0.7;
+  font-size: 0.78rem;
+  margin-top: 8px;
+}
+
+.qv-hint::before {
+  content: "try: ";
+  font-style: normal;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.7;
+  font-size: 0.66rem;
+}
+
+/* Canvas instruction line (drag/click affordances) */
+.qv-instruction {
+  font-size: 0.72rem;
+  opacity: 0.6;
+  margin-top: 4px;
+  text-align: center;
+}
+
+/* ---- Patch graph (SVG circuit diagrams) ----------------------------------- */
+
+.qv-patchgraph {
+  margin: 1.2rem 0;
+  text-align: center;
+}
+
+.qv-patchgraph-svg {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.qv-node-body {
+  fill: var(--qv-panel);
+  stroke: var(--qv-grid);
+  stroke-width: 1.2;
+}
+
+.qv-node-active .qv-node-body {
+  stroke: var(--qv-audio);
+  stroke-width: 2;
+}
+
+.qv-node-headline {
+  stroke: var(--qv-grid);
+  stroke-width: 1;
+}
+
+.qv-node-title {
+  fill: var(--qv-ink);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--mono-font, "Source Code Pro", monospace);
+}
+
+.qv-port-label {
+  fill: var(--qv-ink);
+  opacity: 0.75;
+  font-size: 10px;
+  font-family: var(--mono-font, "Source Code Pro", monospace);
+}
+
+.qv-port {
+  stroke-width: 1.5;
+  fill: none;
+}
+
+.qv-port.qv-k-audio { stroke: var(--qv-audio); fill: var(--qv-audio); fill-opacity: 0.25; }
+.qv-port.qv-k-cv    { stroke: var(--qv-cv);    fill: var(--qv-cv);    fill-opacity: 0.25; }
+.qv-port.qv-k-gate  { stroke: var(--qv-gate);  fill: var(--qv-gate);  fill-opacity: 0.25; }
+.qv-port.qv-k-voct  { stroke: var(--qv-voct);  fill: var(--qv-voct);  fill-opacity: 0.25; }
+.qv-port.qv-k-mod   { stroke: var(--qv-mod);   fill: var(--qv-mod);   fill-opacity: 0.25; }
+
+.qv-cable {
+  fill: none;
+  stroke-width: 2;
+  opacity: 0.75;
+  stroke-linecap: round;
+}
+
+.qv-cable.qv-k-audio { stroke: var(--qv-audio); }
+.qv-cable.qv-k-cv    { stroke: var(--qv-cv); }
+.qv-cable.qv-k-gate  { stroke: var(--qv-gate); }
+.qv-cable.qv-k-voct  { stroke: var(--qv-voct); }
+.qv-cable.qv-k-mod   { stroke: var(--qv-mod); }
+
+/* Animated signal-flow dashes drawn over each cable. */
+.qv-cable-flow {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 2 14;
+  opacity: 0.9;
+  animation: qv-flow 1.6s linear infinite;
+}
+
+.qv-cable-flow.qv-k-audio { stroke: var(--qv-audio); }
+.qv-cable-flow.qv-k-cv    { stroke: var(--qv-cv); }
+.qv-cable-flow.qv-k-gate  { stroke: var(--qv-gate); }
+.qv-cable-flow.qv-k-voct  { stroke: var(--qv-voct); }
+.qv-cable-flow.qv-k-mod   { stroke: var(--qv-mod); }
+
+@keyframes qv-flow {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -16; }
+}
+
+.qv-caption {
+  font-size: 0.75rem;
+  opacity: 0.65;
+  font-style: italic;
+  margin-top: 4px;
+  text-align: center;
+}
+
+/* ---- Reduced motion ------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .quiver-explorable *,
+  .qv-patchgraph * {
+    transition: none !important;
+    animation: none !important;
+  }
+
+  .qv-cable-flow {
+    display: none;
+  }
+}

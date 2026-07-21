@@ -2,21 +2,51 @@
 
 Let's build a complete synthesizer voice: an oscillator through a filter, shaped by an envelope. This is the classic subtractive synthesis signal path.
 
-```mermaid
-flowchart LR
-    VCO[VCO] -->|saw| VCF[VCF]
-    VCF -->|lowpass| VCA[VCA]
-    ADSR[ADSR] -->|env| VCF
-    ADSR -->|env| VCA
-    GATE[Gate] -->|trigger| ADSR
-    VCA --> OUT[Output]
-```
+<div class="quiver-explorable" data-viz="patchgraph">
+<script type="application/json">
+{
+  "modules": [
+    {"id": "vco", "label": "VCO", "x": 0, "y": 0,
+     "inputs": [{"name": "voct", "kind": "voct"}],
+     "outputs": [{"name": "saw", "kind": "audio"}]},
+    {"id": "gate", "label": "GATE", "x": 0, "y": 3.2,
+     "outputs": [{"name": "out", "kind": "gate"}]},
+    {"id": "vcf", "label": "VCF (SVF)", "x": 1, "y": 0,
+     "inputs": [{"name": "in", "kind": "audio"}, {"name": "cutoff", "kind": "cv"}],
+     "outputs": [{"name": "lp", "kind": "audio"}]},
+    {"id": "env", "label": "ADSR", "x": 1, "y": 3.2,
+     "inputs": [{"name": "gate", "kind": "gate"}],
+     "outputs": [{"name": "env", "kind": "cv"}]},
+    {"id": "vca", "label": "VCA", "x": 2, "y": 0,
+     "inputs": [{"name": "in", "kind": "audio"}, {"name": "cv", "kind": "cv"}],
+     "outputs": [{"name": "out", "kind": "audio"}]},
+    {"id": "output", "label": "OUTPUT", "x": 3, "y": 0,
+     "inputs": [{"name": "left", "kind": "audio"}, {"name": "right", "kind": "audio"}]}
+  ],
+  "cables": [
+    {"from": "vco.saw", "to": "vcf.in", "kind": "audio"},
+    {"from": "gate.out", "to": "env.gate", "kind": "gate"},
+    {"from": "vcf.lp", "to": "vca.in", "kind": "audio"},
+    {"from": "env.env", "to": "vcf.cutoff", "kind": "cv"},
+    {"from": "env.env", "to": "vca.cv", "kind": "cv"},
+    {"from": "vca.out", "to": "output.left", "kind": "audio"},
+    {"from": "vca.out", "to": "output.right", "kind": "audio"}
+  ],
+  "caption": "first_patch: the gate triggers the ADSR, whose envelope shapes both the filter cutoff and the VCA level while VCO → VCF → VCA carries the audio."
+}
+</script>
+</div>
+
+*Every module here has a live explorable: [follow this exact signal path](../explorables/patch-flow.md).*
 
 ## The Complete Example
 
 ```rust,ignore
 {{#include ../../../examples/first_patch.rs}}
 ```
+
+Run it with `cargo run --example first_patch`. To hear a patch instead of
+just printing samples, see [Render Offline to WAV](../how-to/render-wav.md).
 
 ## Understanding the Code
 
@@ -89,13 +119,13 @@ This dual modulation creates the characteristic "filter sweep" sound of analog s
 
 The signal chain computes:
 
-$$\text{output}(t) = \text{env}(t) \cdot \text{LPF}(\text{saw}(t), \text{env}(t) \cdot f_c)$$
+\\[ \text{output}(t) = \text{env}(t) \cdot \text{LPF}(\text{saw}(t), \text{env}(t) \cdot f_c) \\]
 
 Where:
-- $\text{saw}(t)$ is the sawtooth oscillator at time $t$
-- $\text{LPF}$ is the lowpass filter
-- $\text{env}(t)$ is the envelope value
-- $f_c$ is the base cutoff frequency
+- \\( \text{saw}(t) \\) is the sawtooth oscillator at time \\( t \\)
+- \\( \text{LPF} \\) is the lowpass filter
+- \\( \text{env}(t) \\) is the envelope value
+- \\( f_c \\) is the base cutoff frequency
 
 The envelope modulating both the filter and amplitude creates the classic synth timbre.
 

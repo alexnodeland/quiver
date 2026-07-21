@@ -29,7 +29,7 @@ graph TB
 
 Audio oscillates symmetrically around zero:
 
-$$\text{audio}(t) \in [-5V, +5V]$$
+\\[ \text{audio}(t) \in [-5V, +5V] \\]
 
 - **Nominal level**: ±5V peak
 - **AC-coupled**: No DC offset
@@ -86,9 +86,9 @@ PortDef::cv_bipolar().with_default(0.0)
 
 The pitch standard: **1 volt = 1 octave**
 
-$$f = f_0 \cdot 2^{V}$$
+\\[ f = f_0 \cdot 2^{V} \\]
 
-Where $f_0 = 261.63\text{Hz}$ (C4) at 0V.
+Where \\( f_0 = 261.63\text{Hz} \\) (C4) at 0V.
 
 ### Reference Table
 
@@ -104,8 +104,8 @@ Where $f_0 = 261.63\text{Hz}$ (C4) at 0V.
 
 ### Semitones and Cents
 
-$$\text{semitone} = \frac{1}{12}V \approx 83.33\text{mV}$$
-$$\text{cent} = \frac{1}{1200}V \approx 0.833\text{mV}$$
+\\[ \text{semitone} = \frac{1}{12}V \approx 83.33\text{mV} \\]
+\\[ \text{cent} = \frac{1}{1200}V \approx 0.833\text{mV} \\]
 
 ```rust,ignore
 // MIDI note to V/Oct

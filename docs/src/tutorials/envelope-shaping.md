@@ -37,18 +37,64 @@ graph LR
 Each stage is typically an exponential curve:
 
 **Attack (exponential rise):**
-$$v(t) = V_{max} \cdot (1 - e^{-t/\tau_a})$$
+\\[ v(t) = V_{max} \cdot (1 - e^{-t/\tau_a}) \\]
 
 **Decay/Release (exponential fall):**
-$$v(t) = V_{start} \cdot e^{-t/\tau_d}$$
+\\[ v(t) = V_{start} \cdot e^{-t/\tau_d} \\]
 
-Where $\tau$ is the time constant. Analog envelopes have this natural exponential shape—it's how capacitors charge and discharge.
+Where \\( \tau \\) is the time constant. Analog envelopes have this natural exponential shape—it's how capacitors charge and discharge.
 
 ## Building the Example
+
+In this patch the four ADSR stages are not knob settings — they are CV inputs, each fed by an `Offset` module. The envelope shapes only the VCA, so what you hear is the pure volume contour:
+
+<div class="quiver-explorable" data-viz="patchgraph">
+<script type="application/json">
+{
+  "modules": [
+    {"id": "vco", "label": "VCO", "x": 0, "y": 0,
+     "outputs": [{"name": "saw", "kind": "audio"}]},
+    {"id": "gate", "label": "GATE", "x": 0, "y": 2.2,
+     "outputs": [{"name": "out", "kind": "gate"}]},
+    {"id": "attack_cv", "label": "ATTACK CV", "x": 0, "y": 4.4,
+     "outputs": [{"name": "out", "kind": "cv"}]},
+    {"id": "decay_cv", "label": "DECAY CV", "x": 0, "y": 6.2,
+     "outputs": [{"name": "out", "kind": "cv"}]},
+    {"id": "sustain_cv", "label": "SUSTAIN CV", "x": 0, "y": 8.0,
+     "outputs": [{"name": "out", "kind": "cv"}]},
+    {"id": "release_cv", "label": "RELEASE CV", "x": 0, "y": 9.8,
+     "outputs": [{"name": "out", "kind": "cv"}]},
+    {"id": "env", "label": "ADSR", "x": 1, "y": 2.2,
+     "inputs": [{"name": "gate", "kind": "gate"}, {"name": "attack", "kind": "cv"}, {"name": "decay", "kind": "cv"}, {"name": "sustain", "kind": "cv"}, {"name": "release", "kind": "cv"}],
+     "outputs": [{"name": "env", "kind": "cv"}]},
+    {"id": "vca", "label": "VCA", "x": 2, "y": 0,
+     "inputs": [{"name": "in", "kind": "audio"}, {"name": "cv", "kind": "cv"}],
+     "outputs": [{"name": "out", "kind": "audio"}]},
+    {"id": "output", "label": "OUTPUT", "x": 3, "y": 0,
+     "inputs": [{"name": "left", "kind": "audio"}]}
+  ],
+  "cables": [
+    {"from": "gate.out", "to": "env.gate", "kind": "gate"},
+    {"from": "attack_cv.out", "to": "env.attack", "kind": "cv"},
+    {"from": "decay_cv.out", "to": "env.decay", "kind": "cv"},
+    {"from": "sustain_cv.out", "to": "env.sustain", "kind": "cv"},
+    {"from": "release_cv.out", "to": "env.release", "kind": "cv"},
+    {"from": "vco.saw", "to": "vca.in", "kind": "audio"},
+    {"from": "env.env", "to": "vca.cv", "kind": "cv"},
+    {"from": "vca.out", "to": "output.left", "kind": "audio"}
+  ],
+  "caption": "tutorial_envelope: four Offset modules dial in the ADSR stages as CV; the envelope shapes the VCA alone."
+}
+</script>
+</div>
+
+*Drag the four stages yourself and watch the contour respond in [Envelopes Shape Time](../explorables/envelopes.md).*
 
 ```rust,ignore
 {{#include ../../../examples/tutorial_envelope.rs}}
 ```
+
+Run it with `cargo run --example tutorial_envelope`.
 
 ## Envelope as Modulation Source
 

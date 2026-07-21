@@ -2,6 +2,34 @@
 
 In Quiver, signals flow through modules following the conventions of hardware modular synthesizers. Understanding these conventions is key to creating patches that behave predictably.
 
+## Reading the Circuit Diagrams
+
+The patch diagrams in this book color every port and cable by the kind of signal it carries: <span class="qv-c-audio">audio</span>, <span class="qv-c-cv">CV</span>, <span class="qv-c-gate">gates & clocks</span>, <span class="qv-c-voct">V/Oct pitch</span>, and <span class="qv-c-mod">modulation</span>. A minimal voice looks like this:
+
+<div class="quiver-explorable" data-viz="patchgraph">
+<script type="application/json">
+{
+  "modules": [
+    {"id": "vco", "label": "VCO", "x": 0, "y": 0,
+     "inputs": [{"name": "voct", "kind": "voct"}],
+     "outputs": [{"name": "saw", "kind": "audio"}]},
+    {"id": "vcf", "label": "VCF", "x": 1, "y": 0,
+     "inputs": [{"name": "in", "kind": "audio"}, {"name": "cutoff", "kind": "cv"}],
+     "outputs": [{"name": "lp", "kind": "audio"}]},
+    {"id": "out", "label": "OUTPUT", "x": 2, "y": 0,
+     "inputs": [{"name": "left", "kind": "audio"}]}
+  ],
+  "cables": [
+    {"from": "vco.saw", "to": "vcf.in", "kind": "audio"},
+    {"from": "vcf.lp", "to": "out.left", "kind": "audio"}
+  ],
+  "caption": "Blue audio flows left to right; the yellow voct and coral cutoff ports are waiting for pitch and CV."
+}
+</script>
+</div>
+
+Every signal type described on this page also has an interactive, hearable counterpart in the [Explorables](../explorables/index.md) section.
+
 ## Voltage Ranges
 
 Quiver models its signals on the Eurorack standard:
@@ -33,7 +61,7 @@ graph LR
 
 Audio oscillates between **-5V and +5V**:
 
-$$\text{audio}(t) \in [-5, +5]$$
+\\[ \text{audio}(t) \in [-5, +5] \\]
 
 This matches Eurorack levels and allows headroom for mixing.
 
@@ -50,9 +78,9 @@ Two types of control voltage:
 
 Pitch follows the **1 Volt per Octave** standard:
 
-$$f = f_0 \cdot 2^{V}$$
+\\[ f = f_0 \cdot 2^{V} \\]
 
-Where $f_0 = 261.63$ Hz (C4) at 0V.
+Where \\( f_0 = 261.63 \\) Hz (C4) at 0V.
 
 | Voltage | Note | Frequency |
 |---------|------|-----------|

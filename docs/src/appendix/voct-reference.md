@@ -6,12 +6,12 @@ Complete reference for the Volt-per-Octave pitch standard.
 
 **1 Volt = 1 Octave**
 
-$$f = f_0 \cdot 2^V$$
+\\[ f = f_0 \cdot 2^V \\]
 
 Where:
-- $f$ = frequency in Hz
-- $f_0$ = 261.63 Hz (C4 at 0V)
-- $V$ = voltage
+- \\( f \\) = frequency in Hz
+- \\( f_0 \\) = 261.63 Hz (C4 at 0V)
+- \\( V \\) = voltage
 
 ## Complete Note Table
 
@@ -66,11 +66,11 @@ Where:
 
 ### Semitone
 
-$$1 \text{ semitone} = \frac{1}{12} \text{V} = 83.33\overline{3} \text{mV}$$
+\\[ 1 \text{ semitone} = \frac{1}{12} \text{V} = 83.33\overline{3} \text{mV} \\]
 
 ### Cent
 
-$$1 \text{ cent} = \frac{1}{1200} \text{V} = 0.833\overline{3} \text{mV}$$
+\\[ 1 \text{ cent} = \frac{1}{1200} \text{V} = 0.833\overline{3} \text{mV} \\]
 
 ## Conversion Functions
 

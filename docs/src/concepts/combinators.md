@@ -6,7 +6,7 @@ Quiver's Layer 1 provides Arrow-style combinators for composing DSP modules with
 
 Every module is a function from input to output:
 
-$$M : \text{In} \to \text{Out}$$
+\\[ M : \text{In} \to \text{Out} \\]
 
 Combinators let us build complex modules from simple ones without losing type safety.
 
@@ -21,10 +21,12 @@ flowchart LR
     B --> OUT[Output]
 ```
 
-$$\text{chain}(f, g) = g \circ f : A \to C$$
+\\[ \text{chain}(f, g) = g \circ f : A \to C \\]
+
+In code the method is `then` (producing a `Chain` value):
 
 ```rust,ignore
-let synth = vco.chain(vcf).chain(vca);
+let synth = vco.then(vcf).then(vca);
 // () → f64 → f64 → f64
 // Types flow through automatically
 ```
@@ -52,7 +54,7 @@ flowchart LR
     I2 --> M2 --> O2
 ```
 
-$$(f \parallel g)(a, c) = (f(a), g(c))$$
+\\[ (f \parallel g)(a, c) = (f(a), g(c)) \\]
 
 ```rust,ignore
 let stereo = left_channel.parallel(right_channel);
@@ -72,11 +74,11 @@ flowchart LR
     G --> O2[C]
 ```
 
-$$\text{fanout}(f, g)(a) = (f(a), g(a))$$
+\\[ \text{fanout}(f, g)(a) = (f(a), g(a)) \\]
 
 ```rust,ignore
-let effects = signal.fanout(reverb, delay);
-// f64 → (f64, f64)
+let effects = reverb.fanout(delay);
+// f64 → (f64, f64): one input feeds both processors
 ```
 
 ## First and Second
@@ -93,7 +95,7 @@ flowchart LR
     end
 ```
 
-$$\text{first}(f)(a, x) = (f(a), x)$$
+\\[ \text{first}(f)(a, x) = (f(a), x) \\]
 
 ```rust,ignore
 // Process only the left channel
@@ -114,10 +116,14 @@ flowchart LR
     DEL --> SUM
 ```
 
-$$y[n] = f(x[n] + y[n-1])$$
+\\[ y[n] = f(x[n] + y[n-1]) \\]
+
+`feedback` takes a closure called as `combine(input, previous_output)`, where
+`previous_output` is the module's output delayed by one sample:
 
 ```rust,ignore
-let echo = delay.feedback(0.5);  // 50% feedback
+// 50% feedback
+let echo = delay.feedback(|input, previous| input + previous * 0.5);
 ```
 
 ## Map and Contramap
@@ -162,7 +168,7 @@ let dc = Constant::new(5.0);
 // () → f64, always 5.0
 
 // Useful for fixed CV values
-let offset = Constant::new(2.5).chain(adder.second());
+let offset = Constant::new(2.5).then(adder.second());
 ```
 
 ## Split and Merge
@@ -195,14 +201,14 @@ Build complex signal flow:
 ```rust,ignore
 // Classic synth voice with stereo chorus
 let voice = vco
-    .chain(vcf)
-    .chain(vca)
-    .chain(Split::new())  // Mono to stereo
-    .chain(
+    .then(vcf)
+    .then(vca)
+    .then(Split::new())  // Mono to stereo
+    .then(
         chorus_left.parallel(chorus_right)
     )
-    .chain(
-        Merge::new(|l, r| (l * 0.5, r * 0.5))
+    .then(
+        Merge::new(|l, r| (l + r) * 0.5)  // Back to mono, averaged
     );
 ```
 
@@ -212,7 +218,7 @@ Rust's type inference works through combinators:
 
 ```rust,ignore
 // Types are inferred
-let synth = vco.chain(vcf).chain(vca);
+let synth = vco.then(vcf).then(vca);
 // Compiler knows: () → f64
 
 // Explicit types when needed
@@ -225,7 +231,7 @@ Combinators compile to efficient code:
 
 ```rust,ignore
 // This combinator chain...
-let synth = vco.chain(vcf).chain(vca);
+let synth = vco.then(vcf).then(vca);
 
 // ...compiles to essentially:
 fn tick(&mut self) -> f64 {
@@ -242,23 +248,18 @@ No heap allocation, no virtual dispatch, no runtime overhead.
 ## Pattern: Effect Rack
 
 ```rust,ignore
-fn effect_rack(
-    effects: Vec<Box<dyn Module<In=f64, Out=f64>>>
-) -> impl Module<In=f64, Out=f64>
-{
-    effects.into_iter()
-        .fold(Identity::new(), |acc, fx| acc.chain(fx))
-}
+// Statically chain a fixed rack of effects
+let rack = distortion.then(chorus).then(delay).then(reverb);
+// Each stage's Out type must match the next stage's In type
 ```
 
 ## Pattern: Parallel Voices
 
 ```rust,ignore
-fn parallel_voices<V: Module<In=f64, Out=f64>>(
-    voices: [V; 4]
-) -> impl Module<In=(f64, f64, f64, f64), Out=(f64, f64, f64, f64)>
-{
+fn parallel_voices<V: Module<In = f64, Out = f64>>(voices: [V; 4]) -> impl Module {
     let [v1, v2, v3, v4] = voices;
+    // Note: parallel() pairs types, so this nests tuples:
+    // In = (((f64, f64), f64), f64), and Out likewise
     v1.parallel(v2).parallel(v3).parallel(v4)
 }
 ```

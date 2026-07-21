@@ -59,20 +59,20 @@ At the foundation, modules are **Arrow combinators**:
 
 ```rust,ignore
 // Sequential composition: f >>> g
-let chain = osc.chain(filter);
+let chain = osc.then(filter);
 
 // Parallel composition: f *** g
 let stereo = left.parallel(right);
 
 // Fanout: f &&& g
-let split = signal.fanout(fx1, fx2);
+let split = fx1.fanout(fx2);
 ```
 
 These operations are type-checked at compile time. If types don't match, the program doesn't compile.
 
 **Arrow Laws** hold:
-$$\text{id} \ggg f = f = f \ggg \text{id}$$
-$$(f \ggg g) \ggg h = f \ggg (g \ggg h)$$
+\\[ \text{id} \ggg f = f = f \ggg \text{id} \\]
+\\[ (f \ggg g) \ggg h = f \ggg (g \ggg h) \\]
 
 ### Layer 2: Hardware Semantics
 
@@ -109,7 +109,7 @@ Quiver catches errors at compile time when possible:
 
 ```rust,ignore
 // This won't compile: f64 can't go where (f64, f64) is expected
-let bad_chain = mono_module.chain(stereo_module);
+let bad_chain = mono_module.then(stereo_module);
 ```
 
 But it allows runtime flexibility when needed:
@@ -126,7 +126,7 @@ Layer 1 combinators compile to the same code as hand-written loops:
 
 ```rust,ignore
 // This combinator chain...
-let synth = vco.chain(vcf).chain(vca);
+let synth = vco.then(vcf).then(vca);
 
 // ...compiles to equivalent of:
 fn tick(&mut self) -> f64 {
@@ -151,7 +151,7 @@ You can start patching immediately without configuring everything.
 Simple things are simple:
 
 ```rust,ignore
-let output = vco.chain(output);  // One line, done
+let output = vco.then(output);  // One line, done
 ```
 
 Complex things are possible:
