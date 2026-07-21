@@ -22,3 +22,19 @@ code {
  * driven by the --qv-* custom properties. The old .signal-* / .module-*
  * classes were unused and have been removed.
  */
+
+/* Prominent call-to-action link on the Live Playground page */
+a.qv-playground-link {
+    display: inline-block;
+    padding: 0.7em 1.4em;
+    margin: 0.5em 0 1em;
+    border: 2px solid var(--qv-audio, #4a90d9);
+    border-radius: 8px;
+    text-decoration: none;
+    font-size: 1.1em;
+}
+
+a.qv-playground-link:hover {
+    background: var(--qv-audio, #4a90d9);
+    color: #fff;
+}

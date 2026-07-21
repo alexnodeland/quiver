@@ -198,6 +198,7 @@ fn main() {
 | Resource | Description |
 |----------|-------------|
 | 📖 [User Guide](https://alexnodeland.github.io/quiver/) | Comprehensive tutorials and concepts |
+| 🎛️ [Live Playground](https://alexnodeland.github.io/quiver/playground/) | The full synth engine (WASM) playable in your browser |
 | 📋 [API Reference](https://alexnodeland.github.io/quiver/api/quiver/) | Rustdoc documentation |
 | 💡 [Examples](./examples/) | Runnable example patches |
 | 🗺️ [DEVELOPMENT.md](./DEVELOPMENT.md) | Architecture decisions and roadmap |

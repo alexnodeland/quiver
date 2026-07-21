@@ -50,3 +50,8 @@ respond immediately.
 
 These pages need JavaScript (and a reasonably modern browser). Animations
 respect your reduced-motion preference; audio always waits for a click.
+
+The math on these pages is a hand-checked JavaScript mirror of the Rust source —
+small and instant, but a mirror. When you want the *actual* compiled engine,
+open the [Live Playground](../playground.md): the full synthesizer, running
+Quiver's WASM build in your browser.

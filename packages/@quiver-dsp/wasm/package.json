@@ -62,7 +62,11 @@
   "publishConfig": {
     "access": "public"
   },
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/worklet.js",
+    "./src/worklet.ts",
+    "./src/worklet-polyfill.ts"
+  ],
   "devDependencies": {
     "tsup": "^8.0.0",
     "typescript": "^5.0.0"

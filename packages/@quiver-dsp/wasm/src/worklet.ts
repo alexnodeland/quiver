@@ -17,6 +17,9 @@
  * `load_patch`, which swaps the whole patch in one message.
  */
 
+// MUST come first: AudioWorkletGlobalScope has no TextDecoder/TextEncoder, and the
+// glue below constructs both at module top level. ESM evaluates imports in order.
+import './worklet-polyfill';
 // The wasm-bindgen glue. Bundled into this file by tsup (kept in the bundle, not
 // externalized) so the worklet is a single importless module script. We use the
 // NAMED synchronous `initSync` (not the default async init) so the engine is ready
