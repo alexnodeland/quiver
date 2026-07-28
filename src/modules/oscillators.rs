@@ -1,6 +1,6 @@
 //! Oscillator and source modules.
 
-use super::common::{polyblamp, polyblep, voct_to_hz, EdgeDetector, GATE_THRESHOLD_V};
+use super::common::{polyblamp, polyblep, voct_to_hz, wrap_phase, EdgeDetector, GATE_THRESHOLD_V};
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use crate::rng;
 use alloc::vec;
@@ -159,12 +159,10 @@ impl GraphModule for Vco {
         outputs.set(12, saw * 5.0);
         outputs.set(13, sqr * 5.0);
 
-        // Advance phase (dt may be negative under through-zero FM).
-        let new_phase = self.phase + dt;
-        self.phase = new_phase - Libm::<f64>::floor(new_phase);
-        if self.phase < 0.0 {
-            self.phase += 1.0;
-        }
+        // Advance phase (dt may be negative under through-zero FM). Q198:
+        // wrap_phase also recovers from a non-finite dt (extreme V/Oct or FM
+        // overflowing voct_to_hz) instead of latching the accumulator to NaN.
+        self.phase = wrap_phase(self.phase + dt);
     }
 
     fn reset(&mut self) {
@@ -256,8 +254,8 @@ impl GraphModule for Lfo {
         outputs.set(13, sqr);
         outputs.set(14, sin_uni);
 
-        let new_phase = self.phase + freq / self.sample_rate;
-        self.phase = new_phase - Libm::<f64>::floor(new_phase);
+        // Q198: wrap_phase recovers from a non-finite rate instead of latching.
+        self.phase = wrap_phase(self.phase + freq / self.sample_rate);
     }
 
     fn reset(&mut self) {
@@ -380,11 +378,9 @@ impl GraphModule for Supersaw {
             sum += saw * Self::MIX_LEVELS[i];
             total_mix += Self::MIX_LEVELS[i];
 
-            // Advance phase
-            self.phases[i] += dt;
-            if self.phases[i] >= 1.0 {
-                self.phases[i] -= 1.0;
-            }
+            // Advance phase (Q198: wrap_phase also recovers non-finite rates
+            // and wraps a huge finite dt in O(1) where `-= 1.0` could not).
+            self.phases[i] = wrap_phase(self.phases[i] + dt);
         }
 
         // Normalize and apply mix (blend between center oscillator and full supersaw)
@@ -395,10 +391,7 @@ impl GraphModule for Supersaw {
         // independent accumulator advancing at half the center rate.
         let sub_dt = base_freq / (2.0 * self.sample_rate);
         let sub = (2.0 * self.sub_phase - 1.0) - polyblep(self.sub_phase, sub_dt);
-        self.sub_phase += sub_dt;
-        if self.sub_phase >= 1.0 {
-            self.sub_phase -= 1.0;
-        }
+        self.sub_phase = wrap_phase(self.sub_phase + sub_dt); // Q198
 
         outputs.set(10, output);
         outputs.set(11, sub);
@@ -995,11 +988,9 @@ impl GraphModule for Wavetable {
         let sample1 = self.read_table(table_idx + 1, level1, self.phase);
         let sample = sample0 * (1.0 - blend) + sample1 * blend;
 
-        // Advance phase
-        self.phase += phase_inc;
-        while self.phase >= 1.0 {
-            self.phase -= 1.0;
-        }
+        // Advance phase (Q198: `while >= 1.0` would spin forever on an `inf`
+        // increment and for eons on a huge finite one; wrap_phase is O(1)).
+        self.phase = wrap_phase(self.phase + phase_inc);
 
         // Output as audio (±5V)
         outputs.set(10, sample * 5.0);
@@ -1196,16 +1187,9 @@ impl GraphModule for FormantOsc {
             output += formant_out * Self::AMPLITUDES[i];
         }
 
-        // Advance phases
-        self.phase += phase_inc;
-        while self.phase >= 1.0 {
-            self.phase -= 1.0;
-        }
-
-        self.vibrato_phase += Self::VIBRATO_RATE / self.sample_rate;
-        while self.vibrato_phase >= 1.0 {
-            self.vibrato_phase -= 1.0;
-        }
+        // Advance phases (Q198: O(1) wrap, recovers from non-finite rates).
+        self.phase = wrap_phase(self.phase + phase_inc);
+        self.vibrato_phase = wrap_phase(self.vibrato_phase + Self::VIBRATO_RATE / self.sample_rate);
 
         // Output with normalization (±5V audio)
         outputs.set(10, output.clamp(-1.0, 1.0) * 5.0);
@@ -1230,6 +1214,62 @@ impl GraphModule for FormantOsc {
 mod tests {
     use super::*;
     use crate::modules::common::measure_max_output;
+
+    // Q198: a non-finite pitch input must not permanently latch the phase
+    // accumulator (`NaN - floor(NaN)` is NaN). After poisoning, a clean V/Oct
+    // must produce a normal oscillation again.
+    #[test]
+    fn test_vco_nan_pitch_recovery() {
+        let mut vco = Vco::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        for &bad in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            inputs.set(0, bad);
+            vco.tick(&inputs, &mut outputs);
+        }
+        // Extreme finite V/Oct overflows voct_to_hz (2^1100 == inf) — same latch risk.
+        inputs.set(0, 1100.0);
+        vco.tick(&inputs, &mut outputs);
+
+        // Clean pitch: the saw output must be finite and actually oscillate.
+        inputs.set(0, 0.0);
+        let mut max_abs: f64 = 0.0;
+        for _ in 0..4410 {
+            vco.tick(&inputs, &mut outputs);
+            let saw = outputs.get(12).unwrap();
+            assert!(
+                saw.is_finite(),
+                "VCO output stayed non-finite after bad pitch input"
+            );
+            max_abs = max_abs.max(saw.abs());
+        }
+        assert!(
+            max_abs > 1.0,
+            "VCO failed to oscillate after bad pitch input (max |saw| = {max_abs})"
+        );
+    }
+
+    // Q198: the old `while phase >= 1.0 {{ phase -= 1.0 }}` wrap would spin the
+    // audio thread forever on an `inf` phase increment (inf - 1.0 == inf). This
+    // test completing at all proves the O(1) wrap.
+    #[test]
+    fn test_wavetable_extreme_pitch_no_hang() {
+        let mut wt = Wavetable::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        for &voct in &[1100.0, f64::INFINITY, f64::NAN, -1100.0] {
+            inputs.set(0, voct);
+            wt.tick(&inputs, &mut outputs);
+        }
+
+        inputs.set(0, 0.0);
+        for _ in 0..64 {
+            wt.tick(&inputs, &mut outputs);
+            assert!(outputs.get(10).unwrap().is_finite());
+        }
+    }
 
     #[test]
     fn test_vco_frequency() {
