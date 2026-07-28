@@ -4,7 +4,7 @@
 //! arbitrary signal routing between modules. It handles topological sorting,
 //! execution ordering, and signal propagation.
 
-use crate::modules::common::flush_denorm;
+use crate::modules::common::{flush_denorm, sanitize_audio};
 use crate::port::{GraphModule, ParamId, PortId, PortSpec, PortValues, SignalKind};
 use crate::StdMap;
 use alloc::boxed::Box;
@@ -469,10 +469,16 @@ impl NodeExec {
     /// so inter-module feedback loops cannot circulate subnormal values. Only ports the
     /// module actually wrote are updated; unwritten output slots retain their prior value
     /// (matching the previous map-based scatter).
+    ///
+    /// Q199: non-finite outputs are also zeroed here, so a module that produces a
+    /// `NaN`/`Inf` (internal overflow, division by a zero-valued CV, …) cannot poison
+    /// *other* modules' recursive state through the routing buffers. Per-module input
+    /// sanitization (Q160) still matters for a module's own state; this is the
+    /// graph-level containment boundary.
     fn scatter(&self, src: &PortValues, out_buf: &mut [f64]) {
         for (k, &port_id) in self.out_ids.iter().enumerate() {
             if let Some(value) = src.get(port_id) {
-                out_buf[self.out_base + k] = flush_denorm(value);
+                out_buf[self.out_base + k] = flush_denorm(sanitize_audio(value));
             }
         }
     }
@@ -2677,6 +2683,25 @@ mod tests {
         assert_eq!(r, 0.0);
         // The source's own output slot is flushed too (observable via get_output_value).
         assert_eq!(patch.get_output_value(src.id(), 10), Some(0.0));
+    }
+
+    // Q199: a non-finite value produced by a module is zeroed as it is scattered
+    // into the routing buffers, so it cannot poison other modules' recursive state.
+    #[test]
+    fn test_non_finite_is_sanitized_at_scatter() {
+        for &bad in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut patch = Patch::new(44100.0);
+            let src = patch.add("src", ConstSource::new(bad));
+            let pass = patch.add("pass", Passthrough::new());
+            patch.connect(src.out("out"), pass.in_("in")).unwrap();
+            patch.set_output(pass.id());
+            patch.compile().unwrap();
+
+            let (l, r) = patch.tick();
+            assert_eq!(l, 0.0, "non-finite ({bad}) must be zeroed at scatter");
+            assert_eq!(r, 0.0);
+            assert_eq!(patch.get_output_value(src.id(), 10), Some(0.0));
+        }
     }
 
     // Q107: precompiled adjacency preserves multi-cable input summing with per-cable

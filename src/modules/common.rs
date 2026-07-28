@@ -98,6 +98,29 @@ pub fn flush_denorm(x: f64) -> f64 {
     }
 }
 
+/// Wrap a phase accumulator into `[0, 1)`, recovering from non-finite values.
+///
+/// Q198: oscillator phase accumulators are recursive state, so a single
+/// non-finite increment (e.g. `voct_to_hz` overflowing to `inf` under an
+/// extreme V/Oct input) would otherwise latch the phase to NaN permanently
+/// (`NaN - floor(NaN)` is NaN), or — for the `while phase >= 1.0` wrap style —
+/// spin the audio thread forever (`inf - 1.0` is `inf`). Non-finite phases
+/// reset to `0.0`; finite phases of any magnitude wrap in O(1) via `floor`.
+#[inline]
+pub fn wrap_phase(x: f64) -> f64 {
+    if !x.is_finite() {
+        return 0.0;
+    }
+    let wrapped = x - Libm::<f64>::floor(x);
+    // `x - floor(x)` lies in [0, 1) for finite x (including negatives), but
+    // guard the rounding edge case where it lands on exactly 1.0.
+    if wrapped >= 1.0 {
+        0.0
+    } else {
+        wrapped
+    }
+}
+
 /// PolyBLEP residual for bandlimiting a discontinuity at phase `t` with step
 /// `dt` (normalized frequency). Returns the correction to add/subtract from a
 /// naive waveform to reduce aliasing.
