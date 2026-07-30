@@ -612,6 +612,31 @@ pub trait GraphModule: Send + Sync {
     /// Process one sample given port values
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues);
 
+    /// Process one sample, told which outputs anyone will actually read.
+    ///
+    /// Bit `k` of `wanted` corresponds to output port `k` in [`port_spec`](Self::port_spec)
+    /// order; a clear bit means nothing in the patch consumes that port this compile, so the
+    /// module may skip producing it. Only [`Patch`](crate::graph::Patch) can know this —
+    /// it is the only thing that sees the cables — so it calls this instead of
+    /// [`tick`](Self::tick) once its routing plan is built. Anything with more than 32
+    /// outputs is handed an all-ones mask.
+    ///
+    /// The default implementation ignores the mask and delegates to
+    /// [`tick`](Self::tick), so implementing it is purely optional and adding it broke
+    /// nothing. A module that *does* implement it must honour two rules:
+    ///
+    /// 1. **The wanted ports are bit-identical to what `tick` would have written.** Masking
+    ///    is a permission to skip work, never a licence to compute it differently.
+    /// 2. **Retained state evolves identically regardless of the mask.** If producing an
+    ///    output has a side effect on state — advancing a phase accumulator, drawing from
+    ///    the global RNG, stepping a filter — that work must still happen; only the final
+    ///    write (and any pure arithmetic feeding just it) may be skipped. Otherwise the
+    ///    *wanted* outputs would drift as soon as an unwanted one is unpatched.
+    fn tick_masked(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
+        let _ = wanted;
+        self.tick(inputs, outputs);
+    }
+
     /// Process a block of samples (optional optimization).
     ///
     /// The default drives [`tick`](Self::tick) frame-by-frame. It reuses a single input and

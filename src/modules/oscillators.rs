@@ -73,12 +73,21 @@ impl Default for Vco {
     }
 }
 
-impl GraphModule for Vco {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
+impl Vco {
+    /// Output-port bits for [`GraphModule::tick_masked`], in `PortSpec` order.
+    const WANT_SIN: u32 = 1 << 0;
+    const WANT_TRI: u32 = 1 << 1;
+    const WANT_SAW: u32 = 1 << 2;
+    const WANT_SQR: u32 = 1 << 3;
 
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+    /// The whole of [`GraphModule::tick`], with each waveform gated on `wanted`.
+    ///
+    /// All four waveforms are pure functions of `phase`, `pw` and `dt` — no accumulator,
+    /// no history — so any subset can be skipped without touching state evolution. What
+    /// must *not* be skipped, and is not: the memoized frequency derivation, the hard-sync
+    /// edge detector, and the phase advance. `tick` calls this with an all-ones mask, so
+    /// the unmasked path is literally this code with every branch taken.
+    fn tick_wanted(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
         let voct = inputs.get_or(0, 0.0);
         let fm = inputs.get_or(1, 0.0);
         let pw = inputs.get_or(2, 0.5).clamp(0.05, 0.95);
@@ -114,35 +123,48 @@ impl GraphModule for Vco {
         let phase = self.phase;
 
         // Sine is inherently bandlimited.
-        let sin = Libm::<f64>::sin(phase * TAU) * 5.0;
+        let sin = if wanted & Self::WANT_SIN != 0 {
+            Libm::<f64>::sin(phase * TAU) * 5.0
+        } else {
+            0.0
+        };
 
         // Bandlimited saw: naive ramp minus PolyBLEP at the wrap.
-        let mut saw = 2.0 * phase - 1.0;
-        saw -= polyblep(phase, dt_abs);
+        let mut saw = 0.0;
+        if wanted & Self::WANT_SAW != 0 {
+            saw = 2.0 * phase - 1.0;
+            saw -= polyblep(phase, dt_abs);
+        }
 
         // Bandlimited square/pulse: PolyBLEP at both the rising (wrap) and
         // falling (pulse-width) edges.
-        let mut sqr = if phase < pw { 1.0 } else { -1.0 };
-        sqr += polyblep(phase, dt_abs);
-        let pw_edge = {
-            let x = phase + (1.0 - pw);
-            x - Libm::<f64>::floor(x)
-        };
-        sqr -= polyblep(pw_edge, dt_abs);
+        let mut sqr = 0.0;
+        if wanted & Self::WANT_SQR != 0 {
+            sqr = if phase < pw { 1.0 } else { -1.0 };
+            sqr += polyblep(phase, dt_abs);
+            let pw_edge = {
+                let x = phase + (1.0 - pw);
+                x - Libm::<f64>::floor(x)
+            };
+            sqr -= polyblep(pw_edge, dt_abs);
+        }
 
         // Bandlimited triangle via PolyBLAMP corrections at its two corners
         // (slope changes of ±8 per unit phase => ±4*dt per sample).
-        let mut tri = 1.0 - 4.0 * Libm::<f64>::fabs(phase - 0.5);
-        let corner_half = {
-            let x = phase - 0.5;
-            if x < 0.0 {
-                x + 1.0
-            } else {
-                x
-            }
-        };
-        tri += 4.0 * dt_abs * polyblamp(phase, dt_abs);
-        tri -= 4.0 * dt_abs * polyblamp(corner_half, dt_abs);
+        let mut tri = 0.0;
+        if wanted & Self::WANT_TRI != 0 {
+            tri = 1.0 - 4.0 * Libm::<f64>::fabs(phase - 0.5);
+            let corner_half = {
+                let x = phase - 0.5;
+                if x < 0.0 {
+                    x + 1.0
+                } else {
+                    x
+                }
+            };
+            tri += 4.0 * dt_abs * polyblamp(phase, dt_abs);
+            tri -= 4.0 * dt_abs * polyblamp(corner_half, dt_abs);
+        }
 
         // Bounded hard-sync correction. The reset introduces a value step in the
         // saw and square that is not at a natural phase wrap, so the wrap-BLEP
@@ -155,25 +177,52 @@ impl GraphModule for Vco {
             // Phase-equivalent position of the (past) discontinuity for PolyBLEP.
             let equiv = (1.0 - frac) * dt_abs;
             let blep = polyblep(equiv, dt_abs);
-            // Saw step (normalized): from (2*p_old-1) down to (2*0-1) = -2*p_old.
-            let saw_step = -2.0 * p_old;
-            saw += (saw_step / 2.0) * blep;
-            // Square step: from sign(p_old<pw) to +1 (phase reset to 0 < pw).
-            let old_sqr = if p_old < pw { 1.0 } else { -1.0 };
-            let sqr_step = 1.0 - old_sqr;
-            sqr += (sqr_step / 2.0) * blep;
+            if wanted & Self::WANT_SAW != 0 {
+                // Saw step (normalized): from (2*p_old-1) down to (2*0-1) = -2*p_old.
+                let saw_step = -2.0 * p_old;
+                saw += (saw_step / 2.0) * blep;
+            }
+            if wanted & Self::WANT_SQR != 0 {
+                // Square step: from sign(p_old<pw) to +1 (phase reset to 0 < pw).
+                let old_sqr = if p_old < pw { 1.0 } else { -1.0 };
+                let sqr_step = 1.0 - old_sqr;
+                sqr += (sqr_step / 2.0) * blep;
+            }
         }
 
-        // Scale to ±5V.
-        outputs.set(10, sin);
-        outputs.set(11, tri * 5.0);
-        outputs.set(12, saw * 5.0);
-        outputs.set(13, sqr * 5.0);
+        // Scale to ±5V. A port nobody reads is left unwritten rather than written with a
+        // placeholder, so it keeps its previous routing value (see `NodeExec::scatter`).
+        if wanted & Self::WANT_SIN != 0 {
+            outputs.set(10, sin);
+        }
+        if wanted & Self::WANT_TRI != 0 {
+            outputs.set(11, tri * 5.0);
+        }
+        if wanted & Self::WANT_SAW != 0 {
+            outputs.set(12, saw * 5.0);
+        }
+        if wanted & Self::WANT_SQR != 0 {
+            outputs.set(13, sqr * 5.0);
+        }
 
         // Advance phase (dt may be negative under through-zero FM). Q198:
         // wrap_phase also recovers from a non-finite dt (extreme V/Oct or FM
         // overflowing voct_to_hz) instead of latching the accumulator to NaN.
         self.phase = wrap_phase(self.phase + dt);
+    }
+}
+
+impl GraphModule for Vco {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_wanted(inputs, outputs, u32::MAX);
+    }
+
+    fn tick_masked(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
+        self.tick_wanted(inputs, outputs, wanted);
     }
 
     fn reset(&mut self) {
@@ -236,12 +285,20 @@ impl Default for Lfo {
     }
 }
 
-impl GraphModule for Lfo {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
+impl Lfo {
+    /// Output-port bits for [`GraphModule::tick_masked`], in `PortSpec` order.
+    const WANT_SIN: u32 = 1 << 0;
+    const WANT_TRI: u32 = 1 << 1;
+    const WANT_SAW: u32 = 1 << 2;
+    const WANT_SQR: u32 = 1 << 3;
+    const WANT_SIN_UNI: u32 = 1 << 4;
 
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+    /// The whole of [`GraphModule::tick`], with each waveform gated on `wanted`.
+    ///
+    /// Every waveform is a pure function of `phase`, `scale` and `depth`, so skipping any
+    /// of them is invisible to the rest. The memoized rate map, the reset edge detector and
+    /// the phase advance are unconditional. `tick` calls this with an all-ones mask.
+    fn tick_wanted(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
         let rate_cv = inputs.get_or(0, 0.5);
         let depth = inputs.get_or(1, 10.0) / 10.0; // Normalize to 0-1
         let reset = inputs.get_or(2, 0.0);
@@ -257,22 +314,48 @@ impl GraphModule for Lfo {
             self.phase = 0.0;
         }
 
-        // Generate waveforms scaled by depth (±5V * depth)
+        // Generate waveforms scaled by depth (±5V * depth). A port nobody reads is left
+        // unwritten rather than written with a placeholder, so it keeps its previous
+        // routing value (see `NodeExec::scatter`).
         let scale = 5.0 * depth;
-        let sin = Libm::<f64>::sin(self.phase * TAU) * scale;
-        let tri = (1.0 - 4.0 * Libm::<f64>::fabs(self.phase - 0.5)) * scale;
-        let saw = (2.0 * self.phase - 1.0) * scale;
-        let sqr = if self.phase < 0.5 { scale } else { -scale };
-        let sin_uni = (Libm::<f64>::sin(self.phase * TAU) * 0.5 + 0.5) * depth * 10.0;
-
-        outputs.set(10, sin);
-        outputs.set(11, tri);
-        outputs.set(12, saw);
-        outputs.set(13, sqr);
-        outputs.set(14, sin_uni);
+        if wanted & Self::WANT_SIN != 0 {
+            outputs.set(10, Libm::<f64>::sin(self.phase * TAU) * scale);
+        }
+        if wanted & Self::WANT_TRI != 0 {
+            outputs.set(
+                11,
+                (1.0 - 4.0 * Libm::<f64>::fabs(self.phase - 0.5)) * scale,
+            );
+        }
+        if wanted & Self::WANT_SAW != 0 {
+            outputs.set(12, (2.0 * self.phase - 1.0) * scale);
+        }
+        if wanted & Self::WANT_SQR != 0 {
+            outputs.set(13, if self.phase < 0.5 { scale } else { -scale });
+        }
+        if wanted & Self::WANT_SIN_UNI != 0 {
+            outputs.set(
+                14,
+                (Libm::<f64>::sin(self.phase * TAU) * 0.5 + 0.5) * depth * 10.0,
+            );
+        }
 
         // Q198: wrap_phase recovers from a non-finite rate instead of latching.
         self.phase = wrap_phase(self.phase + freq / self.sample_rate);
+    }
+}
+
+impl GraphModule for Lfo {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_wanted(inputs, outputs, u32::MAX);
+    }
+
+    fn tick_masked(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
+        self.tick_wanted(inputs, outputs, wanted);
     }
 
     fn reset(&mut self) {
@@ -696,36 +779,71 @@ impl Default for NoiseGenerator {
     }
 }
 
-impl GraphModule for NoiseGenerator {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
+impl NoiseGenerator {
+    /// Output-port bits for [`GraphModule::tick_masked`], in `PortSpec` order.
+    const WANT_WHITE: u32 = 1 << 0;
+    const WANT_PINK: u32 = 1 << 1;
+    const WANT_WHITE2: u32 = 1 << 2;
+    const WANT_PINK2: u32 = 1 << 3;
 
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+    /// The whole of [`GraphModule::tick`], with each write gated on `wanted`.
+    ///
+    /// **Every draw stays unconditional.** All four sources have side effects on retained
+    /// state — the two `random_bipolar` calls advance the shared RNG stream, and each
+    /// `sample()` steps its own pink-noise filter — so skipping one would shift the values
+    /// the *remaining* outputs produce on later samples. Only the two correlation mixes
+    /// (pure arithmetic) and the writes themselves are skipped. `tick` calls this with an
+    /// all-ones mask.
+    fn tick_wanted(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
         // Phase 3: Adjustable correlation
         let correlation = inputs.get_or(0, self.correlation).clamp(0.0, 1.0);
 
         // Primary white noise
         let white1 = rng::random_bipolar();
 
-        // Phase 3: Correlated white noise for second channel
-        // Mix between independent noise and correlated (shared) noise
+        // Phase 3: Correlated white noise for second channel. The draw is unconditional
+        // (it advances the shared RNG stream); only the mix below is skippable.
         let independent = rng::random_bipolar();
-        let white2 = white1 * correlation + independent * (1.0 - correlation);
 
         // Primary pink noise
         let pink1 = self.pink.sample();
 
-        // Phase 3: Correlated pink noise
+        // Phase 3: Correlated pink noise. Likewise unconditional — `sample()` steps the
+        // second pink-noise filter's own state.
         let pink2_independent = self.pink2.sample();
-        let pink2 = pink1 * correlation + pink2_independent * (1.0 - correlation);
 
         self.last_white = white1;
 
-        outputs.set(10, white1 * 5.0);
-        outputs.set(11, pink1 * 5.0);
-        outputs.set(12, white2 * 5.0);
-        outputs.set(13, pink2 * 5.0);
+        // A port nobody reads is left unwritten rather than written with a placeholder, so
+        // it keeps its previous routing value (see `NodeExec::scatter`).
+        if wanted & Self::WANT_WHITE != 0 {
+            outputs.set(10, white1 * 5.0);
+        }
+        if wanted & Self::WANT_PINK != 0 {
+            outputs.set(11, pink1 * 5.0);
+        }
+        if wanted & Self::WANT_WHITE2 != 0 {
+            let white2 = white1 * correlation + independent * (1.0 - correlation);
+            outputs.set(12, white2 * 5.0);
+        }
+        if wanted & Self::WANT_PINK2 != 0 {
+            let pink2 = pink1 * correlation + pink2_independent * (1.0 - correlation);
+            outputs.set(13, pink2 * 5.0);
+        }
+    }
+}
+
+impl GraphModule for NoiseGenerator {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_wanted(inputs, outputs, u32::MAX);
+    }
+
+    fn tick_masked(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
+        self.tick_wanted(inputs, outputs, wanted);
     }
 
     fn reset(&mut self) {

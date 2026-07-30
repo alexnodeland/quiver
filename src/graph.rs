@@ -446,6 +446,10 @@ struct NodeExec {
     /// Exactly the inputs `gather` pass 2 must resolve, in [`PortSpec`] input order. Empty
     /// for the overwhelming majority of nodes.
     normalled_pending: Vec<NormalledPlan>,
+    /// Which outputs anything in the patch reads: bit `k` ↔ output port `k` in [`PortSpec`]
+    /// order. Passed to [`GraphModule::tick_masked`] so a module can skip producing what
+    /// nobody consumes. All ones for nodes with more than 32 outputs.
+    wanted_outputs: u32,
 }
 
 impl NodeExec {
@@ -1137,6 +1141,35 @@ impl Patch {
         Ok(())
     }
 
+    /// Which of `node`'s outputs (in [`PortSpec`] order) anything in the patch reads.
+    ///
+    /// An output is consumed when a cable leaves it, or when it belongs to the patch's
+    /// output node — [`Routing::read_output`] reads that node's first two output slots, and
+    /// the whole spec is marked rather than just those two so a later change to
+    /// `set_output` semantics cannot silently blank a port. Everything else is dead for this
+    /// compile, and is reported to the module through [`GraphModule::tick_masked`].
+    ///
+    /// A module with more than 32 outputs gets an all-ones mask, since the bit vector cannot
+    /// address the rest.
+    ///
+    /// A dead output's [`Routing::out_buf`] slot then keeps whatever it last held, so
+    /// [`get_output_value`](Self::get_output_value) on an *unpatched* output of a mask-aware
+    /// module (`Vco`, `Lfo`, `NoiseGenerator`) reports its initial `0.0` rather than a live
+    /// sample. Patch the port — or tick the module directly — if you need to meter it.
+    fn consumed_output_mask(&self, node: NodeId, out_ids: &[PortId]) -> u32 {
+        if out_ids.len() > u32::BITS as usize || self.output_node == Some(node) {
+            return u32::MAX;
+        }
+        let mut wanted = 0u32;
+        for (k, &port) in out_ids.iter().enumerate() {
+            let port_ref = PortRef { node, port };
+            if self.cables.iter().any(|cable| cable.from == port_ref) {
+                wanted |= 1 << k;
+            }
+        }
+        wanted
+    }
+
     /// Permute `modules` into `execution_order`, rewriting each node's `module_slot`.
     ///
     /// This is what makes `modules[i]` the module of `routing.nodes[i]`, so `tick_step` can
@@ -1214,6 +1247,7 @@ impl Patch {
                 out_ids,
                 inputs: Vec::new(),
                 normalled_pending: Vec::new(),
+                wanted_outputs: u32::MAX,
             });
         }
         routing.out_buf.resize(slot, 0.0);
@@ -1276,6 +1310,8 @@ impl Patch {
                 scratch_out.set(output.id, 0.0);
             }
 
+            routing.nodes[exec_idx].wanted_outputs =
+                self.consumed_output_mask(node_id, &routing.nodes[exec_idx].out_ids);
             routing.nodes[exec_idx].normalled_pending = normalled_pending;
             routing.nodes[exec_idx].inputs = inputs;
             routing.scratch_in.push(scratch_in);
@@ -1472,7 +1508,7 @@ impl Patch {
             // Run the module. scratch_out is cleared first so unwritten outputs are absent,
             // matching the previous "fresh PortValues per tick" semantics.
             outputs.clear();
-            module.tick(inputs, outputs);
+            module.tick_masked(inputs, outputs, exec.wanted_outputs);
 
             // Scatter outputs back into the dense buffer (with denormal flushing).
             exec.scatter(outputs, out_buf);
@@ -1543,6 +1579,15 @@ impl Patch {
     ///
     /// This is used by the observer to collect real-time values for metering,
     /// scope display, and other visualizations.
+    ///
+    /// # Unpatched ports of mask-aware modules
+    ///
+    /// A module that implements [`GraphModule::tick_masked`] (`Vco`, `Lfo`,
+    /// `NoiseGenerator`) is told which of its outputs the compiled patch reads and may skip
+    /// producing the rest, whose routing slots then keep their initial `0.0`. Metering such
+    /// a port therefore requires that something in the patch consume it — patch it
+    /// somewhere, or tick the module directly. Every port of every other module, and every
+    /// *patched* port, reports live values as before.
     pub fn get_output_value(&self, node: NodeId, port: PortId) -> Option<f64> {
         self.routing
             .out_slot_index
