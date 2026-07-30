@@ -412,6 +412,21 @@ struct InputPlan {
     edges: Vec<InEdge>,
 }
 
+/// One input that `gather` pass 1 deliberately leaves unresolved: unpatched *and* normalled
+/// to a sibling that pass 1 does resolve.
+///
+/// Precomputing this (short, usually empty) list is what lets pass 2 iterate only the inputs
+/// it actually has work for, instead of testing every input for presence in `dst`.
+struct NormalledPlan {
+    /// The input port to fill in.
+    port_id: PortId,
+    /// The pass-1-resolved sibling input to copy from (already collapsed to the chain's
+    /// terminal by [`resolve_normalled_chains`]).
+    source: PortId,
+    /// Fallback if the sibling somehow has no value.
+    default: f64,
+}
+
 /// Compiled per-node execution record (parallel to [`Patch::execution_order`]).
 struct NodeExec {
     /// Identity of the node in the [`SlotMap`].
@@ -423,6 +438,9 @@ struct NodeExec {
     out_ids: Vec<PortId>,
     /// Input plans in [`PortSpec`] input order.
     inputs: Vec<InputPlan>,
+    /// Exactly the inputs `gather` pass 2 must resolve, in [`PortSpec`] input order. Empty
+    /// for the overwhelming majority of nodes.
+    normalled_pending: Vec<NormalledPlan>,
 }
 
 impl NodeExec {
@@ -450,17 +468,13 @@ impl NodeExec {
         }
         // Pass 2: normalled-but-unpatched inputs read the *current-tick* value of the
         // terminal sibling INPUT they normal to. `resolve_normalled_chains` (at
-        // compile time) collapsed each chain so `normalled_to` points at a sibling
-        // pass 1 already resolved, making this pass order-independent; a cycle or
-        // dangling reference was collapsed to `None`, falling back to default.
-        for plan in &self.inputs {
-            if dst.has(plan.port_id) {
-                continue;
-            }
-            let value = match plan.normalled_to {
-                Some(norm) => dst.get(norm).unwrap_or(plan.default),
-                None => plan.default,
-            };
+        // compile time) collapsed each chain so the source points at a sibling pass 1
+        // already resolved, making this pass order-independent; a cycle or dangling
+        // reference was collapsed to `None`, which pass 1 then handles as a plain
+        // default. `normalled_pending` therefore holds exactly the inputs left unset by
+        // pass 1 — no presence test over every input is needed.
+        for plan in &self.normalled_pending {
+            let value = dst.get(plan.source).unwrap_or(plan.default);
             dst.set(plan.port_id, value);
         }
     }
@@ -534,6 +548,44 @@ fn resolve_normalled_chains(inputs: &mut [InputPlan]) {
         }
         inputs[i].normalled_to = terminal;
     }
+}
+
+/// Collect the inputs [`NodeExec::gather`] pass 1 leaves unset, in [`PortSpec`] input order.
+///
+/// Pass 1 resolves every patched input and every unpatched input whose `normalled_to` is
+/// `None` (including the ones [`resolve_normalled_chains`] collapsed to `None`), so the
+/// remainder — unpatched *and* still normalled — is exactly what pass 2 has to fill in.
+/// Hoisting that set to compile time replaces a per-input presence probe per node per sample
+/// with a walk over a list that is empty for nearly every node.
+///
+/// Must run *after* [`resolve_normalled_chains`], whose rewrite decides which inputs pass 1
+/// covers. A repeated `port_id` (a malformed spec) is skipped once already claimed, matching
+/// the previous `if dst.has(port_id) { continue }` guard exactly.
+fn collect_normalled_pending(inputs: &[InputPlan]) -> Vec<NormalledPlan> {
+    let mut claimed: Vec<PortId> = inputs
+        .iter()
+        .filter(|p| p.has_connection || p.normalled_to.is_none())
+        .map(|p| p.port_id)
+        .collect();
+    let mut pending = Vec::new();
+    for plan in inputs {
+        if plan.has_connection {
+            continue;
+        }
+        let Some(source) = plan.normalled_to else {
+            continue;
+        };
+        if claimed.contains(&plan.port_id) {
+            continue;
+        }
+        claimed.push(plan.port_id);
+        pending.push(NormalledPlan {
+            port_id: plan.port_id,
+            source,
+            default: plan.default,
+        });
+    }
+    pending
 }
 
 /// Compiled, allocation-free routing state produced by [`Patch::compile`].
@@ -1085,6 +1137,7 @@ impl Patch {
                 out_base,
                 out_ids,
                 inputs: Vec::new(),
+                normalled_pending: Vec::new(),
             });
         }
         routing.out_buf.resize(slot, 0.0);
@@ -1142,10 +1195,12 @@ impl Patch {
             // Collapse each normalled chain to its pass-1-resolvable terminal so the
             // runtime two-pass `gather` is order-independent (see the fn's docs).
             resolve_normalled_chains(&mut inputs);
+            let normalled_pending = collect_normalled_pending(&inputs);
             for output in &spec.outputs {
                 scratch_out.set(output.id, 0.0);
             }
 
+            routing.nodes[exec_idx].normalled_pending = normalled_pending;
             routing.nodes[exec_idx].inputs = inputs;
             routing.scratch_in.push(scratch_in);
             routing.scratch_out.push(scratch_out);
