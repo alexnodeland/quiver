@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 This changelog is auto-generated from git history. Run `make changelog` to update.
+Sections above the auto-generated marker are hand-written and are preserved.
+
+## [0.2.0] - unreleased
+
+An interpreter performance pass over the patch graph (`perf/interpreter-r-series`).
+Every change is bit-exact for audio: the same `(patch, parameters)` renders the same
+samples as 0.1.1, pinned in CI by `tests/golden_vectors.rs`. The two breaking items
+below are both **API** breaks, not numeric ones.
+
+### Breaking
+
+- **`PortValues` is no longer a public `HashMap` wrapper.** The `pub values:
+  HashMap<PortId, f64>` field is gone; `PortValues` is now two private parallel vectors
+  (ids in first-write order, `Option<f64>` per slot) scanned linearly, which removes
+  per-key hashing from the audio path. All accessors (`get`, `get_or`, `set`, `has`,
+  `clear`, `accumulate`) keep their exact signatures and semantics.
+  - *Migration*: reading `pv.values` becomes `pv.iter()`, which yields `(PortId, f64)`
+    for every port that currently holds a value — and does so in a **deterministic**
+    order rather than the `HashMap`'s arbitrary one. Constructing
+    `PortValues { values }` by struct literal becomes `PortValues::new()` plus one
+    `set()` per port.
+
+### Performance
+
+- Normalled inputs resolve from a precompiled list instead of a blanket per-input probe.
+- Dense `PortValues` (above) plus scatter-by-slot: no hashing in `gather`/`scatter`.
+- Modules are stored and walked in execution order, so the per-sample loop zips the
+  routing plan against the module list instead of resolving a slotmap key per node per
+  sample; cable attenuation/offset are baked to plain `f64` at compile time.
+
+### Added
+
+- `tests/golden_vectors.rs`: five fixed patches hashed sample-for-sample, the
+  bit-exactness gate for this and every later numeric change.
+- `tests/output_masking.rs`: per-module proof that masking an output cannot perturb the
+  outputs that survive, on this sample or any later one.
 
 ## [Unreleased]
 

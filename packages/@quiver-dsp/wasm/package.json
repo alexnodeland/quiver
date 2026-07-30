@@ -1,6 +1,6 @@
 {
   "name": "@quiver-dsp/wasm",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Quiver modular synthesizer WASM bindings and AudioWorklet helpers",
   "type": "module",
   "main": "dist/index.js",

@@ -413,8 +413,22 @@ impl PortValues {
     }
 
     /// Iterate the ports that currently hold a value, in slot order.
+    ///
+    /// This is the public read path that replaces the `pub values` field removed in 0.2.0
+    /// (see the crate changelog). Unlike iterating that `HashMap` it is **deterministic**:
+    /// ports come back in first-write order — for a container warmed by a module's
+    /// [`PortSpec`], that is spec order — rather than in hash order.
+    ///
+    /// ```
+    /// use quiver::port::PortValues;
+    ///
+    /// let mut pv = PortValues::new();
+    /// pv.set(7, 1.5);
+    /// pv.set(3, -2.0);
+    /// assert_eq!(pv.iter().collect::<Vec<_>>(), vec![(7, 1.5), (3, -2.0)]);
+    /// ```
     #[inline]
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (PortId, f64)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (PortId, f64)> + '_ {
         self.ids
             .iter()
             .zip(self.values.iter())

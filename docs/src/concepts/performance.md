@@ -144,7 +144,7 @@ flowchart LR
 ```toml
 # Cargo.toml
 [dependencies]
-quiver-dsp = { version = "0.1", features = ["simd"] }
+quiver-dsp = { version = "0.2", features = ["simd"] }
 ```
 
 ### SIMD Operations
