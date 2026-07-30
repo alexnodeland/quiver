@@ -651,6 +651,13 @@ pub struct Patch {
     modules: Vec<Box<dyn GraphModule>>,
     cables: Vec<Cable>,
 
+    /// Output ports that must be produced even when no cable reads them, so
+    /// [`get_output_value`](Patch::get_output_value) can meter them. Folded into
+    /// [`consumed_output_mask`](Patch::consumed_output_mask) at compile time. Empty for a
+    /// patch that never calls [`keep_output_live`](Patch::keep_output_live), which is why
+    /// the default masks (and therefore the rendered samples) are unaffected.
+    kept_live_outputs: Vec<PortRef>,
+
     // Monotonic source of stable CableIds (never reused)
     next_cable_id: CableId,
 
@@ -686,6 +693,7 @@ impl Patch {
             nodes: SlotMap::new(),
             modules: Vec::new(),
             cables: Vec::new(),
+            kept_live_outputs: Vec::new(),
             next_cable_id: 0,
             execution_order: Vec::new(),
             routing: Routing::default(),
@@ -802,12 +810,107 @@ impl Patch {
         self.cables
             .retain(|cable| cable.from.node != node && cable.to.node != node);
 
+        // Drop any keep-alive requests for ports that no longer exist. NodeIds are not
+        // reused by the slotmap, but leaving stale entries would grow the list without
+        // bound in a long-lived editor session.
+        self.kept_live_outputs.retain(|port| port.node != node);
+
         if self.output_node == Some(node) {
             self.output_node = None;
         }
 
         self.invalidate();
         Ok(())
+    }
+
+    /// Force `port` to be produced on every sample even when no cable reads it.
+    ///
+    /// A module that opts into [`GraphModule::tick_masked`] (`Vco`, `Lfo`,
+    /// `NoiseGenerator`) is told at compile time which of its outputs the patch consumes
+    /// and may skip producing the rest, whose routing-buffer slots then keep their
+    /// initial `0.0`. That is invisible to the audio the patch renders, but it *is* visible
+    /// to [`get_output_value`](Self::get_output_value), and therefore to metering: a scope
+    /// or level meter on an unpatched `vco.sin` would read a flat zero.
+    ///
+    /// Marking a port live puts its bit back in the mask, so the module produces it exactly
+    /// as it would if a cable were attached — same code path, same values, bit for bit.
+    /// The port still feeds nothing, so the rendered output is unchanged; the only cost is
+    /// the skipped work being done again.
+    ///
+    /// Returns `true` if this newly marked the port (a repeat call is a no-op). Marking
+    /// marks the patch dirty, so the next [`tick`](Self::tick) recompiles with the wider
+    /// mask; call it outside the audio callback.
+    ///
+    /// `StateObserver::sync_output_keepalive` (with the `alloc` feature) applies this to
+    /// every port a subscription bus meters, which is what the WASM `Engine` uses to keep
+    /// `Engine.subscribe` working on unpatched ports.
+    ///
+    /// ```
+    /// use quiver::prelude::*;
+    ///
+    /// let mut patch = Patch::new(44100.0);
+    /// let vco = patch.add("vco", Vco::new(44100.0));
+    /// let out = patch.add("out", StereoOutput::new());
+    /// patch.connect(vco.out("saw"), out.in_("left")).unwrap();
+    /// patch.set_output(out.id());
+    ///
+    /// // `tri` (port 11) has no consumer, so it is not produced...
+    /// patch.compile().unwrap();
+    /// for _ in 0..64 {
+    ///     patch.tick();
+    /// }
+    /// assert_eq!(patch.get_output_value(vco.id(), 11), Some(0.0));
+    ///
+    /// // ...until it is kept live for metering.
+    /// assert!(patch.keep_output_live(vco.id(), 11));
+    /// patch.compile().unwrap();
+    /// let mut moved = false;
+    /// for _ in 0..64 {
+    ///     patch.tick();
+    ///     moved |= patch.get_output_value(vco.id(), 11) != Some(0.0);
+    /// }
+    /// assert!(moved);
+    /// ```
+    pub fn keep_output_live(&mut self, node: NodeId, port: PortId) -> bool {
+        let port_ref = PortRef { node, port };
+        if self.kept_live_outputs.contains(&port_ref) {
+            return false;
+        }
+        self.kept_live_outputs.push(port_ref);
+        // Only the compiled mask changes, so the existing routing stays readable until the
+        // next compile; no need for the buffer-dropping `invalidate`.
+        self.dirty = true;
+        true
+    }
+
+    /// Undo a [`keep_output_live`](Self::keep_output_live). Returns `true` if the port was
+    /// marked. Marks the patch dirty when it was.
+    pub fn release_output_live(&mut self, node: NodeId, port: PortId) -> bool {
+        let port_ref = PortRef { node, port };
+        let before = self.kept_live_outputs.len();
+        self.kept_live_outputs.retain(|kept| *kept != port_ref);
+        let removed = self.kept_live_outputs.len() != before;
+        if removed {
+            self.dirty = true;
+        }
+        removed
+    }
+
+    /// Drop every [`keep_output_live`](Self::keep_output_live) request. Returns `true` if
+    /// there was anything to drop. Marks the patch dirty when there was.
+    pub fn clear_kept_live_outputs(&mut self) -> bool {
+        if self.kept_live_outputs.is_empty() {
+            return false;
+        }
+        self.kept_live_outputs.clear();
+        self.dirty = true;
+        true
+    }
+
+    /// The output ports currently held live by [`keep_output_live`](Self::keep_output_live),
+    /// in the order they were marked.
+    pub fn kept_live_outputs(&self) -> &[PortRef] {
+        &self.kept_live_outputs
     }
 
     /// Allocate the next stable cable id.
@@ -1143,7 +1246,8 @@ impl Patch {
 
     /// Which of `node`'s outputs (in [`PortSpec`] order) anything in the patch reads.
     ///
-    /// An output is consumed when a cable leaves it, or when it belongs to the patch's
+    /// An output is consumed when a cable leaves it, when it has been pinned by
+    /// [`keep_output_live`](Self::keep_output_live), or when it belongs to the patch's
     /// output node — [`Routing::read_output`] reads that node's first two output slots, and
     /// the whole spec is marked rather than just those two so a later change to
     /// `set_output` semantics cannot silently blank a port. Everything else is dead for this
@@ -1155,7 +1259,8 @@ impl Patch {
     /// A dead output's [`Routing::out_buf`] slot then keeps whatever it last held, so
     /// [`get_output_value`](Self::get_output_value) on an *unpatched* output of a mask-aware
     /// module (`Vco`, `Lfo`, `NoiseGenerator`) reports its initial `0.0` rather than a live
-    /// sample. Patch the port — or tick the module directly — if you need to meter it.
+    /// sample. Patch the port, pin it with [`keep_output_live`](Self::keep_output_live), or
+    /// tick the module directly if you need to meter it.
     fn consumed_output_mask(&self, node: NodeId, out_ids: &[PortId]) -> u32 {
         if out_ids.len() > u32::BITS as usize || self.output_node == Some(node) {
             return u32::MAX;
@@ -1163,7 +1268,9 @@ impl Patch {
         let mut wanted = 0u32;
         for (k, &port) in out_ids.iter().enumerate() {
             let port_ref = PortRef { node, port };
-            if self.cables.iter().any(|cable| cable.from == port_ref) {
+            let consumed = self.cables.iter().any(|cable| cable.from == port_ref)
+                || self.kept_live_outputs.contains(&port_ref);
+            if consumed {
                 wanted |= 1 << k;
             }
         }
@@ -1585,9 +1692,13 @@ impl Patch {
     /// A module that implements [`GraphModule::tick_masked`] (`Vco`, `Lfo`,
     /// `NoiseGenerator`) is told which of its outputs the compiled patch reads and may skip
     /// producing the rest, whose routing slots then keep their initial `0.0`. Metering such
-    /// a port therefore requires that something in the patch consume it — patch it
-    /// somewhere, or tick the module directly. Every port of every other module, and every
-    /// *patched* port, reports live values as before.
+    /// a port therefore requires that something in the patch consume it: patch it
+    /// somewhere, or pin it with [`keep_output_live`](Self::keep_output_live), which forces
+    /// the module to produce it for exactly this reason. Every port of every other module,
+    /// and every *patched* port, reports live values as before.
+    ///
+    /// `StateObserver::sync_output_keepalive` (with the `alloc` feature) does the pinning
+    /// for a whole subscription bus in one call.
     pub fn get_output_value(&self, node: NodeId, port: PortId) -> Option<f64> {
         self.routing
             .out_slot_index

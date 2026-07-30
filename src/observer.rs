@@ -22,6 +22,7 @@ use core::f64::consts::PI;
 use serde::{Deserialize, Serialize};
 
 use crate::graph::NodeId;
+use crate::port::PortId;
 
 // =============================================================================
 // Observable Value Types
@@ -375,6 +376,48 @@ impl StateObserver {
     /// Check if a target is subscribed
     pub fn is_subscribed(&self, target: &SubscriptionTarget) -> bool {
         self.subscriptions.iter().any(|s| s.id() == target.id())
+    }
+
+    /// The `(node name, output port)` pairs this bus reads from the patch, in subscription
+    /// order. `Param` subscriptions are not port reads and are skipped.
+    pub fn metered_ports(&self) -> impl Iterator<Item = (&str, PortId)> + '_ {
+        self.subscriptions.iter().filter_map(|target| match target {
+            SubscriptionTarget::Level { node_id, port_id }
+            | SubscriptionTarget::Gate { node_id, port_id }
+            | SubscriptionTarget::Scope {
+                node_id, port_id, ..
+            }
+            | SubscriptionTarget::Spectrum {
+                node_id, port_id, ..
+            } => Some((node_id.as_str(), *port_id)),
+            SubscriptionTarget::Param { .. } => None,
+        })
+    }
+
+    /// Pin every port this bus meters live in `patch`, so metering still works on ports no
+    /// cable reads.
+    ///
+    /// A module that implements [`GraphModule::tick_masked`](crate::port::GraphModule::tick_masked)
+    /// (`Vco`, `Lfo`, `NoiseGenerator`) may skip producing an output nothing consumes, and
+    /// [`Patch::get_output_value`](crate::graph::Patch::get_output_value) — which
+    /// [`collect_sample`](Self::collect_sample) reads — then reports that port's initial
+    /// `0.0` forever. Calling this after changing subscriptions restores live values for
+    /// them, at the cost of computing the pinned outputs again.
+    ///
+    /// This **replaces** the patch's kept-live set with exactly the ports this bus meters
+    /// (via [`Patch::clear_kept_live_outputs`](crate::graph::Patch::clear_kept_live_outputs)
+    /// then [`keep_output_live`](crate::graph::Patch::keep_output_live)), so the bus owns
+    /// that set; re-apply any hand-pinned ports afterwards. Subscriptions naming a node the
+    /// patch does not (yet) have are skipped, so call it again once the node exists.
+    ///
+    /// Marking dirties the patch — call it outside the audio callback, never per block.
+    pub fn sync_output_keepalive(&self, patch: &mut crate::graph::Patch) {
+        patch.clear_kept_live_outputs();
+        for (node_name, port_id) in self.metered_ports() {
+            if let Some(node_id) = patch.get_node_id_by_name(node_name) {
+                patch.keep_output_live(node_id, port_id);
+            }
+        }
     }
 
     /// Push an update directly into the pending queue (if subscribed).

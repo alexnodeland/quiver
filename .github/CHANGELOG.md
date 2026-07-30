@@ -28,6 +28,28 @@ below are both **API** breaks, not numeric ones.
     `PortValues { values }` by struct literal becomes `PortValues::new()` plus one
     `set()` per port.
 
+- **Mask-aware modules may skip outputs nothing reads.** `GraphModule` gains a defaulted
+  `tick_masked(inputs, outputs, wanted: u32)`; the compiled patch tells each module which
+  of its outputs anything consumes, and `Vco`, `Lfo`, and `NoiseGenerator` — the only
+  three modules that opt in; every other module is unaffected — skip producing the rest.
+  - *Consequence*: an output of one of those three modules that has **no cable leaving
+    it** is never written into the routing buffer, so `Patch::get_output_value` — and
+    with it `StateObserver` / the WASM `Engine.subscribe` metering targets (Level, Gate,
+    Scope, Spectrum) — reads a flat `0.0` for it instead of a live sample. Concretely: a
+    scope or meter on an unpatched `vco.sin` / `vco.tri` / `vco.sqr`, `lfo.*`, or
+    `noise.pink` goes silent. Patched ports, and every port of every other module, are
+    unchanged. **Rendered audio is bit-identical either way** — see
+    `tests/golden_vectors.rs`.
+  - *Opt-out*: `Patch::keep_output_live(node, port)` pins a port so it is produced whether
+    or not a cable reads it (`release_output_live` / `clear_kept_live_outputs` /
+    `kept_live_outputs` round it out). `StateObserver::sync_output_keepalive(&mut patch)`
+    applies the pin to every port a bus meters, and the WASM `Engine` calls it
+    automatically from `subscribe`, `unsubscribe`, `clear_subscriptions`, and `compile` —
+    so **JS metering of an unpatched port keeps working with no code change**. Native
+    callers that meter through `StateObserver` should add one
+    `observer.sync_output_keepalive(&mut patch)` after changing subscriptions; callers
+    that call `get_output_value` directly should pin the ports they read.
+
 ### Performance
 
 - Normalled inputs resolve from a precompiled list instead of a blanket per-input probe.
@@ -35,6 +57,7 @@ below are both **API** breaks, not numeric ones.
 - Modules are stored and walked in execution order, so the per-sample loop zips the
   routing plan against the module list instead of resolving a slotmap key per node per
   sample; cable attenuation/offset are baked to plain `f64` at compile time.
+- Outputs nothing consumes are not computed (above).
 
 ### Added
 

@@ -159,7 +159,8 @@ fn noise_white_is_unaffected_by_masking_the_other_outputs() {
 /// The mask is really in force in a compiled patch — without this the equivalence test
 /// below could pass vacuously — and this is what that costs: an unread output's routing
 /// slot is never written, so `get_output_value` reports its initial `0.0` instead of a live
-/// sample. Metering an unpatched port of a mask-aware module requires patching it.
+/// sample. Metering an unpatched port of a mask-aware module requires patching it, or
+/// pinning it with `keep_output_live` (see the tests that follow).
 #[test]
 fn unread_outputs_are_not_produced_into_the_routing_buffer() {
     let mut patch = Patch::new(SAMPLE_RATE);
@@ -217,4 +218,167 @@ fn graph_render_matches_when_unread_outputs_are_also_patched() {
         render(true),
         "the consumed port changed depending on whether its siblings were also consumed"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The escape hatch: `Patch::keep_output_live` re-enables an unread output for metering.
+// ---------------------------------------------------------------------------
+
+/// Build the reference patch (VCO saw -> output) and run it for `frames`, returning the
+/// left channel's bits and the per-sample values of the VCO's `tri` port (11), which no
+/// cable ever reads. `pin_tri` decides whether `tri` is pinned live.
+fn saw_patch_trace(pin_tri: bool, frames: usize) -> (Vec<u64>, Vec<Option<f64>>) {
+    let mut patch = Patch::new(SAMPLE_RATE);
+    let vco = patch.add("vco", Vco::new(SAMPLE_RATE));
+    let out = patch.add("out", StereoOutput::new());
+    patch.connect(vco.out("saw"), out.in_("left")).unwrap();
+    patch.set_output(out.id());
+    if pin_tri {
+        assert!(patch.keep_output_live(vco.id(), 11));
+    }
+    patch.compile().unwrap();
+
+    let mut left = Vec::with_capacity(frames);
+    let mut tri = Vec::with_capacity(frames);
+    for _ in 0..frames {
+        let (l, _) = patch.tick();
+        left.push(l.to_bits());
+        tri.push(patch.get_output_value(vco.id(), 11));
+    }
+    (left, tri)
+}
+
+/// Pinning a port nobody patches puts it back in the mask, so metering it reads live audio
+/// again instead of the flat `0.0` the test above pins down.
+#[test]
+fn keep_output_live_restores_metering_of_an_unpatched_output() {
+    let (_, tri) = saw_patch_trace(true, 1024);
+    assert!(
+        tri.iter().all(Option::is_some),
+        "a pinned port must be present in the routing buffer on every sample"
+    );
+    assert!(
+        tri.iter().any(|v| *v != Some(0.0)),
+        "a pinned tri output should be live, not stuck at its initial 0.0"
+    );
+}
+
+/// ...and doing so must not perturb a single sample of what the patch renders. The pinned
+/// port feeds nothing, and producing it is the same code path the module would take if a
+/// cable were attached, so the audio is bit-identical.
+#[test]
+fn keep_output_live_does_not_change_the_rendered_output() {
+    let (unpinned, _) = saw_patch_trace(false, FRAMES);
+    let (pinned, _) = saw_patch_trace(true, FRAMES);
+    assert_eq!(
+        unpinned, pinned,
+        "keeping an unread output live changed the rendered signal"
+    );
+}
+
+/// The pin is releasable, and releasing it returns the port to the dead set on the next
+/// compile. Repeat marks and repeat releases are no-ops.
+#[test]
+fn release_output_live_returns_the_port_to_the_dead_set() {
+    let mut patch = Patch::new(SAMPLE_RATE);
+    let vco = patch.add("vco", Vco::new(SAMPLE_RATE));
+    let out = patch.add("out", StereoOutput::new());
+    patch.connect(vco.out("saw"), out.in_("left")).unwrap();
+    patch.set_output(out.id());
+
+    assert!(patch.keep_output_live(vco.id(), 11));
+    assert!(
+        !patch.keep_output_live(vco.id(), 11),
+        "marking is idempotent"
+    );
+    assert_eq!(patch.kept_live_outputs().len(), 1);
+    patch.compile().unwrap();
+    for _ in 0..256 {
+        patch.tick();
+    }
+    let live = patch.get_output_value(vco.id(), 11);
+
+    assert!(patch.release_output_live(vco.id(), 11));
+    assert!(
+        !patch.release_output_live(vco.id(), 11),
+        "releasing twice is a no-op"
+    );
+    assert!(patch.kept_live_outputs().is_empty());
+    patch.compile().unwrap();
+    for _ in 0..256 {
+        patch.tick();
+    }
+
+    assert_ne!(
+        live,
+        Some(0.0),
+        "the pinned port should have been live before release"
+    );
+    assert_eq!(
+        patch.get_output_value(vco.id(), 11),
+        Some(0.0),
+        "after release the port is dead again (compile zeroed the routing buffer)"
+    );
+    assert!(!patch.clear_kept_live_outputs(), "nothing left to clear");
+}
+
+/// Removing a node drops its pins, so a long-lived editor session cannot accumulate
+/// keep-alive entries for nodes that no longer exist.
+#[test]
+fn removing_a_node_drops_its_keep_alive_entries() {
+    let mut patch = Patch::new(SAMPLE_RATE);
+    let vco = patch.add("vco", Vco::new(SAMPLE_RATE));
+    let lfo = patch.add("lfo", Lfo::new(SAMPLE_RATE));
+    assert!(patch.keep_output_live(vco.id(), 11));
+    assert!(patch.keep_output_live(lfo.id(), 11));
+    assert_eq!(patch.kept_live_outputs().len(), 2);
+
+    patch.remove(vco.id()).unwrap();
+    assert_eq!(patch.kept_live_outputs().len(), 1);
+    assert_eq!(patch.kept_live_outputs()[0].node, lfo.id());
+}
+
+/// The observer applies the pin for every port it meters, which is what keeps
+/// `Engine.subscribe` reporting live values for an unpatched port. Without the sync the
+/// subscription reads a flat zero.
+#[test]
+fn observer_keepalive_makes_an_unsubscribed_port_meterable() {
+    use quiver::observer::{StateObserver, SubscriptionTarget};
+
+    let mut patch = Patch::new(SAMPLE_RATE);
+    let vco = patch.add("vco", Vco::new(SAMPLE_RATE));
+    let out = patch.add("out", StereoOutput::new());
+    patch.connect(vco.out("saw"), out.in_("left")).unwrap();
+    patch.set_output(out.id());
+
+    let mut observer = StateObserver::new();
+    observer.add_subscriptions(vec![
+        // Metering an unpatched port of a mask-aware module...
+        SubscriptionTarget::Level {
+            node_id: "vco".into(),
+            port_id: 11,
+        },
+        // ...and a Param target, which names no port and must be skipped.
+        SubscriptionTarget::Param {
+            node_id: "vco".into(),
+            param_id: "waveform".into(),
+        },
+    ]);
+    assert_eq!(observer.metered_ports().count(), 1);
+
+    observer.sync_output_keepalive(&mut patch);
+    assert_eq!(patch.kept_live_outputs().len(), 1);
+    patch.compile().unwrap();
+
+    let mut moved = false;
+    for _ in 0..1024 {
+        patch.tick();
+        moved |= patch.get_output_value(vco.id(), 11) != Some(0.0);
+    }
+    assert!(moved, "the metered port should be live after the sync");
+
+    // Dropping the subscription releases the pin on the next sync.
+    observer.clear_subscriptions();
+    observer.sync_output_keepalive(&mut patch);
+    assert!(patch.kept_live_outputs().is_empty());
 }

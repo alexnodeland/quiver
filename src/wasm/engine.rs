@@ -476,6 +476,7 @@ impl QuiverEngine {
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         self.observer.add_subscriptions(targets);
+        self.sync_metering_keepalive();
         Ok(())
     }
 
@@ -485,12 +486,14 @@ impl QuiverEngine {
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         self.observer.remove_subscriptions(&ids);
+        self.sync_metering_keepalive();
         Ok(())
     }
 
     /// Clear all subscriptions
     pub fn clear_subscriptions(&mut self) {
         self.observer.clear_subscriptions();
+        self.sync_metering_keepalive();
     }
 
     /// Poll for pending updates (called from requestAnimationFrame)
@@ -593,6 +596,11 @@ impl QuiverEngine {
 
     /// Compile the patch (required after adding/removing modules or cables)
     pub fn compile(&mut self) -> Result<(), JsValue> {
+        // Re-apply metering keep-alives first: a subscription can name a node that did not
+        // exist yet when `subscribe` ran (the usual JS order is subscribe-then-build), and
+        // an unresolved name is skipped rather than remembered. Doing it here means the
+        // mask that this compile bakes in already accounts for every live subscription.
+        self.sync_metering_keepalive();
         self.patch
             .compile()
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
@@ -843,6 +851,26 @@ impl QuiverEngine {
             .input(to_port)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok((from_ref, to_ref))
+    }
+}
+
+/// Non-exported engine internals (kept out of the `#[wasm_bindgen]` impl above so they
+/// generate no JS glue).
+impl QuiverEngine {
+    /// Pin every port the observer meters live in the patch.
+    ///
+    /// `Vco`, `Lfo`, and `NoiseGenerator` skip producing outputs no cable reads (see
+    /// [`Patch::keep_output_live`](crate::graph::Patch::keep_output_live)), which would
+    /// otherwise make `Engine.subscribe` report a flat `0.0` for a scope or meter on an
+    /// unpatched `vco.sin`/`lfo.tri`/`noise.pink`. Re-syncing on every subscription change
+    /// — and again in `compile`, since a subscription may name a node that does not exist
+    /// yet — keeps that JS-visible behavior exactly as it was before masking landed.
+    ///
+    /// Never called from the audio path: it dirties the patch, so the cost is one recompile
+    /// on subscription change, not per block.
+    fn sync_metering_keepalive(&mut self) {
+        // Disjoint field borrows: read the observer, mutate the patch.
+        self.observer.sync_output_keepalive(&mut self.patch);
     }
 }
 
