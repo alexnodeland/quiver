@@ -316,10 +316,29 @@ impl PortSpec {
     }
 }
 
-/// Runtime port values container
+/// Runtime port values container.
+///
+/// A small dense map from [`PortId`] to `f64`, laid out as two parallel vectors: `ids` in
+/// first-write order, and `values` where `None` means "not written since the last
+/// [`clear`](Self::clear)". Lookups are a linear scan of `ids`, which for the ≤ 8 ports a
+/// module declares is a handful of `u32` comparisons out of a single cache line — far
+/// cheaper than hashing a key, and with no per-key hashing on the audio path at all.
+///
+/// Two properties the graph engine relies on:
+///
+/// - **Slot order is stable.** [`clear`](Self::clear) blanks the values but *keeps* the id
+///   layout, so once a container has been warmed with a module's [`PortSpec`] order, slot
+///   `k` belongs to spec port `k` for the rest of its life. That is what lets
+///   `NodeExec::scatter` read outputs by index instead of by lookup.
+/// - **Unwritten is absent.** A port that a module never set reads back as `None` from
+///   [`get`](Self::get) and `false` from [`has`](Self::has), exactly as when this was a
+///   `HashMap` that simply had no such key.
 #[derive(Debug, Clone, Default)]
 pub struct PortValues {
-    pub values: StdMap<PortId, f64>,
+    /// Port ids in first-write order; slot `k` of `values` belongs to `ids[k]`.
+    ids: Vec<PortId>,
+    /// Value per slot, `None` when unwritten since the last [`clear`](PortValues::clear).
+    values: Vec<Option<f64>>,
 }
 
 impl PortValues {
@@ -327,29 +346,79 @@ impl PortValues {
         Self::default()
     }
 
+    /// Dense slot holding `id`, whether or not it currently holds a value.
+    #[inline]
+    fn slot_of(&self, id: PortId) -> Option<usize> {
+        self.ids.iter().position(|&candidate| candidate == id)
+    }
+
+    #[inline]
     pub fn get(&self, id: PortId) -> Option<f64> {
-        self.values.get(&id).copied()
+        self.slot_of(id).and_then(|k| self.values[k])
     }
 
+    #[inline]
     pub fn get_or(&self, id: PortId, default: f64) -> f64 {
-        self.values.get(&id).copied().unwrap_or(default)
+        self.get(id).unwrap_or(default)
     }
 
+    #[inline]
     pub fn set(&mut self, id: PortId, value: f64) {
-        self.values.insert(id, value);
+        match self.slot_of(id) {
+            Some(k) => self.values[k] = Some(value),
+            None => {
+                self.ids.push(id);
+                self.values.push(Some(value));
+            }
+        }
     }
 
     /// Accumulate (sum) a value into a port (for input mixing)
+    #[inline]
     pub fn accumulate(&mut self, id: PortId, value: f64) {
-        *self.values.entry(id).or_insert(0.0) += value;
+        // An absent port accumulates onto a fresh `0.0`, not onto `value` itself — which
+        // matters for signed zero: `0.0 + -0.0` is `+0.0`.
+        match self.slot_of(id) {
+            Some(k) => self.values[k] = Some(self.values[k].unwrap_or(0.0) + value),
+            None => {
+                self.ids.push(id);
+                self.values.push(Some(0.0 + value));
+            }
+        }
     }
 
+    #[inline]
     pub fn has(&self, id: PortId) -> bool {
-        self.values.contains_key(&id)
+        self.get(id).is_some()
     }
 
+    /// Forget every value, keeping the id layout (and its allocation) intact.
+    #[inline]
     pub fn clear(&mut self) {
-        self.values.clear();
+        self.values.fill(None);
+    }
+
+    /// Value at dense slot `slot`, which is expected to hold `id`.
+    ///
+    /// The fast path for callers that know the layout — the graph's scatter, whose scratch
+    /// buffers were warmed in [`PortSpec`] output order at compile time — turning a lookup
+    /// into an indexed read. Falls back to [`get`](Self::get) whenever the slot does not
+    /// hold the expected id, so the result is always identical to `get(id)`.
+    #[inline]
+    pub(crate) fn get_at(&self, slot: usize, id: PortId) -> Option<f64> {
+        match self.ids.get(slot) {
+            Some(&found) if found == id => self.values[slot],
+            _ => self.get(id),
+        }
+    }
+
+    /// Iterate the ports that currently hold a value, in slot order.
+    #[inline]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (PortId, f64)> + '_ {
+        self.ids
+            .iter()
+            .zip(self.values.iter())
+            .filter_map(|(&id, value)| value.map(|v| (id, v)))
     }
 }
 
@@ -412,7 +481,7 @@ impl BlockPortValues {
     /// [`PortValues`] across every frame of a block instead of moving (and reallocating) one
     /// per frame.
     pub fn set_frame_ref(&mut self, index: usize, values: &PortValues) {
-        for (&port, &value) in &values.values {
+        for (port, value) in values.iter() {
             let buffer = self.get_buffer_mut(port);
             if index < buffer.len() {
                 buffer[index] = value;
@@ -715,6 +784,53 @@ mod tests {
 
         pv.accumulate(0, 0.5);
         assert_eq!(pv.get(0), Some(1.5));
+    }
+
+    /// `clear` must forget values without forgetting the slot layout, and an unwritten port
+    /// must read back as absent — the two properties the graph engine's scratch buffers and
+    /// "unwritten output keeps its previous routing value" rule are built on.
+    #[test]
+    fn test_port_values_clear_keeps_layout_and_absence() {
+        let mut pv = PortValues::new();
+        pv.set(7, 1.0);
+        pv.set(3, 2.0);
+
+        pv.clear();
+        assert!(!pv.has(7));
+        assert!(!pv.has(3));
+        assert_eq!(pv.get(7), None);
+        assert_eq!(pv.get_or(3, -1.0), -1.0);
+        assert_eq!(pv.iter().count(), 0);
+
+        // Rewriting one port leaves the other absent, and slot order is unchanged.
+        pv.set(3, 4.0);
+        assert_eq!(pv.get_at(1, 3), Some(4.0));
+        assert_eq!(pv.get(7), None);
+        assert_eq!(pv.iter().collect::<Vec<_>>(), vec![(3, 4.0)]);
+    }
+
+    /// `get_at` is a hint, never a source of truth: a wrong slot still resolves through the
+    /// normal lookup, so it can never disagree with `get`.
+    #[test]
+    fn test_port_values_get_at_falls_back_to_lookup() {
+        let mut pv = PortValues::new();
+        pv.set(10, 1.0);
+        pv.set(11, 2.0);
+
+        assert_eq!(pv.get_at(0, 10), Some(1.0));
+        // Mismatched slot, out-of-range slot, and unknown id all agree with `get`.
+        assert_eq!(pv.get_at(1, 10), Some(1.0));
+        assert_eq!(pv.get_at(99, 11), Some(2.0));
+        assert_eq!(pv.get_at(0, 12), None);
+    }
+
+    /// Accumulating onto an absent port starts from `+0.0`, so a `-0.0` contribution does
+    /// not leave a negative zero behind (matching the previous entry-API implementation).
+    #[test]
+    fn test_port_values_accumulate_from_absent_normalizes_signed_zero() {
+        let mut pv = PortValues::new();
+        pv.accumulate(0, -0.0);
+        assert_eq!(pv.get(0).map(f64::to_bits), Some(0.0f64.to_bits()));
     }
 
     #[test]

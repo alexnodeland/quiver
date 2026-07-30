@@ -489,9 +489,16 @@ impl NodeExec {
     /// *other* modules' recursive state through the routing buffers. Per-module input
     /// sanitization (Q160) still matters for a module's own state; this is the
     /// graph-level containment boundary.
+    ///
+    /// `src` is this node's scratch output buffer, warmed at compile time in [`PortSpec`]
+    /// output order — the same order as `out_ids` and as the `out_buf` window starting at
+    /// `out_base`. Slot `k` therefore lines up on both sides and the copy is an indexed
+    /// walk rather than a per-port lookup ([`PortValues::get_at`] re-checks the id and
+    /// falls back to a lookup if a module ever wrote an off-spec port, so the result is
+    /// identical either way).
     fn scatter(&self, src: &PortValues, out_buf: &mut [f64]) {
         for (k, &port_id) in self.out_ids.iter().enumerate() {
-            if let Some(value) = src.get(port_id) {
+            if let Some(value) = src.get_at(k, port_id) {
                 out_buf[self.out_base + k] = flush_denorm(sanitize_audio(value));
             }
         }
