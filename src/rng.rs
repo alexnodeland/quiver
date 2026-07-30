@@ -75,16 +75,30 @@ impl Rng {
     }
 
     /// Create a new RNG seeded from system time (std only).
+    ///
+    /// Q200: on `wasm32-unknown-unknown`, `SystemTime::now()` panics ("time
+    /// not implemented"), and this constructor runs lazily inside the
+    /// thread-local `RNG_STATE` initializer — so with the `std` feature, ANY
+    /// first touch of the global RNG (including `rng::seed(..)` itself) would
+    /// bring down a wasm module. Fall back to a fixed seed there; wasm callers
+    /// wanting entropy should call [`seed`](crate::rng::seed) explicitly.
     #[cfg(feature = "std")]
     pub fn from_system_time() -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::time::{SystemTime, UNIX_EPOCH};
 
-        let duration = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
+            let duration = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
 
-        let seed = duration.as_nanos() as u64;
-        Self::from_seed(seed)
+            let seed = duration.as_nanos() as u64;
+            Self::from_seed(seed)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::from_seed(0x5EED_0F_3A5D_0000)
+        }
     }
 
     /// Generate the next u64 value.
