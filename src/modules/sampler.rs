@@ -10,7 +10,7 @@
 //! relies on the crate's unconditional `extern crate alloc`, so it compiles in
 //! pure `no_std` as well as `alloc`/`std`.
 
-use super::common::{EdgeDetector, GATE_HIGH_V, GATE_THRESHOLD_V};
+use super::common::{EdgeDetector, Memo, GATE_HIGH_V, GATE_THRESHOLD_V};
 use crate::port::{
     GraphModule, ModulatedParam, ParamRange, PortDef, PortSpec, PortValues, SignalKind,
 };
@@ -52,6 +52,11 @@ pub struct SamplePlayer {
     pitch: ModulatedParam,
     /// Start-position read path (normalized 0..1).
     start: ModulatedParam,
+    /// Memoized playback-rate multiplier `2^voct` (one `pow` per sample while
+    /// the pitch is static). Keyed on every varying field feeding
+    /// `pitch.value()` (`base`, `cv`, `attenuverter`; the range mapping is
+    /// fixed at construction), so any pitch change misses correctly.
+    rate_memo: Memo<3, f64>,
     spec: PortSpec,
 }
 
@@ -78,6 +83,7 @@ impl SamplePlayer {
             gate_edge: EdgeDetector::new(),
             pitch: ModulatedParam::new(ParamRange::VoltPerOctave { base_freq: 1.0 }),
             start: ModulatedParam::new(ParamRange::Linear { min: 0.0, max: 1.0 }).with_base(0.0),
+            rate_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "trig", SignalKind::Trigger),
@@ -198,9 +204,13 @@ impl GraphModule for SamplePlayer {
         self.start.set_cv(start_cv);
 
         // Coarse V/Oct pitch drives the base of the pitch ModulatedParam; its value
-        // is the playback-rate multiplier 2^voct.
+        // is the playback-rate multiplier 2^voct, memoized on the pitch inputs
+        // (bit-exact miss path).
         self.pitch.base = voct;
-        let rate_mult = self.pitch.value();
+        let pitch = &self.pitch;
+        let rate_mult = self
+            .rate_memo
+            .get_or_compute([pitch.base, pitch.cv, pitch.attenuverter], || pitch.value());
 
         let len = self.buffer.len();
         let mut eos = 0.0;

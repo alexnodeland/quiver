@@ -158,6 +158,87 @@ pub fn polyblamp(t: f64, dt: f64) -> f64 {
     }
 }
 
+/// Bit-exact memo for a pure "inputs → derived coefficients" computation.
+///
+/// Module `tick()` implementations derive coefficients from their parameter
+/// inputs with transcendental math (cv→Hz maps, filter prewarp, envelope time
+/// maps) every sample, even though in a typical patch those inputs are wired to
+/// constants. `Memo` caches the last derived value and recomputes only when a
+/// key changes, comparing keys by **bit pattern**:
+///
+/// - On a miss the caller's closure runs *exactly* the original computation, so
+///   a hit returns bit-for-bit the value a recompute would produce for the same
+///   key bits. Memoization is observationally invisible except in CPU time
+///   (the downstream determinism contract — bit-identical samples — holds).
+/// - Bit comparison makes `+0.0`/`-0.0` distinct keys (conservative: at worst
+///   an extra recompute, never a wrong hit) and lets a NaN key hit against an
+///   identical NaN (a recompute from the same NaN bits would return the same
+///   value bits).
+/// - The initial state matches no key (explicit `valid` flag), so the first
+///   call always computes.
+///
+/// If the derived value depends on the sample rate, include the sample rate as
+/// one of the keys; a `set_sample_rate` change then misses naturally, with no
+/// per-module invalidation hook to forget. `reset()` intentionally does *not*
+/// clear memos: the cached values are input-derived, not audio state.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Memo<const N: usize, V> {
+    /// Bit patterns of the key inputs from the last recompute.
+    keys: [u64; N],
+    /// Cached derived value from the last recompute.
+    val: V,
+    /// Whether `keys`/`val` hold a real computation (false until first use).
+    valid: bool,
+    /// Number of misses (recomputes) performed, for cache-behavior tests.
+    #[cfg(test)]
+    recomputes: u64,
+}
+
+impl<const N: usize, V: Copy> Memo<N, V> {
+    /// Create an empty memo. `placeholder` is never observable: the `valid`
+    /// flag forces the first call to recompute.
+    pub(crate) fn new(placeholder: V) -> Self {
+        Self {
+            keys: [0; N],
+            val: placeholder,
+            valid: false,
+            #[cfg(test)]
+            recomputes: 0,
+        }
+    }
+
+    /// Return the cached value if `keys` bit-match the previous call, otherwise
+    /// run `compute`, cache its result under `keys`, and return it.
+    #[inline]
+    pub(crate) fn get_or_compute(&mut self, keys: [f64; N], compute: impl FnOnce() -> V) -> V {
+        let bits = keys.map(f64::to_bits);
+        if !self.valid || bits != self.keys {
+            self.val = compute();
+            self.keys = bits;
+            self.valid = true;
+            #[cfg(test)]
+            {
+                self.recomputes += 1;
+            }
+        }
+        self.val
+    }
+
+    /// Force the next call to recompute. Test hook: ticking a module with its
+    /// memos invalidated every sample executes the pre-memoization code path,
+    /// which equivalence tests compare bitwise against the memoized path.
+    #[cfg(test)]
+    pub(crate) fn invalidate(&mut self) {
+        self.valid = false;
+    }
+
+    /// Number of recomputes performed so far (cache-behavior tests).
+    #[cfg(test)]
+    pub(crate) fn recompute_count(&self) -> u64 {
+        self.recomputes
+    }
+}
+
 /// Rising-edge detector for gate/trigger/clock signals.
 ///
 /// Tracks the previous sample and reports a rising edge when the signal crosses
@@ -241,4 +322,63 @@ where
         max_abs = max_abs.max(out.abs());
     }
     max_abs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Memo;
+
+    #[test]
+    fn test_memo_first_call_always_computes() {
+        let mut memo: Memo<1, f64> = Memo::new(123.456);
+        // The placeholder must never be observable, even if the first key's
+        // bits happen to equal the zeroed initial key state.
+        let v = memo.get_or_compute([0.0], || 7.0);
+        assert_eq!(v.to_bits(), 7.0f64.to_bits());
+        assert_eq!(memo.recompute_count(), 1);
+    }
+
+    #[test]
+    fn test_memo_hit_and_miss() {
+        let mut memo: Memo<2, f64> = Memo::new(0.0);
+        let v1 = memo.get_or_compute([1.0, 2.0], || 3.0);
+        let v2 = memo.get_or_compute([1.0, 2.0], || unreachable!("must hit"));
+        assert_eq!(v1.to_bits(), v2.to_bits());
+        assert_eq!(memo.recompute_count(), 1);
+
+        let v3 = memo.get_or_compute([1.0, 2.5], || 4.0);
+        assert_eq!(v3.to_bits(), 4.0f64.to_bits());
+        assert_eq!(memo.recompute_count(), 2);
+    }
+
+    #[test]
+    fn test_memo_signed_zero_keys_are_distinct() {
+        // Bit comparison: -0.0 and +0.0 must not alias (conservative miss).
+        let mut memo: Memo<1, f64> = Memo::new(0.0);
+        memo.get_or_compute([0.0], || 1.0);
+        let v = memo.get_or_compute([-0.0], || 2.0);
+        assert_eq!(v.to_bits(), 2.0f64.to_bits());
+        assert_eq!(memo.recompute_count(), 2);
+    }
+
+    #[test]
+    fn test_memo_nan_key_hits_identical_nan() {
+        // A NaN key with identical bits may hit: a recompute from the same
+        // input bits would produce the same output bits (pure computation).
+        let mut memo: Memo<1, f64> = Memo::new(0.0);
+        let v1 = memo.get_or_compute([f64::NAN], || 9.0);
+        let v2 = memo.get_or_compute([f64::NAN], || unreachable!("must hit"));
+        assert_eq!(v1.to_bits(), v2.to_bits());
+        assert_eq!(memo.recompute_count(), 1);
+    }
+
+    #[test]
+    fn test_memo_invalidate_forces_recompute() {
+        let mut memo: Memo<1, f64> = Memo::new(0.0);
+        memo.get_or_compute([5.0], || 1.0);
+        memo.invalidate();
+        let v = memo.get_or_compute([5.0], || 2.0);
+        assert_eq!(v.to_bits(), 2.0f64.to_bits());
+        assert_eq!(memo.recompute_count(), 2);
+    }
 }

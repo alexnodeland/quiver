@@ -1,6 +1,6 @@
 //! Filter modules.
 
-use crate::modules::common::{flush_denorm, sanitize_audio};
+use crate::modules::common::{flush_denorm, sanitize_audio, Memo};
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use alloc::vec;
 use core::f64::consts::{PI, TAU};
@@ -28,6 +28,9 @@ pub struct Svf {
     /// Second trapezoidal integrator state (TPT `ic2eq`).
     ic2eq: f64,
     sample_rate: f64,
+    /// Memoized prewarped cutoff coefficient `g = tan(π·fc/fs)`: the pow/pow/tan
+    /// derivation only changes when the driving CVs (or sample rate) change.
+    g_memo: Memo<4, f64>,
     spec: PortSpec,
 }
 
@@ -61,6 +64,7 @@ impl Svf {
             ic1eq: 0.0,
             ic2eq: 0.0,
             sample_rate,
+            g_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -109,19 +113,27 @@ impl GraphModule for Svf {
         let keytrack_voct = inputs.get_or(4, 0.0);
         let keytrack_amt = inputs.get_or(5, 0.0).clamp(0.0, 1.0);
 
-        // Calculate base cutoff frequency
-        let base_cutoff_hz = 20.0 * Libm::<f64>::pow(1000.0, cutoff_cv.clamp(0.0, 1.0));
+        // Coefficient derivation memoized on its driving inputs (bit-exact: the
+        // miss path below is the original computation, unchanged and in order).
+        let sample_rate = self.sample_rate;
+        let g = self.g_memo.get_or_compute(
+            [cutoff_cv, keytrack_voct, keytrack_amt, sample_rate],
+            || {
+                // Calculate base cutoff frequency
+                let base_cutoff_hz = 20.0 * Libm::<f64>::pow(1000.0, cutoff_cv.clamp(0.0, 1.0));
 
-        // Apply keyboard tracking: each octave of V/Oct doubles the cutoff
-        let keytrack_multiplier = Libm::<f64>::pow(2.0, keytrack_voct * keytrack_amt);
-        let cutoff_hz = (base_cutoff_hz * keytrack_multiplier).clamp(20.0, 20000.0);
+                // Apply keyboard tracking: each octave of V/Oct doubles the cutoff
+                let keytrack_multiplier = Libm::<f64>::pow(2.0, keytrack_voct * keytrack_amt);
+                let cutoff_hz = (base_cutoff_hz * keytrack_multiplier).clamp(20.0, 20000.0);
 
-        // TPT prewarp: g = tan(π·fc/fs). Valid all the way toward Nyquist, so the
-        // cutoff stays correctly tuned across the whole advertised range. Clamp fc
-        // just below Nyquist (0.49·fs) so tan() never blows up near π/2.
-        let max_fc = 0.49 * self.sample_rate;
-        let fc = Libm::<f64>::fmin(cutoff_hz, max_fc);
-        let g = Libm::<f64>::tan(PI * fc / self.sample_rate);
+                // TPT prewarp: g = tan(π·fc/fs). Valid all the way toward Nyquist, so the
+                // cutoff stays correctly tuned across the whole advertised range. Clamp fc
+                // just below Nyquist (0.49·fs) so tan() never blows up near π/2.
+                let max_fc = 0.49 * sample_rate;
+                let fc = Libm::<f64>::fmin(cutoff_hz, max_fc);
+                Libm::<f64>::tan(PI * fc / sample_rate)
+            },
+        );
 
         // Damping k = 1/Q, parameterized as k = 2 - 2·res (res 0 → k=2 / Q=0.5,
         // res 1 → k≈0 / near-infinite Q). Floored strictly positive so the linear
@@ -187,6 +199,9 @@ pub struct DiodeLadderFilter {
     feedback: f64,
     /// Sample rate
     sample_rate: f64,
+    /// Memoized ZDF one-pole gain `big_g = g/(1+g)`: the pow/pow/tan derivation
+    /// only changes when the driving CVs (or sample rate) change.
+    big_g_memo: Memo<4, f64>,
     /// Port specification
     spec: PortSpec,
 }
@@ -197,6 +212,7 @@ impl DiodeLadderFilter {
             stages: [0.0; 4],
             feedback: 0.0,
             sample_rate,
+            big_g_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -281,20 +297,28 @@ impl GraphModule for DiodeLadderFilter {
         let keytrack_amt = inputs.get_or(5, 0.0).clamp(0.0, 1.0);
         let drive = inputs.get_or(6, 0.0).clamp(0.0, 1.0);
 
-        // Calculate base cutoff frequency (20 Hz - 20 kHz)
-        let base_cutoff_hz = 20.0 * Libm::<f64>::pow(1000.0, cutoff_cv.clamp(0.0, 1.0));
+        // Coefficient derivation memoized on its driving inputs (bit-exact: the
+        // miss path below is the original computation, unchanged and in order).
+        let sample_rate = self.sample_rate;
+        let big_g = self.big_g_memo.get_or_compute(
+            [cutoff_cv, keytrack_voct, keytrack_amt, sample_rate],
+            || {
+                // Calculate base cutoff frequency (20 Hz - 20 kHz)
+                let base_cutoff_hz = 20.0 * Libm::<f64>::pow(1000.0, cutoff_cv.clamp(0.0, 1.0));
 
-        // Apply keyboard tracking
-        let keytrack_multiplier = Libm::<f64>::pow(2.0, keytrack_voct * keytrack_amt);
-        let cutoff_hz = (base_cutoff_hz * keytrack_multiplier).clamp(20.0, 20000.0);
+                // Apply keyboard tracking
+                let keytrack_multiplier = Libm::<f64>::pow(2.0, keytrack_voct * keytrack_amt);
+                let cutoff_hz = (base_cutoff_hz * keytrack_multiplier).clamp(20.0, 20000.0);
 
-        // TPT prewarp: g = tan(π·fc/fs); big_g = g/(1+g) is the ZDF one-pole gain.
-        // Clamp fc just below Nyquist so tan() stays well-conditioned.
-        let max_fc = 0.49 * self.sample_rate;
-        let fc = Libm::<f64>::fmin(cutoff_hz, max_fc);
-        let wc = PI * fc / self.sample_rate;
-        let g = Libm::<f64>::tan(wc);
-        let big_g = g / (1.0 + g);
+                // TPT prewarp: g = tan(π·fc/fs); big_g = g/(1+g) is the ZDF one-pole gain.
+                // Clamp fc just below Nyquist so tan() stays well-conditioned.
+                let max_fc = 0.49 * sample_rate;
+                let fc = Libm::<f64>::fmin(cutoff_hz, max_fc);
+                let wc = PI * fc / sample_rate;
+                let g = Libm::<f64>::tan(wc);
+                g / (1.0 + g)
+            },
+        );
 
         // Resonance with self-oscillation capability
         // k = 4 for self-oscillation in 4-pole ladder
@@ -1380,5 +1404,104 @@ mod tests {
             (-13.0..=-9.0).contains(&cut_db),
             "mid -12dB cut: expected ~-12dB in-band, got {cut_db:.2}dB"
         );
+    }
+
+    // ---- Coefficient memoization (perf) ------------------------------------
+
+    /// Memoization must be observationally invisible: a filter whose memo is
+    /// invalidated before every tick executes the pre-memoization computation
+    /// every sample, and must agree bit-for-bit with the memoized filter over a
+    /// long render covering both constant and per-sample-modulated parameters.
+    #[test]
+    fn test_svf_memo_bit_identical() {
+        let mut memoized = Svf::new(44100.0);
+        let mut forced = Svf::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut out_m = PortValues::new();
+        let mut out_f = PortValues::new();
+
+        for n in 0..20_000u32 {
+            let t = n as f64;
+            inputs.set(0, Libm::<f64>::sin(t * 0.037) * 4.0);
+            if n < 10_000 {
+                // Constant parameters: the memo hits every sample.
+                inputs.set(1, 0.6);
+            } else {
+                // Sweep the cutoff CV every sample: the memo misses every sample.
+                inputs.set(1, 0.3 + 0.3 * Libm::<f64>::sin(t * 0.001));
+            }
+            inputs.set(2, 0.4);
+            inputs.set(4, 0.25);
+            inputs.set(5, 0.5);
+
+            memoized.tick(&inputs, &mut out_m);
+            forced.g_memo.invalidate();
+            forced.tick(&inputs, &mut out_f);
+
+            for &id in &[10u32, 11, 12, 13] {
+                assert_eq!(
+                    out_m.get(id).unwrap().to_bits(),
+                    out_f.get(id).unwrap().to_bits(),
+                    "SVF output {id} diverged at sample {n}"
+                );
+            }
+        }
+        // Sanity: the constant half must actually have been served from cache.
+        assert!(memoized.g_memo.recompute_count() <= 10_001);
+        assert_eq!(forced.g_memo.recompute_count(), 20_000);
+    }
+
+    /// Same equivalence for the diode ladder's memoized `big_g` derivation.
+    #[test]
+    fn test_diode_ladder_memo_bit_identical() {
+        let mut memoized = DiodeLadderFilter::new(44100.0);
+        let mut forced = DiodeLadderFilter::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut out_m = PortValues::new();
+        let mut out_f = PortValues::new();
+
+        for n in 0..10_000u32 {
+            let t = n as f64;
+            inputs.set(0, Libm::<f64>::sin(t * 0.041) * 4.0);
+            if n < 5_000 {
+                inputs.set(1, 0.5);
+            } else {
+                inputs.set(1, 0.4 + 0.2 * Libm::<f64>::sin(t * 0.002));
+            }
+            inputs.set(2, 0.8);
+            inputs.set(6, 0.5);
+
+            memoized.tick(&inputs, &mut out_m);
+            forced.big_g_memo.invalidate();
+            forced.tick(&inputs, &mut out_f);
+
+            for &id in &[10u32, 11, 12, 13] {
+                assert_eq!(
+                    out_m.get(id).unwrap().to_bits(),
+                    out_f.get(id).unwrap().to_bits(),
+                    "diode ladder output {id} diverged at sample {n}"
+                );
+            }
+        }
+        assert!(memoized.big_g_memo.recompute_count() <= 5_001);
+    }
+
+    /// With constant parameters the SVF coefficient block is computed exactly
+    /// once, and `set_sample_rate` (part of the key) forces a recompute.
+    #[test]
+    fn test_svf_memo_recompute_count() {
+        let mut svf = Svf::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 1.0);
+        inputs.set(1, 0.5);
+        for _ in 0..1000 {
+            svf.tick(&inputs, &mut outputs);
+        }
+        assert_eq!(svf.g_memo.recompute_count(), 1);
+
+        svf.set_sample_rate(48000.0);
+        svf.tick(&inputs, &mut outputs);
+        assert_eq!(svf.g_memo.recompute_count(), 2);
     }
 }
