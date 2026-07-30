@@ -163,9 +163,14 @@ pub struct Cable {
     pub offset: Option<f64>,
 }
 
-/// Internal node representation
+/// Internal node representation.
+///
+/// The module itself lives in [`Patch`]'s `modules` vector rather than here: `compile`
+/// permutes that vector into execution order, so the per-sample loop can walk it in lockstep
+/// with the routing plan instead of resolving a slotmap key for every node on every sample.
+/// `module_slot` is this node's index into it, kept in sync by `add`, `remove` and `compile`.
 struct Node {
-    module: Box<dyn GraphModule>,
+    module_slot: usize,
     name: String,
     position: Option<(f32, f32)>,
     /// Per-node overrides for the base (unpatched) value of control-input ports, keyed by
@@ -390,10 +395,12 @@ impl NodeHandle {
 struct InEdge {
     /// Dense index of the source output value in [`Routing::out_buf`].
     src_slot: usize,
-    /// Optional attenuation/gain applied to the source value (see [`Cable::attenuation`]).
-    attenuation: Option<f64>,
-    /// Optional DC offset applied after attenuation (see [`Cable::offset`]).
-    offset: Option<f64>,
+    /// Attenuation/gain applied to the source value (see [`Cable::attenuation`]), with an
+    /// absent attenuation baked in as `1.0`.
+    attenuation: f64,
+    /// DC offset added after attenuation (see [`Cable::offset`]), with an absent offset
+    /// baked in as `0.0`.
+    offset: f64,
 }
 
 /// Compiled routing plan for a single input port (in [`PortSpec`] input order).
@@ -429,8 +436,6 @@ struct NormalledPlan {
 
 /// Compiled per-node execution record (parallel to [`Patch::execution_order`]).
 struct NodeExec {
-    /// Identity of the node in the [`SlotMap`].
-    node_id: NodeId,
     /// Base index of this node's output values in [`Routing::out_buf`]; output port `k`
     /// (in [`PortSpec`] order) lives at `out_base + k`.
     out_base: usize,
@@ -455,10 +460,13 @@ impl NodeExec {
             if plan.has_connection {
                 let mut sum = 0.0;
                 for e in &plan.edges {
-                    let value = out_buf[e.src_slot];
-                    let attenuated = e.attenuation.map(|a| value * a).unwrap_or(value);
-                    let with_offset = e.offset.map(|o| attenuated + o).unwrap_or(attenuated);
-                    sum += with_offset;
+                    // Unconditional, because the identity coefficients are exact: `x * 1.0`
+                    // is `x` for every value `out_buf` can hold (scatter has already
+                    // sanitized non-finites away), and `+ 0.0` only ever differs by turning
+                    // a `-0.0` term into `+0.0` — which `sum` would do anyway, since it
+                    // starts at `+0.0` and no sum of the form `+0.0 + x` is `-0.0`.
+                    let attenuated = out_buf[e.src_slot] * e.attenuation;
+                    sum += attenuated + e.offset;
                 }
                 dst.set(plan.port_id, sum);
             } else if plan.normalled_to.is_none() {
@@ -632,6 +640,11 @@ impl Routing {
 /// The main patch graph containing modules and connections
 pub struct Patch {
     nodes: SlotMap<NodeId, Node>,
+    /// Module storage, indexed by [`Node::module_slot`]. After a successful
+    /// [`compile`](Patch::compile) this is in execution order — element `i` is the module of
+    /// `routing.nodes[i]` — which is what lets [`tick_step`](Patch::tick_step) zip modules
+    /// and routing records together with no per-node lookup.
+    modules: Vec<Box<dyn GraphModule>>,
     cables: Vec<Cable>,
 
     // Monotonic source of stable CableIds (never reused)
@@ -667,6 +680,7 @@ impl Patch {
     pub fn new(sample_rate: f64) -> Self {
         Self {
             nodes: SlotMap::new(),
+            modules: Vec::new(),
             cables: Vec::new(),
             next_cable_id: 0,
             execution_order: Vec::new(),
@@ -729,18 +743,9 @@ impl Patch {
     pub fn add<M: GraphModule + 'static>(
         &mut self,
         name: impl Into<String>,
-        mut module: M,
+        module: M,
     ) -> NodeHandle {
-        module.set_sample_rate(self.sample_rate);
-        let spec = module.port_spec().clone();
-        let id = self.nodes.insert(Node {
-            module: Box::new(module),
-            name: name.into(),
-            position: None,
-            param_overrides: StdMap::new(),
-        });
-        self.invalidate();
-        NodeHandle { id, spec }
+        self.add_boxed(name, Box::new(module))
     }
 
     /// Add a boxed module to the patch
@@ -751,8 +756,10 @@ impl Patch {
     ) -> NodeHandle {
         module.set_sample_rate(self.sample_rate);
         let spec = module.port_spec().clone();
+        let module_slot = self.modules.len();
+        self.modules.push(module);
         let id = self.nodes.insert(Node {
-            module,
+            module_slot,
             name: name.into(),
             position: None,
             param_overrides: StdMap::new(),
@@ -761,10 +768,30 @@ impl Patch {
         NodeHandle { id, spec }
     }
 
+    /// Borrow a node's module.
+    fn module_of(&self, node: NodeId) -> Option<&dyn GraphModule> {
+        let slot = self.nodes.get(node)?.module_slot;
+        self.modules.get(slot).map(|m| m.as_ref())
+    }
+
+    /// Mutably borrow a node's module.
+    fn module_of_mut(&mut self, node: NodeId) -> Option<&mut (dyn GraphModule + '_)> {
+        let slot = self.nodes.get(node)?.module_slot;
+        Some(self.modules.get_mut(slot)?.as_mut())
+    }
+
     /// Remove a module from the patch
     pub fn remove(&mut self, node: NodeId) -> Result<(), PatchError> {
-        if self.nodes.remove(node).is_none() {
+        let Some(removed) = self.nodes.remove(node) else {
             return Err(PatchError::InvalidNode { node });
+        };
+
+        // Close the gap in `modules` and slide every later node's slot down with it.
+        self.modules.remove(removed.module_slot);
+        for (_, other) in &mut self.nodes {
+            if other.module_slot > removed.module_slot {
+                other.module_slot -= 1;
+            }
         }
 
         // Remove all cables connected to this node
@@ -902,8 +929,7 @@ impl Patch {
 
     /// Get the signal kind for an output port
     fn get_output_port_kind(&self, port_ref: PortRef) -> Option<SignalKind> {
-        let node = self.nodes.get(port_ref.node)?;
-        node.module
+        self.module_of(port_ref.node)?
             .port_spec()
             .outputs
             .iter()
@@ -913,8 +939,7 @@ impl Patch {
 
     /// Get the signal kind for an input port
     fn get_input_port_kind(&self, port_ref: PortRef) -> Option<SignalKind> {
-        let node = self.nodes.get(port_ref.node)?;
-        node.module
+        self.module_of(port_ref.node)?
             .port_spec()
             .inputs
             .iter()
@@ -963,11 +988,10 @@ impl Patch {
     /// The checked companion to [`set_output`](Self::set_output), for callers (e.g. GUIs
     /// or loaders) that prefer a `Result` over silent misrouting.
     pub fn try_set_output(&mut self, node: NodeId) -> Result<(), PatchError> {
-        let n = self
-            .nodes
-            .get(node)
+        let module = self
+            .module_of(node)
             .ok_or(PatchError::InvalidNode { node })?;
-        if n.module.port_spec().outputs.is_empty() {
+        if module.port_spec().outputs.is_empty() {
             return Err(PatchError::InvalidPort {
                 node,
                 name: None,
@@ -982,14 +1006,14 @@ impl Patch {
 
     /// Set a parameter on a module
     pub fn set_param(&mut self, node: NodeId, param: ParamId, value: f64) {
-        if let Some(n) = self.nodes.get_mut(node) {
-            n.module.set_param(param, value);
+        if let Some(module) = self.module_of_mut(node) {
+            module.set_param(param, value);
         }
     }
 
     /// Get a parameter value from a module
     pub fn get_param(&self, node: NodeId, param: ParamId) -> Option<f64> {
-        self.nodes.get(node).and_then(|n| n.module.get_param(param))
+        self.module_of(node).and_then(|m| m.get_param(param))
     }
 
     /// Set module position (for UI)
@@ -1041,13 +1065,12 @@ impl Patch {
     }
 
     fn validate_output_port(&self, port_ref: PortRef) -> Result<(), PatchError> {
-        let node = self
-            .nodes
-            .get(port_ref.node)
+        let spec = self
+            .module_of(port_ref.node)
             .ok_or(PatchError::InvalidNode {
                 node: port_ref.node,
-            })?;
-        let spec = node.module.port_spec();
+            })?
+            .port_spec();
         if spec.outputs.iter().any(|p| p.id == port_ref.port) {
             Ok(())
         } else {
@@ -1061,13 +1084,12 @@ impl Patch {
     }
 
     fn validate_input_port(&self, port_ref: PortRef) -> Result<(), PatchError> {
-        let node = self
-            .nodes
-            .get(port_ref.node)
+        let spec = self
+            .module_of(port_ref.node)
             .ok_or(PatchError::InvalidNode {
                 node: port_ref.node,
-            })?;
-        let spec = node.module.port_spec();
+            })?
+            .port_spec();
         if spec.inputs.iter().any(|p| p.id == port_ref.port) {
             Ok(())
         } else {
@@ -1102,12 +1124,61 @@ impl Patch {
         };
         self.execution_order = order;
 
+        // Put the modules in execution order so the per-sample loop can walk them in
+        // lockstep with the routing plan. Must precede build_routing, which reads modules
+        // through the (now updated) node slots.
+        self.reorder_modules_for_execution();
+
         // Build the dense, preallocated routing plan (adjacency + buffers).
         self.build_routing();
 
         self.dirty = false;
         self.last_compile_error = None;
         Ok(())
+    }
+
+    /// Permute `modules` into `execution_order`, rewriting each node's `module_slot`.
+    ///
+    /// This is what makes `modules[i]` the module of `routing.nodes[i]`, so `tick_step` can
+    /// zip the two instead of resolving a slotmap key per node per sample. The topological
+    /// sort visits every live node exactly once, so the permutation is total; anything not
+    /// named by it (which cannot happen for a successful sort) is appended afterwards so no
+    /// module is ever dropped.
+    fn reorder_modules_for_execution(&mut self) {
+        let mut taken: Vec<Option<Box<dyn GraphModule>>> = core::mem::take(&mut self.modules)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut old_to_new: Vec<Option<usize>> = taken.iter().map(|_| None).collect();
+        let mut ordered: Vec<Box<dyn GraphModule>> = Vec::with_capacity(taken.len());
+
+        for &node_id in &self.execution_order {
+            let Some(node) = self.nodes.get(node_id) else {
+                continue;
+            };
+            let old = node.module_slot;
+            let Some(module) = taken.get_mut(old).and_then(Option::take) else {
+                continue;
+            };
+            old_to_new[old] = Some(ordered.len());
+            ordered.push(module);
+        }
+        // Defensive: keep any module the order did not name (impossible after a successful
+        // topological sort, which covers every live node) rather than dropping it.
+        for (old, slot) in taken.iter_mut().enumerate() {
+            if let Some(module) = slot.take() {
+                old_to_new[old] = Some(ordered.len());
+                ordered.push(module);
+            }
+        }
+
+        self.modules = ordered;
+        // Remap by old slot, so every node follows its own module wherever it landed.
+        for (_, node) in &mut self.nodes {
+            if let Some(new) = old_to_new.get(node.module_slot).copied().flatten() {
+                node.module_slot = new;
+            }
+        }
     }
 
     /// Build the compiled [`Routing`] from the current `execution_order`, cables and output
@@ -1121,11 +1192,10 @@ impl Patch {
         // both edge resolution and get_output_value.
         let mut slot: usize = 0;
         for &node_id in &self.execution_order {
-            let node = self
-                .nodes
-                .get(node_id)
-                .expect("execution_order only holds live nodes");
-            let spec = node.module.port_spec();
+            let spec = self
+                .module_of(node_id)
+                .expect("execution_order only holds live nodes")
+                .port_spec();
             let out_base = slot;
             let mut out_ids = Vec::with_capacity(spec.outputs.len());
             for output in &spec.outputs {
@@ -1140,7 +1210,6 @@ impl Patch {
                 slot += 1;
             }
             routing.nodes.push(NodeExec {
-                node_id,
                 out_base,
                 out_ids,
                 inputs: Vec::new(),
@@ -1156,7 +1225,7 @@ impl Patch {
                 .nodes
                 .get(node_id)
                 .expect("execution_order only holds live nodes");
-            let spec = node.module.port_spec();
+            let spec = self.modules[node.module_slot].port_spec();
 
             let mut scratch_in = PortValues::new();
             let mut scratch_out = PortValues::new();
@@ -1176,8 +1245,8 @@ impl Patch {
                         if let Some(&src_slot) = routing.out_slot_index.get(&cable.from) {
                             edges.push(InEdge {
                                 src_slot,
-                                attenuation: cable.attenuation,
-                                offset: cable.offset,
+                                attenuation: cable.attenuation.unwrap_or(1.0),
+                                offset: cable.offset.unwrap_or(0.0),
                             });
                         }
                     }
@@ -1215,8 +1284,7 @@ impl Patch {
 
         // Pass C: precompute the stereo output read slots (right = left when mono).
         routing.output_slots = self.output_node.and_then(|out_node| {
-            let node = self.nodes.get(out_node)?;
-            let outputs = &node.module.port_spec().outputs;
+            let outputs = &self.module_of(out_node)?.port_spec().outputs;
             let left_id = outputs.first()?.id;
             let left = *routing.out_slot_index.get(&PortRef {
                 node: out_node,
@@ -1242,9 +1310,8 @@ impl Patch {
 
     /// Whether the module at `node` is a feedback cycle-breaker (delay-style).
     fn node_breaks_feedback(&self, node: NodeId) -> bool {
-        self.nodes
-            .get(node)
-            .map(|n| n.module.breaks_feedback_cycle())
+        self.module_of(node)
+            .map(|m| m.breaks_feedback_cycle())
             .unwrap_or(false)
     }
 
@@ -1371,38 +1438,53 @@ impl Patch {
 
     /// Execute one sample of the already-compiled schedule (no dirty/recompile check).
     ///
-    /// Allocation-free: iterates the execution order by index (no `execution_order.clone()`),
-    /// gathering into and scattering from reusable per-node scratch buffers via precompiled
-    /// adjacency and a dense output buffer. `nodes` and `routing` are disjoint fields, so the
-    /// module borrow and the routing-buffer borrows coexist without conflict.
+    /// Allocation-free, and lookup-free: a successful `compile` leaves `modules` permuted
+    /// into execution order, so the plan, the modules and the two scratch buffers are four
+    /// parallel vectors walked by one zipped iterator — no slotmap key resolution, and no
+    /// re-indexing, per node per sample. `modules` and `routing` are disjoint fields of
+    /// `self`, so the module borrow and the routing-buffer borrows coexist without conflict.
     fn tick_step(&mut self) -> (f64, f64) {
-        let routing = &mut self.routing;
-        let nodes = &mut self.nodes;
+        let Routing {
+            nodes,
+            out_buf,
+            scratch_in,
+            scratch_out,
+            ..
+        } = &mut self.routing;
+        let modules = &mut self.modules;
 
-        for i in 0..routing.nodes.len() {
+        // Lockstep is established by compile(). An uncompiled or failed compile leaves the
+        // plan empty, which this guard turns into silence rather than a mispaired walk.
+        if nodes.len() != modules.len() {
+            debug_assert!(nodes.is_empty(), "routing plan is out of step with modules");
+            return (0.0, 0.0);
+        }
+
+        for (((exec, module), inputs), outputs) in nodes
+            .iter()
+            .zip(modules.iter_mut())
+            .zip(scratch_in.iter_mut())
+            .zip(scratch_out.iter_mut())
+        {
             // Gather this node's inputs from the dense output buffer via precompiled edges.
-            routing.nodes[i].gather(&routing.out_buf, &mut routing.scratch_in[i]);
+            exec.gather(out_buf, inputs);
 
             // Run the module. scratch_out is cleared first so unwritten outputs are absent,
             // matching the previous "fresh PortValues per tick" semantics.
-            let node_id = routing.nodes[i].node_id;
-            routing.scratch_out[i].clear();
-            if let Some(node) = nodes.get_mut(node_id) {
-                node.module
-                    .tick(&routing.scratch_in[i], &mut routing.scratch_out[i]);
-            }
+            outputs.clear();
+            module.tick(inputs, outputs);
 
             // Scatter outputs back into the dense buffer (with denormal flushing).
-            routing.nodes[i].scatter(&routing.scratch_out[i], &mut routing.out_buf);
+            exec.scatter(outputs, out_buf);
         }
 
-        routing.read_output()
+        self.routing.read_output()
     }
 
     /// Reset all modules in the patch
     pub fn reset(&mut self) {
-        for (_, node) in &mut self.nodes {
-            node.module.reset();
+        for module in &mut self.modules {
+            module.reset();
         }
         for value in self.routing.out_buf.iter_mut() {
             *value = 0.0;
@@ -1411,9 +1493,13 @@ impl Patch {
 
     /// Iterate over all nodes
     pub fn nodes(&self) -> impl Iterator<Item = (NodeId, &str, &dyn GraphModule)> {
-        self.nodes
-            .iter()
-            .map(|(id, node)| (id, node.name.as_str(), node.module.as_ref()))
+        self.nodes.iter().map(|(id, node)| {
+            (
+                id,
+                node.name.as_str(),
+                self.modules[node.module_slot].as_ref(),
+            )
+        })
     }
 
     /// Get a NodeId by module name
@@ -1429,7 +1515,7 @@ impl Patch {
         self.nodes
             .iter()
             .find(|(_, node)| node.name == name)
-            .map(|(id, node)| NodeHandle::from_module(id, node.module.as_ref()))
+            .map(|(id, node)| NodeHandle::from_module(id, self.modules[node.module_slot].as_ref()))
     }
 
     /// Disconnect a cable by finding matching port refs
@@ -1466,9 +1552,7 @@ impl Patch {
 
     /// Get the signal kind for an output port by node ID and port ID
     pub fn get_output_signal_kind(&self, node: NodeId, port: PortId) -> Option<SignalKind> {
-        let node_data = self.nodes.get(node)?;
-        node_data
-            .module
+        self.module_of(node)?
             .port_spec()
             .outputs
             .iter()
@@ -1517,9 +1601,9 @@ impl Patch {
         let Some(n) = self.nodes.get(node) else {
             return Vec::new();
         };
-        let spec = n.module.port_spec();
-        let mut infos: Vec<crate::introspection::ParamInfo> = n
-            .module
+        let module = self.modules[n.module_slot].as_ref();
+        let spec = module.port_spec();
+        let mut infos: Vec<crate::introspection::ParamInfo> = module
             .introspect()
             .map(|i| i.param_infos())
             .unwrap_or_default()
@@ -1545,13 +1629,14 @@ impl Patch {
     /// Read a single parameter's current value by id (port name or internal param id).
     pub fn get_param_by_id(&self, node: NodeId, id: &str) -> Option<f64> {
         let n = self.nodes.get(node)?;
+        let module = self.modules[n.module_slot].as_ref();
         // Port parameters are authoritative.
-        if let Some(port) = n.module.port_spec().input_by_name(id) {
+        if let Some(port) = module.port_spec().input_by_name(id) {
             if is_control_input(port.kind) {
                 return Some(n.param_overrides.get(id).copied().unwrap_or(port.default));
             }
         }
-        n.module
+        module
             .introspect()
             .and_then(|i| i.get_param_info(id))
             .map(|p| p.value)
@@ -1565,15 +1650,9 @@ impl Patch {
     pub fn set_param_by_id(&mut self, node: NodeId, id: &str, value: f64) -> bool {
         // Decide the routing without holding a mutable borrow across the invalidate() call.
         let is_port = self
-            .nodes
-            .get(node)
-            .map(|n| {
-                n.module
-                    .port_spec()
-                    .input_by_name(id)
-                    .map(|p| is_control_input(p.kind))
-                    .unwrap_or(false)
-            })
+            .module_of(node)
+            .and_then(|m| m.port_spec().input_by_name(id))
+            .map(|p| is_control_input(p.kind))
             .unwrap_or(false);
 
         if is_port {
@@ -1585,10 +1664,8 @@ impl Patch {
             return true;
         }
 
-        if let Some(n) = self.nodes.get_mut(node) {
-            if let Some(intro) = n.module.introspect_mut() {
-                return intro.set_param_by_id(id, value);
-            }
+        if let Some(intro) = self.module_of_mut(node).and_then(|m| m.introspect_mut()) {
+            return intro.set_param_by_id(id, value);
         }
         false
     }
@@ -1606,8 +1683,8 @@ impl Patch {
         node: NodeId,
         state: &serde_json::Value,
     ) -> Result<(), String> {
-        match self.nodes.get_mut(node) {
-            Some(n) => n.module.deserialize_state(state),
+        match self.module_of_mut(node) {
+            Some(module) => module.deserialize_state(state),
             None => Ok(()),
         }
     }
@@ -1636,7 +1713,7 @@ impl core::fmt::Debug for Patch {
             .map(|(id, n)| NodeDebug {
                 id,
                 name: n.name.as_str(),
-                type_id: n.module.type_id(),
+                type_id: self.modules[n.module_slot].type_id(),
             })
             .collect();
 
@@ -1782,6 +1859,38 @@ mod tests {
         patch.remove(a.id()).unwrap();
         assert_eq!(patch.node_count(), 1);
         assert_eq!(patch.cable_count(), 0); // Cable should be removed too
+    }
+
+    /// Every node must keep pointing at *its own* module across the two operations that
+    /// move modules around: removing an earlier node (which closes the gap in the module
+    /// vector) and compiling (which permutes it into execution order).
+    #[test]
+    fn test_module_identity_survives_remove_and_compile() {
+        let mut patch = Patch::new(44100.0);
+        let vco = patch.add("vco", crate::modules::Vco::new(44100.0));
+        let doomed = patch.add("doomed", Passthrough::new());
+        let vca = patch.add("vca", crate::modules::Vca::new());
+        let out = patch.add("out", crate::modules::StereoOutput::new());
+
+        patch.connect(vco.out("saw"), vca.in_("in")).unwrap();
+        patch.connect(vca.out("out"), out.in_("left")).unwrap();
+        patch.set_output(out.id());
+
+        // Removing the second-added node slides the later modules down a slot.
+        patch.remove(doomed.id()).unwrap();
+        // Compiling then permutes what is left into execution order.
+        patch.compile().unwrap();
+
+        let by_id = |id| {
+            patch
+                .nodes()
+                .find(|(nid, _, _)| *nid == id)
+                .map(|(_, name, module)| (name, module.type_id()))
+        };
+        assert_eq!(by_id(vco.id()), Some(("vco", "vco")));
+        assert_eq!(by_id(vca.id()), Some(("vca", "vca")));
+        assert_eq!(by_id(out.id()), Some(("out", "stereo_output")));
+        assert_eq!(patch.node_count(), 3);
     }
 
     // ========================================================================
