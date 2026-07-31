@@ -1,6 +1,6 @@
 //! Nonlinear and spectral processing modules.
 
-use super::common::{env_coef, sanitize_audio, GATE_THRESHOLD_V};
+use super::common::{env_coef, sanitize_audio, Memo, GATE_THRESHOLD_V};
 use super::oversample::{Oversample, Oversampler};
 use crate::analog::saturation;
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
@@ -25,6 +25,9 @@ fn rem_euclid_f64(x: f64, n: f64) -> f64 {
 pub struct Bitcrusher {
     hold_sample: f64,
     hold_counter: f64,
+    /// Memoized quantizer level count `round(2^bits)` (one `pow` per sample
+    /// while the bit-depth CV is static).
+    levels_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -33,6 +36,7 @@ impl Bitcrusher {
         Self {
             hold_sample: 0.0,
             hold_counter: 0.0,
+            levels_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -65,7 +69,6 @@ impl GraphModule for Bitcrusher {
         let bits_cv = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let downsample_cv = inputs.get_or(2, 0.0).clamp(0.0, 1.0);
 
-        let bits = 1.0 + bits_cv * 15.0;
         let downsample_factor = 1.0 + downsample_cv * 63.0;
 
         // Q029: accumulate a fractional sample-and-hold phase. Subtracting the
@@ -82,7 +85,11 @@ impl GraphModule for Bitcrusher {
         // Rounding is unbiased (no ~0.5 LSB DC offset). Using an integer step
         // count and clamping the normalized value maps full-scale exactly to the
         // top code instead of one step beyond the intended range.
-        let levels = Libm::<f64>::round(Libm::<f64>::pow(2.0, bits)).max(2.0);
+        // The level count is memoized on the bit-depth CV (bit-exact miss path).
+        let levels = self.levels_memo.get_or_compute([bits_cv], || {
+            let bits = 1.0 + bits_cv * 15.0;
+            Libm::<f64>::round(Libm::<f64>::pow(2.0, bits)).max(2.0)
+        });
         let steps = levels - 1.0;
         let normalized = ((self.hold_sample / 5.0 + 1.0) * 0.5).clamp(0.0, 1.0);
         let quantized = Libm::<f64>::round(normalized * steps) / steps;
@@ -123,6 +130,9 @@ pub struct Distortion {
     /// One-pole low-pass state for the tone control (Q025).
     tone_lp: f64,
     sample_rate: f64,
+    /// Memoized tone-filter coefficient (one `pow` + one `exp` per sample while
+    /// the tone CV is static).
+    alpha_memo: Memo<2, f64>,
     /// Opt-in oversampler for the waveshaping stage (Q143). Default `Off` keeps
     /// the base-rate behavior (and thus every existing test) bit-for-bit.
     oversampler: Oversampler,
@@ -139,6 +149,7 @@ impl Distortion {
         Self {
             tone_lp: 0.0,
             sample_rate,
+            alpha_memo: Memo::new(0.0),
             oversampler: Oversampler::new(Oversample::Off),
             spec: PortSpec {
                 inputs: vec![
@@ -254,10 +265,13 @@ impl GraphModule for Distortion {
         // cutoff is swept logarithmically by the tone CV from
         // DISTORTION_TONE_MIN_HZ (dark) to DISTORTION_TONE_MAX_HZ (≈ transparent),
         // so higher tone genuinely preserves more high-frequency content.
-        let cutoff = DISTORTION_TONE_MIN_HZ
-            * Libm::<f64>::pow(DISTORTION_TONE_MAX_HZ / DISTORTION_TONE_MIN_HZ, tone);
-        let alpha =
-            1.0 - Libm::<f64>::exp(-2.0 * core::f64::consts::PI * cutoff / self.sample_rate);
+        // The coefficient is memoized on the tone CV (bit-exact miss path).
+        let sample_rate = self.sample_rate;
+        let alpha = self.alpha_memo.get_or_compute([tone, sample_rate], || {
+            let cutoff = DISTORTION_TONE_MIN_HZ
+                * Libm::<f64>::pow(DISTORTION_TONE_MAX_HZ / DISTORTION_TONE_MIN_HZ, tone);
+            1.0 - Libm::<f64>::exp(-2.0 * core::f64::consts::PI * cutoff / sample_rate)
+        });
         self.tone_lp += alpha * (distorted - self.tone_lp);
         let filtered = self.tone_lp;
 
@@ -372,6 +386,9 @@ pub struct PitchShifter {
     /// Two grain phases (0-1 for window position)
     grain_phase: [f64; 2],
     sample_rate: f64,
+    /// Memoized playback rate `2^(semitones/12)` (one `pow` per sample while
+    /// the shift CV is static).
+    rate_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -396,6 +413,7 @@ impl PitchShifter {
             grain_pos: [0.0, 0.5 * Self::BUFFER_SIZE as f64], // Start 180° out of phase
             grain_phase: [0.0, 0.5],                          // 50% phase offset
             sample_rate,
+            rate_memo: Memo::new(0.0),
             spec,
         }
     }
@@ -448,8 +466,11 @@ impl GraphModule for PitchShifter {
         self.buffer[self.write_pos] = input / 5.0; // Normalize from audio
         self.write_pos = (self.write_pos + 1) % Self::BUFFER_SIZE;
 
-        // Calculate playback rate
-        let rate = Libm::<f64>::pow(2.0, shift_semitones / 12.0);
+        // Calculate playback rate, memoized on the (clamped) shift amount
+        // (bit-exact miss path).
+        let rate = self.rate_memo.get_or_compute([shift_semitones], || {
+            Libm::<f64>::pow(2.0, shift_semitones / 12.0)
+        });
 
         // Q033: keep each grain's read pointer strictly behind the write pointer
         // for the grain's whole lifetime. Relative to the write pointer a grain
@@ -570,6 +591,15 @@ pub struct Vocoder {
     // Pre-computed band frequencies
     band_freqs: [f64; MAX_VOCODER_BANDS],
 
+    /// Memoized per-band Chamberlin SVF coefficients `f = 2·sin(π·freq/fs)`
+    /// (clamped at the stability limit). These depend only on the band count
+    /// and sample rate (`band_freqs` is itself a pure function of the sample
+    /// rate), so up to 32 per-sample `sin` calls collapse to a key compare.
+    band_f_memo: Memo<2, [f64; MAX_VOCODER_BANDS]>,
+
+    /// Memoized `[attack_coef, release_coef]` for the band envelope followers.
+    env_memo: Memo<3, [f64; 2]>,
+
     sample_rate: f64,
     spec: PortSpec,
 }
@@ -582,6 +612,8 @@ impl Vocoder {
             synthesis_state: [[0.0; 2]; MAX_VOCODER_BANDS],
             envelopes: [0.0; MAX_VOCODER_BANDS],
             band_freqs: [0.0; MAX_VOCODER_BANDS],
+            band_f_memo: Memo::new([0.0; MAX_VOCODER_BANDS]),
+            env_memo: Memo::new([0.0; 2]),
             sample_rate,
             spec: PortSpec {
                 inputs: vec![
@@ -624,18 +656,11 @@ impl Vocoder {
 
     /// Process a single band using a state variable filter (bandpass)
     /// Returns the bandpass output
+    ///
+    /// `f` is the precomputed (memoized) frequency coefficient
+    /// `min(2·sin(π·freq/fs), 0.99)`; the rest is the original per-sample body.
     #[inline]
-    fn process_svf_bandpass(
-        state: &mut [f64; 2],
-        input: f64,
-        freq: f64,
-        q: f64,
-        sample_rate: f64,
-    ) -> f64 {
-        // Frequency coefficient
-        let f = 2.0 * Libm::<f64>::sin(core::f64::consts::PI * freq / sample_rate);
-        let f = f.min(0.99); // Stability limit
-
+    fn process_svf_bandpass(state: &mut [f64; 2], input: f64, f: f64, q: f64) -> f64 {
         // Q factor (resonance)
         let q_inv = 1.0 / q;
 
@@ -674,28 +699,45 @@ impl GraphModule for Vocoder {
         let num_bands = Libm::<f64>::round(4.0 + bands_cv * 12.0) as usize;
         let num_bands = num_bands.min(MAX_VOCODER_BANDS);
 
-        // Compute envelope coefficients (10ms to 200ms range)
-        let attack_time = 0.01 + attack_cv * 0.19;
-        let release_time = 0.01 + release_cv * 0.19;
-        let attack_coef = env_coef(attack_time, self.sample_rate);
-        let release_coef = env_coef(release_time, self.sample_rate);
+        // Compute envelope coefficients (10ms to 200ms range), memoized on
+        // their CVs (bit-exact miss path).
+        let sample_rate = self.sample_rate;
+        let [attack_coef, release_coef] =
+            self.env_memo
+                .get_or_compute([attack_cv, release_cv, sample_rate], || {
+                    let attack_time = 0.01 + attack_cv * 0.19;
+                    let release_time = 0.01 + release_cv * 0.19;
+                    [
+                        env_coef(attack_time, sample_rate),
+                        env_coef(release_time, sample_rate),
+                    ]
+                });
+
+        // Per-band SVF frequency coefficients, memoized on the band count and
+        // sample rate (bit-exact: the same `2·sin(π·freq/fs)` with the same
+        // 0.99 stability clamp the filter used to compute per sample).
+        let band_freqs = &self.band_freqs;
+        let band_f = self
+            .band_f_memo
+            .get_or_compute([num_bands as f64, sample_rate], || {
+                let mut f = [0.0; MAX_VOCODER_BANDS];
+                for (i, fi) in f.iter_mut().enumerate().take(num_bands) {
+                    let freq = band_freqs[i * MAX_VOCODER_BANDS / num_bands];
+                    let coef = 2.0 * Libm::<f64>::sin(core::f64::consts::PI * freq / sample_rate);
+                    *fi = coef.min(0.99); // Stability limit
+                }
+                f
+            });
 
         // Q factor for bandpass filters
         let q = 2.0;
 
         let mut output = 0.0;
 
-        for i in 0..num_bands {
-            let freq = self.band_freqs[i * MAX_VOCODER_BANDS / num_bands];
-
+        for (i, &f) in band_f.iter().enumerate().take(num_bands) {
             // Analysis path: filter modulator and extract envelope
-            let analysis_band = Self::process_svf_bandpass(
-                &mut self.analysis_state[i],
-                modulator,
-                freq,
-                q,
-                self.sample_rate,
-            );
+            let analysis_band =
+                Self::process_svf_bandpass(&mut self.analysis_state[i], modulator, f, q);
 
             // Envelope follower
             let rectified = analysis_band.abs();
@@ -708,13 +750,8 @@ impl GraphModule for Vocoder {
             }
 
             // Synthesis path: filter carrier and apply envelope
-            let synthesis_band = Self::process_svf_bandpass(
-                &mut self.synthesis_state[i],
-                carrier,
-                freq,
-                q,
-                self.sample_rate,
-            );
+            let synthesis_band =
+                Self::process_svf_bandpass(&mut self.synthesis_state[i], carrier, f, q);
 
             // Apply envelope to carrier band
             output += synthesis_band * self.envelopes[i];
@@ -817,6 +854,15 @@ pub struct Granular {
     /// removing the per-sample amplitude zipper.
     norm_smooth: f64,
 
+    /// One-pole coefficient for `norm_smooth` (~50ms). The time constant is
+    /// fixed, so this depends only on the sample rate; it is derived in
+    /// `new`/`set_sample_rate` instead of recomputing the `exp` every sample.
+    norm_smooth_coef: f64,
+
+    /// Memoized playback speed `2^(semitones/12)` (one `exp2` per sample while
+    /// the pitch CV is static).
+    speed_memo: Memo<1, f64>,
+
     sample_rate: f64,
     spec: PortSpec,
 }
@@ -831,6 +877,8 @@ impl Granular {
             spawn_timer: 0,
             rng: crate::rng::Rng::from_seed(42),
             norm_smooth: 1.0,
+            norm_smooth_coef: env_coef(0.05, sample_rate),
+            speed_memo: Memo::new(0.0),
             sample_rate,
             spec: PortSpec {
                 inputs: vec![
@@ -919,7 +967,10 @@ impl GraphModule for Granular {
         // Q031: pitch shift ±5V maps to ±24 semitones (playback speed 0.25×–4×),
         // matching the documented range instead of the previous ±60 semitones.
         let semitones = (pitch_cv * 4.8).clamp(-24.0, 24.0);
-        let speed = Libm::<f64>::exp2(semitones / 12.0);
+        // Playback speed memoized on the (clamped) pitch (bit-exact miss path).
+        let speed = self
+            .speed_memo
+            .get_or_compute([semitones], || Libm::<f64>::exp2(semitones / 12.0));
 
         // Grain size: 10ms to 500ms, bounded so a grain's read span
         // (size × speed) can never exceed the buffer length (Q031). This keeps
@@ -989,7 +1040,7 @@ impl GraphModule for Granular {
         let expected_overlap = grains_per_sec * grain_seconds;
         // Never amplify: only attenuate once grains routinely overlap.
         let target_norm = Libm::<f64>::sqrt(expected_overlap).max(1.0);
-        let smooth = env_coef(0.05, self.sample_rate); // ~50ms smoothing
+        let smooth = self.norm_smooth_coef; // ~50ms smoothing
         self.norm_smooth = smooth * self.norm_smooth + (1.0 - smooth) * target_norm;
         output /= self.norm_smooth.max(1.0);
 
@@ -1007,6 +1058,8 @@ impl GraphModule for Granular {
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
+        // The smoothing time constant is fixed; its coefficient tracks the rate.
+        self.norm_smooth_coef = env_coef(0.05, sample_rate);
         self.reset();
     }
 
@@ -2114,5 +2167,167 @@ mod tests {
             dist.tick(&inputs, &mut outputs);
             assert!(outputs.get(10).unwrap().is_finite());
         }
+    }
+
+    // ---- Coefficient memoization (perf) ------------------------------------
+
+    /// The Vocoder band-coefficient block was refactored for memoization (the
+    /// per-band `f = min(2·sin(π·freq/fs), 0.99)` is precomputed), so
+    /// equivalence is proven against a verbatim reimplementation of the
+    /// pre-memoization per-sample math with `f` and the envelope coefficients
+    /// derived inside the sample loop. Covers a band-count change mid-render.
+    #[test]
+    fn test_vocoder_matches_per_sample_reference() {
+        let sample_rate = 44100.0;
+        let mut voc = Vocoder::new(sample_rate);
+        let band_freqs = voc.band_freqs;
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Reference (pre-memoization) state.
+        let mut analysis = [[0.0f64; 2]; MAX_VOCODER_BANDS];
+        let mut synthesis = [[0.0f64; 2]; MAX_VOCODER_BANDS];
+        let mut envelopes = [0.0f64; MAX_VOCODER_BANDS];
+
+        // Original per-sample SVF body, coefficient derived from freq inline.
+        let ref_svf = |state: &mut [f64; 2], input: f64, freq: f64, q: f64| -> f64 {
+            let f = 2.0 * Libm::<f64>::sin(core::f64::consts::PI * freq / sample_rate);
+            let f = f.min(0.99);
+            let q_inv = 1.0 / q;
+            let low = state[0];
+            let high = input - low - q_inv * state[1];
+            let band = f * high + state[1];
+            let new_low = f * band + low;
+            state[0] = new_low;
+            state[1] = band;
+            band
+        };
+
+        for n in 0..8_000u32 {
+            let t = n as f64;
+            let carrier = Libm::<f64>::sin(t * 0.11) * 4.0;
+            let modulator = Libm::<f64>::sin(t * 0.017) * 3.0;
+            let bands_cv = if n < 4_000 { 0.7 } else { 0.2 };
+            inputs.set(0, carrier);
+            inputs.set(1, modulator);
+            inputs.set(2, bands_cv);
+            inputs.set(3, 0.3);
+            inputs.set(4, 0.4);
+
+            voc.tick(&inputs, &mut outputs);
+            let got = outputs.get(10).unwrap();
+
+            // ---- reference: original tick body, no caching ----
+            let num_bands = Libm::<f64>::round(4.0 + bands_cv * 12.0) as usize;
+            let num_bands = num_bands.min(MAX_VOCODER_BANDS);
+            let attack_time = 0.01 + 0.3 * 0.19;
+            let release_time = 0.01 + 0.4 * 0.19;
+            let attack_coef = env_coef(attack_time, sample_rate);
+            let release_coef = env_coef(release_time, sample_rate);
+            let q = 2.0;
+            let mut output = 0.0;
+            for i in 0..num_bands {
+                let freq = band_freqs[i * MAX_VOCODER_BANDS / num_bands];
+                let analysis_band = ref_svf(&mut analysis[i], modulator, freq, q);
+                let rectified = analysis_band.abs();
+                if rectified > envelopes[i] {
+                    envelopes[i] = attack_coef * envelopes[i] + (1.0 - attack_coef) * rectified;
+                } else {
+                    envelopes[i] = release_coef * envelopes[i] + (1.0 - release_coef) * rectified;
+                }
+                let synthesis_band = ref_svf(&mut synthesis[i], carrier, freq, q);
+                output += synthesis_band * envelopes[i];
+            }
+            output /= num_bands as f64;
+            let want = output * 4.0;
+
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "Vocoder diverged from per-sample reference at sample {n}"
+            );
+        }
+        // One recompute per distinct band count.
+        assert_eq!(voc.band_f_memo.recompute_count(), 2);
+        assert_eq!(voc.env_memo.recompute_count(), 1);
+    }
+
+    /// Memoization must be observationally invisible for the simple memoized
+    /// maps (Distortion tone coefficient, Bitcrusher level count, PitchShifter
+    /// and Granular pitch ratios): modules whose memos are invalidated before
+    /// every tick execute the pre-memoization computation every sample and must
+    /// agree bit-for-bit with the memoized modules under modulation.
+    #[test]
+    fn test_nonlinear_memos_bit_identical() {
+        let mut dist_m = Distortion::new(44100.0);
+        let mut dist_f = Distortion::new(44100.0);
+        let mut bc_m = Bitcrusher::new();
+        let mut bc_f = Bitcrusher::new();
+        let mut ps_m = PitchShifter::new(44100.0);
+        let mut ps_f = PitchShifter::new(44100.0);
+        let mut gr_m = Granular::new(44100.0);
+        let mut gr_f = Granular::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut out_m = PortValues::new();
+        let mut out_f = PortValues::new();
+
+        for n in 0..10_000u32 {
+            let t = n as f64;
+            let audio = Libm::<f64>::sin(t * 0.061) * 4.0;
+            // Constant params for the first half, per-sample sweeps after.
+            let sweep = if n < 5_000 {
+                0.5
+            } else {
+                0.5 + 0.3 * Libm::<f64>::sin(t * 0.003)
+            };
+
+            inputs.set(0, audio);
+            inputs.set(1, 0.6);
+            inputs.set(2, sweep); // Distortion tone
+            dist_m.tick(&inputs, &mut out_m);
+            dist_f.alpha_memo.invalidate();
+            dist_f.tick(&inputs, &mut out_f);
+            assert_eq!(
+                out_m.get(10).unwrap().to_bits(),
+                out_f.get(10).unwrap().to_bits(),
+                "Distortion diverged at sample {n}"
+            );
+
+            inputs.set(1, sweep); // Bitcrusher bits
+            inputs.set(2, 0.3);
+            bc_m.tick(&inputs, &mut out_m);
+            bc_f.levels_memo.invalidate();
+            bc_f.tick(&inputs, &mut out_f);
+            assert_eq!(
+                out_m.get(10).unwrap().to_bits(),
+                out_f.get(10).unwrap().to_bits(),
+                "Bitcrusher diverged at sample {n}"
+            );
+
+            inputs.set(1, (sweep - 0.5) * 6.0); // PitchShifter shift CV
+            inputs.set(2, 0.5);
+            ps_m.tick(&inputs, &mut out_m);
+            ps_f.rate_memo.invalidate();
+            ps_f.tick(&inputs, &mut out_f);
+            assert_eq!(
+                out_m.get(10).unwrap().to_bits(),
+                out_f.get(10).unwrap().to_bits(),
+                "PitchShifter diverged at sample {n}"
+            );
+
+            inputs.set(4, (sweep - 0.5) * 4.0); // Granular pitch CV
+            gr_m.tick(&inputs, &mut out_m);
+            gr_f.speed_memo.invalidate();
+            gr_f.tick(&inputs, &mut out_f);
+            assert_eq!(
+                out_m.get(10).unwrap().to_bits(),
+                out_f.get(10).unwrap().to_bits(),
+                "Granular diverged at sample {n}"
+            );
+        }
+        assert!(dist_m.alpha_memo.recompute_count() <= 5_001);
+        assert!(bc_m.levels_memo.recompute_count() <= 5_001);
+        assert!(ps_m.rate_memo.recompute_count() <= 5_001);
+        assert!(gr_m.speed_memo.recompute_count() <= 5_001);
     }
 }

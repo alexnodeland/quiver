@@ -25,14 +25,14 @@ crate), but the *library* name is still `quiver` — so your code writes
 
 ```toml
 [dependencies]
-quiver-dsp = "0.1"
+quiver-dsp = "0.2"
 ```
 
 Or with specific features:
 
 ```toml
 [dependencies]
-quiver-dsp = { version = "0.1", features = ["simd"] }
+quiver-dsp = { version = "0.2", features = ["simd"] }
 ```
 
 To track the development branch instead, use a git dependency:
@@ -63,7 +63,7 @@ allocator-free tier). Suitable for embedded systems that have a heap:
 
 ```toml
 [dependencies]
-quiver-dsp = { version = "0.1", default-features = false }
+quiver-dsp = { version = "0.2", default-features = false }
 ```
 
 Includes all core DSP modules: oscillators, filters, envelopes, amplifiers, mixers, utilities, logic modules, analog modeling, polyphony, and the patch graph.
@@ -74,7 +74,7 @@ For WASM web apps and embedded systems with heap:
 
 ```toml
 [dependencies]
-quiver-dsp = { version = "0.1", default-features = false, features = ["alloc"] }
+quiver-dsp = { version = "0.2", default-features = false, features = ["alloc"] }
 ```
 
 Adds:
@@ -88,7 +88,7 @@ For desktop applications:
 
 ```toml
 [dependencies]
-quiver-dsp = "0.1"
+quiver-dsp = "0.2"
 ```
 
 Adds:

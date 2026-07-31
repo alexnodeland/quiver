@@ -1,7 +1,8 @@
 //! Envelope, amplifier, and dynamics modules.
 
 use super::common::{
-    db_to_gain, env_coef, flush_denorm, gain_to_db, sanitize_audio, GATE_HIGH_V, GATE_THRESHOLD_V,
+    db_to_gain, env_coef, flush_denorm, gain_to_db, sanitize_audio, Memo, GATE_HIGH_V,
+    GATE_THRESHOLD_V,
 };
 use crate::port::{
     GraphModule, ModulatedParam, ParamRange, PortDef, PortSpec, PortValues, SignalKind,
@@ -57,6 +58,12 @@ pub struct Adsr {
     /// release duration equals the labeled release time regardless of the level
     /// the envelope was at when the gate was released.
     release_start_level: f64,
+    /// Memoized segment times and one-pole coefficients: three `pow` and three
+    /// `exp` per sample collapse to a key compare while the time CVs are static
+    /// (the common case — most patches wire them to constants).
+    /// `[attack_time, decay_time, release_time, attack_coef, decay_coef,
+    /// release_coef]`.
+    time_memo: Memo<4, [f64; 6]>,
     spec: PortSpec,
 }
 
@@ -69,6 +76,7 @@ impl Adsr {
             prev_gate: 0.0,
             prev_retrig: 0.0,
             release_start_level: 0.0,
+            time_memo: Memo::new([0.0; 6]),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "gate", SignalKind::Gate),
@@ -99,7 +107,7 @@ impl Adsr {
         }
     }
 
-    fn cv_to_time(&self, cv: f64) -> f64 {
+    fn cv_to_time(cv: f64) -> f64 {
         // Map 0-1 CV to 1ms - 10s (exponential)
         0.001 * Libm::<f64>::pow(10000.0, cv.clamp(0.0, 1.0))
     }
@@ -119,11 +127,31 @@ impl GraphModule for Adsr {
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
         let gate = inputs.get_or(0, 0.0);
         let retrig = inputs.get_or(1, 0.0);
-        let attack_time = self.cv_to_time(inputs.get_or(2, 0.1));
-        let decay_time = self.cv_to_time(inputs.get_or(3, 0.3));
+        let attack_cv = inputs.get_or(2, 0.1);
+        let decay_cv = inputs.get_or(3, 0.3);
         let sustain_level = inputs.get_or(4, 0.7).clamp(0.0, 1.0);
-        let release_time = self.cv_to_time(inputs.get_or(5, 0.4));
+        let release_cv = inputs.get_or(5, 0.4);
         let exp_mode = inputs.get_or(6, 0.0) > GATE_THRESHOLD_V;
+
+        // Segment times and exponential one-pole coefficients, memoized on the
+        // time CVs (bit-exact: the miss path is the original math). Each stage
+        // time is the time constant of its one-pole coefficient.
+        let sample_rate = self.sample_rate;
+        let [attack_time, decay_time, release_time, attack_coef, decay_coef, release_coef] = self
+            .time_memo
+            .get_or_compute([attack_cv, decay_cv, release_cv, sample_rate], || {
+                let attack_time = Self::cv_to_time(attack_cv);
+                let decay_time = Self::cv_to_time(decay_cv);
+                let release_time = Self::cv_to_time(release_cv);
+                [
+                    attack_time,
+                    decay_time,
+                    release_time,
+                    env_coef(attack_time, sample_rate),
+                    env_coef(decay_time, sample_rate),
+                    env_coef(release_time, sample_rate),
+                ]
+            });
 
         let gate_high = gate > GATE_THRESHOLD_V;
         let gate_rising = gate_high && self.prev_gate <= GATE_THRESHOLD_V;
@@ -146,11 +174,6 @@ impl GraphModule for Adsr {
         let attack_rate = 1.0 / (attack_time * self.sample_rate);
         let decay_rate = (1.0 - sustain_level) / (decay_time * self.sample_rate);
         let release_rate = self.release_start_level / (release_time * self.sample_rate);
-
-        // Exponential one-pole coefficients (each stage time is a time constant).
-        let attack_coef = env_coef(attack_time, self.sample_rate);
-        let decay_coef = env_coef(decay_time, self.sample_rate);
-        let release_coef = env_coef(release_time, self.sample_rate);
 
         // Distance from a one-pole target at which a segment is considered done.
         const EXP_DONE: f64 = 1e-3;
@@ -327,6 +350,8 @@ impl GraphModule for Vca {
 pub struct Limiter {
     sample_rate: f64,
     envelope: f64,
+    /// Memoized release coefficient (one `exp` per sample while static).
+    release_memo: Memo<2, f64>,
     spec: PortSpec,
 }
 
@@ -335,6 +360,7 @@ impl Limiter {
         Self {
             sample_rate,
             envelope: 0.0,
+            release_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -380,8 +406,14 @@ impl GraphModule for Limiter {
         // Q148: detect on the sidechain; unpatched it mirrors the main input.
         let sidechain = sanitize_audio(inputs.get_or(4, input));
 
-        let release_ms = 10.0 + release_cv * 990.0;
-        let release_coef = env_coef(release_ms / 1000.0, self.sample_rate);
+        // Release coefficient memoized on its driving CV (bit-exact miss path).
+        let sample_rate = self.sample_rate;
+        let release_coef = self
+            .release_memo
+            .get_or_compute([release_cv, sample_rate], || {
+                let release_ms = 10.0 + release_cv * 990.0;
+                env_coef(release_ms / 1000.0, sample_rate)
+            });
 
         let abs_input = Libm::<f64>::fabs(sidechain);
 
@@ -463,6 +495,13 @@ pub struct NoiseGate {
     /// Samples remaining in the hold window after the last supra-threshold
     /// sample; while non-zero the gate is kept open.
     hold_counter: u32,
+    /// Memoized `[attack_coef, release_coef]` (two `exp` per sample while the
+    /// ballistics CVs are static).
+    coef_memo: Memo<3, [f64; 2]>,
+    /// Anti-click fade coefficient. `FADE_MS` is a constant, so this depends
+    /// only on the sample rate; it is derived in `new`/`set_sample_rate` instead
+    /// of recomputing the `exp` every sample.
+    fade_coef: f64,
     spec: PortSpec,
 }
 
@@ -480,6 +519,8 @@ impl NoiseGate {
             gate_state: 0.0,
             gate_open: false,
             hold_counter: 0,
+            coef_memo: Memo::new([0.0; 2]),
+            fade_coef: env_coef(Self::FADE_MS / 1000.0, sample_rate),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -531,10 +572,18 @@ impl GraphModule for NoiseGate {
         // Q148: detect on the sidechain; unpatched it mirrors the main input.
         let sidechain = sanitize_audio(inputs.get_or(5, input));
 
-        let attack_ms = 0.1 + attack_cv * 49.9;
-        let release_ms = 10.0 + release_cv * 490.0;
-        let attack_coef = env_coef(attack_ms / 1000.0, self.sample_rate);
-        let release_coef = env_coef(release_ms / 1000.0, self.sample_rate);
+        // Ballistics coefficients memoized on their CVs (bit-exact miss path).
+        let sample_rate = self.sample_rate;
+        let [attack_coef, release_coef] =
+            self.coef_memo
+                .get_or_compute([attack_cv, release_cv, sample_rate], || {
+                    let attack_ms = 0.1 + attack_cv * 49.9;
+                    let release_ms = 10.0 + release_cv * 490.0;
+                    [
+                        env_coef(attack_ms / 1000.0, sample_rate),
+                        env_coef(release_ms / 1000.0, sample_rate),
+                    ]
+                });
 
         let abs_input = Libm::<f64>::fabs(sidechain);
         if abs_input > self.envelope {
@@ -564,7 +613,7 @@ impl GraphModule for NoiseGate {
 
         // Independent anti-click fade toward the target, unrelated to the
         // detector's attack/release coefficients (Q016).
-        let fade_coef = env_coef(Self::FADE_MS / 1000.0, self.sample_rate);
+        let fade_coef = self.fade_coef;
         let target = if self.gate_open { 1.0 } else { 0.0 };
         self.gate_state = fade_coef * self.gate_state + (1.0 - fade_coef) * target;
         // Q016/Q017: flush the fade state so a closed gate reaches exactly 0.
@@ -591,6 +640,8 @@ impl GraphModule for NoiseGate {
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
+        // The fade time constant is fixed; its coefficient tracks the rate.
+        self.fade_coef = env_coef(Self::FADE_MS / 1000.0, sample_rate);
     }
 
     fn type_id(&self) -> &'static str {
@@ -604,6 +655,9 @@ impl GraphModule for NoiseGate {
 pub struct Compressor {
     sample_rate: f64,
     envelope: f64,
+    /// Memoized `[attack_coef, release_coef]` (two `exp` per sample while the
+    /// ballistics CVs are static).
+    coef_memo: Memo<3, [f64; 2]>,
     spec: PortSpec,
 }
 
@@ -612,6 +666,7 @@ impl Compressor {
         Self {
             sample_rate,
             envelope: 0.0,
+            coef_memo: Memo::new([0.0; 2]),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -665,12 +720,20 @@ impl GraphModule for Compressor {
 
         let threshold = threshold_cv * 5.0;
         let ratio = 1.0 + ratio_cv * 19.0;
-        let attack_ms = 0.1 + attack_cv * 99.9;
-        let release_ms = 10.0 + release_cv * 990.0;
         let makeup_gain = 1.0 + makeup_cv * 3.0;
 
-        let attack_coef = env_coef(attack_ms / 1000.0, self.sample_rate);
-        let release_coef = env_coef(release_ms / 1000.0, self.sample_rate);
+        // Ballistics coefficients memoized on their CVs (bit-exact miss path).
+        let sample_rate = self.sample_rate;
+        let [attack_coef, release_coef] =
+            self.coef_memo
+                .get_or_compute([attack_cv, release_cv, sample_rate], || {
+                    let attack_ms = 0.1 + attack_cv * 99.9;
+                    let release_ms = 10.0 + release_cv * 990.0;
+                    [
+                        env_coef(attack_ms / 1000.0, sample_rate),
+                        env_coef(release_ms / 1000.0, sample_rate),
+                    ]
+                });
 
         let abs_sidechain = Libm::<f64>::fabs(sidechain);
         if abs_sidechain > self.envelope {
@@ -729,6 +792,9 @@ pub struct Ducker {
     amount: ModulatedParam,
     /// Key level (volts) at which full ducking is reached, knob + CV.
     threshold: ModulatedParam,
+    /// Memoized `[attack_coef, release_coef]` (two `exp` per sample while the
+    /// ballistics CVs are static).
+    coef_memo: Memo<3, [f64; 2]>,
     spec: PortSpec,
 }
 
@@ -746,6 +812,7 @@ impl Ducker {
             // Threshold spans 0..5 V; default knob ~0.2 -> ~1 V key level for full duck.
             threshold: ModulatedParam::new(ParamRange::Linear { min: 0.0, max: 5.0 })
                 .with_base(0.2),
+            coef_memo: Memo::new([0.0; 2]),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -816,10 +883,18 @@ impl GraphModule for Ducker {
         let amount = self.amount.value().clamp(0.0, 1.0);
         let threshold = self.threshold.value().max(0.0);
 
-        let attack_ms = 0.1 + attack_cv * 99.9;
-        let release_ms = 10.0 + release_cv * 990.0;
-        let attack_coef = env_coef(attack_ms / 1000.0, self.sample_rate);
-        let release_coef = env_coef(release_ms / 1000.0, self.sample_rate);
+        // Ballistics coefficients memoized on their CVs (bit-exact miss path).
+        let sample_rate = self.sample_rate;
+        let [attack_coef, release_coef] =
+            self.coef_memo
+                .get_or_compute([attack_cv, release_cv, sample_rate], || {
+                    let attack_ms = 0.1 + attack_cv * 99.9;
+                    let release_ms = 10.0 + release_cv * 990.0;
+                    [
+                        env_coef(attack_ms / 1000.0, sample_rate),
+                        env_coef(release_ms / 1000.0, sample_rate),
+                    ]
+                });
 
         // Follow the key envelope with attack/release ballistics.
         let abs_key = Libm::<f64>::fabs(key);
@@ -875,6 +950,9 @@ impl GraphModule for Ducker {
 pub struct EnvelopeFollower {
     sample_rate: f64,
     envelope: f64,
+    /// Memoized `[attack_coef, release_coef]` (two `exp` per sample while the
+    /// ballistics CVs are static).
+    coef_memo: Memo<3, [f64; 2]>,
     spec: PortSpec,
 }
 
@@ -883,6 +961,7 @@ impl EnvelopeFollower {
         Self {
             sample_rate,
             envelope: 0.0,
+            coef_memo: Memo::new([0.0; 2]),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -924,10 +1003,18 @@ impl GraphModule for EnvelopeFollower {
         let release_cv = inputs.get_or(2, 0.3).clamp(0.0, 1.0);
         let gain = inputs.get_or(3, 0.5).clamp(0.0, 1.0) * 4.0;
 
-        let attack_ms = 0.1 + attack_cv * 99.9;
-        let release_ms = 1.0 + release_cv * 999.0;
-        let attack_coef = env_coef(attack_ms / 1000.0, self.sample_rate);
-        let release_coef = env_coef(release_ms / 1000.0, self.sample_rate);
+        // Ballistics coefficients memoized on their CVs (bit-exact miss path).
+        let sample_rate = self.sample_rate;
+        let [attack_coef, release_coef] =
+            self.coef_memo
+                .get_or_compute([attack_cv, release_cv, sample_rate], || {
+                    let attack_ms = 0.1 + attack_cv * 99.9;
+                    let release_ms = 1.0 + release_cv * 999.0;
+                    [
+                        env_coef(attack_ms / 1000.0, sample_rate),
+                        env_coef(release_ms / 1000.0, sample_rate),
+                    ]
+                });
 
         let abs_input = Libm::<f64>::fabs(input);
         if abs_input > self.envelope {
@@ -1889,5 +1976,108 @@ mod tests {
     fn test_envelope_follower_nan_recovery() {
         let mut m = EnvelopeFollower::new(44100.0);
         assert_detector_recovers(&mut m, &[0], &[(0, 0.5)], |m| m.envelope);
+    }
+
+    // ---- Coefficient memoization (perf) ------------------------------------
+
+    /// Memoization must be observationally invisible: an ADSR whose memo is
+    /// invalidated before every tick executes the pre-memoization computation
+    /// (three `pow` + three `exp` per sample) and must agree bit-for-bit with
+    /// the memoized ADSR across gate cycles, both curve shapes, and both
+    /// constant and per-sample-modulated time CVs.
+    #[test]
+    fn test_adsr_memo_bit_identical() {
+        let mut memoized = Adsr::new(44100.0);
+        let mut forced = Adsr::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut out_m = PortValues::new();
+        let mut out_f = PortValues::new();
+
+        for n in 0..30_000u32 {
+            let t = n as f64;
+            // Two gate cycles so attack/decay/sustain/release all run.
+            let gate = if (n % 10_000) < 6_000 { 5.0 } else { 0.0 };
+            inputs.set(0, gate);
+            // Linear curves for the first half, exponential for the second.
+            inputs.set(6, if n < 15_000 { 0.0 } else { 5.0 });
+            if n < 20_000 {
+                // Constant time CVs (memo hits after the first sample).
+                inputs.set(2, 0.15);
+                inputs.set(3, 0.25);
+                inputs.set(5, 0.35);
+            } else {
+                // Per-sample-modulated attack CV (memo misses every sample).
+                inputs.set(2, 0.15 + 0.1 * Libm::<f64>::sin(t * 0.002));
+            }
+            inputs.set(4, 0.6);
+
+            memoized.tick(&inputs, &mut out_m);
+            forced.time_memo.invalidate();
+            forced.tick(&inputs, &mut out_f);
+
+            for &id in &[10u32, 11, 12] {
+                assert_eq!(
+                    out_m.get(id).unwrap().to_bits(),
+                    out_f.get(id).unwrap().to_bits(),
+                    "ADSR output {id} diverged at sample {n}"
+                );
+            }
+        }
+        assert!(memoized.time_memo.recompute_count() <= 10_001);
+        assert_eq!(forced.time_memo.recompute_count(), 30_000);
+    }
+
+    /// With constant time CVs the ADSR time/coefficient block is computed
+    /// exactly once, and a sample-rate change (part of the key) recomputes.
+    #[test]
+    fn test_adsr_memo_recompute_count() {
+        let mut adsr = Adsr::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 5.0);
+        for _ in 0..1000 {
+            adsr.tick(&inputs, &mut outputs);
+        }
+        assert_eq!(adsr.time_memo.recompute_count(), 1);
+
+        adsr.set_sample_rate(48000.0);
+        adsr.tick(&inputs, &mut outputs);
+        assert_eq!(adsr.time_memo.recompute_count(), 2);
+    }
+
+    /// Same equivalence for the dynamics detectors' memoized ballistics
+    /// coefficients (Compressor shown; Limiter/NoiseGate/Ducker/Follower share
+    /// the identical memo structure).
+    #[test]
+    fn test_compressor_memo_bit_identical() {
+        let mut memoized = Compressor::new(44100.0);
+        let mut forced = Compressor::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut out_m = PortValues::new();
+        let mut out_f = PortValues::new();
+
+        for n in 0..10_000u32 {
+            let t = n as f64;
+            inputs.set(0, Libm::<f64>::sin(t * 0.053) * 4.5);
+            inputs.set(1, 0.3);
+            inputs.set(2, 0.7);
+            if n >= 5_000 {
+                // Per-sample-modulated release CV.
+                inputs.set(4, 0.3 + 0.2 * Libm::<f64>::sin(t * 0.004));
+            }
+
+            memoized.tick(&inputs, &mut out_m);
+            forced.coef_memo.invalidate();
+            forced.tick(&inputs, &mut out_f);
+
+            for &id in &[10u32, 11] {
+                assert_eq!(
+                    out_m.get(id).unwrap().to_bits(),
+                    out_f.get(id).unwrap().to_bits(),
+                    "Compressor output {id} diverged at sample {n}"
+                );
+            }
+        }
+        assert!(memoized.coef_memo.recompute_count() <= 5_001);
     }
 }

@@ -1,6 +1,6 @@
 //! Delay-based and time-domain effect modules.
 
-use super::common::{env_coef, read_interpolated, sanitize_audio};
+use super::common::{env_coef, read_interpolated, sanitize_audio, Memo};
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -76,6 +76,8 @@ pub struct DelayLine {
     delay_smooth_coef: f64,
     /// Whether `smoothed_delay` has been snapped to its first setpoint yet.
     delay_primed: bool,
+    /// Memoized time map `1ms · 2000^cv` (one `pow` per sample while static).
+    delay_ms_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -96,6 +98,7 @@ impl DelayLine {
             smoothed_delay: 0.0,
             delay_smooth_coef: env_coef(Self::DELAY_SMOOTH_SECS, sample_rate),
             delay_primed: false,
+            delay_ms_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -134,10 +137,13 @@ impl GraphModule for DelayLine {
         let feedback = inputs.get_or(2, 0.0).clamp(0.0, 0.99); // Prevent runaway
         let mix = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
 
-        // Map time CV (0-1) to delay time (1ms to max delay, exponential)
-        let min_delay_ms = 1.0;
-        let max_delay_ms = Self::MAX_DELAY_SECS * 1000.0;
-        let delay_ms = min_delay_ms * Libm::<f64>::pow(max_delay_ms / min_delay_ms, time_cv);
+        // Map time CV (0-1) to delay time (1ms to max delay, exponential),
+        // memoized on the time CV (bit-exact miss path).
+        let delay_ms = self.delay_ms_memo.get_or_compute([time_cv], || {
+            let min_delay_ms = 1.0;
+            let max_delay_ms = Self::MAX_DELAY_SECS * 1000.0;
+            min_delay_ms * Libm::<f64>::pow(max_delay_ms / min_delay_ms, time_cv)
+        });
         let target_delay =
             (delay_ms * self.sample_rate / 1000.0).clamp(1.0, (self.buffer.len() - 1) as f64);
 
@@ -205,6 +211,8 @@ pub struct Chorus {
     /// LFO phases for each voice
     lfo_phases: [f64; 3],
     sample_rate: f64,
+    /// Memoized rate map `0.1 · 50^cv` (one `pow` per sample while static).
+    rate_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -240,6 +248,7 @@ impl Chorus {
             // Offset phases for each voice to create movement
             lfo_phases: [0.0, 0.33, 0.67],
             sample_rate,
+            rate_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -282,8 +291,11 @@ impl GraphModule for Chorus {
         let depth_cv = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
         let mix = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
 
-        // Map rate CV to LFO frequency (0.1 Hz to 5 Hz)
-        let lfo_freq = 0.1 * Libm::<f64>::pow(50.0, rate_cv);
+        // Map rate CV to LFO frequency (0.1 Hz to 5 Hz), memoized on the rate
+        // CV (bit-exact miss path).
+        let lfo_freq = self
+            .rate_memo
+            .get_or_compute([rate_cv], || 0.1 * Libm::<f64>::pow(50.0, rate_cv));
 
         // Map depth CV to modulation depth in ms
         let mod_depth_ms = depth_cv * Self::MAX_MOD_DELAY_MS;
@@ -386,6 +398,8 @@ pub struct Flanger {
     write_pos: usize,
     lfo_phase: f64,
     sample_rate: f64,
+    /// Memoized rate map `0.05 · 100^cv` (one `pow` per sample while static).
+    rate_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -399,6 +413,7 @@ impl Flanger {
             write_pos: 0,
             lfo_phase: 0.0,
             sample_rate,
+            rate_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -451,7 +466,10 @@ impl GraphModule for Flanger {
         let mix = inputs.get_or(4, 0.5).clamp(0.0, 1.0);
         let spread = inputs.get_or(5, 0.5).clamp(0.0, 1.0);
 
-        let lfo_freq = 0.05 * Libm::<f64>::pow(100.0, rate_cv);
+        // Rate map memoized on the rate CV (bit-exact miss path).
+        let lfo_freq = self
+            .rate_memo
+            .get_or_compute([rate_cv], || 0.05 * Libm::<f64>::pow(100.0, rate_cv));
         let base_delay_ms = 1.0;
         let mod_depth_ms = depth_cv * (Self::MAX_DELAY_MS - base_delay_ms);
 
@@ -526,6 +544,13 @@ pub struct Phaser {
     allpass_y1: [[f64; 6]; 2],
     lfo_phase: f64,
     sample_rate: f64,
+    /// Memoized rate map `0.05 · 100^cv` (one `pow` per sample while static).
+    rate_memo: Memo<1, f64>,
+    /// Memoized allpass coefficient `(1-tan(ω/2))/(1+tan(ω/2))`, keyed on the
+    /// swept center frequency. It hits whenever `depth` is zero (the sweep
+    /// freezes); with an active sweep it misses per sample, costing only the
+    /// key compare on top of the original math.
+    coef_memo: Memo<2, f64>,
     spec: PortSpec,
 }
 
@@ -536,6 +561,8 @@ impl Phaser {
             allpass_y1: [[0.0; 6]; 2],
             lfo_phase: 0.0,
             sample_rate,
+            rate_memo: Memo::new(0.0),
+            coef_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -614,7 +641,10 @@ impl GraphModule for Phaser {
 
         let spread = inputs.get_or(6, 0.5).clamp(0.0, 1.0);
 
-        let lfo_freq = 0.05 * Libm::<f64>::pow(100.0, rate_cv);
+        // Rate map memoized on the rate CV (bit-exact miss path).
+        let lfo_freq = self
+            .rate_memo
+            .get_or_compute([rate_cv], || 0.05 * Libm::<f64>::pow(100.0, rate_cv));
 
         let min_freq = 200.0;
         let max_freq = 4000.0;
@@ -631,9 +661,15 @@ impl GraphModule for Phaser {
             let lfo = Libm::<f64>::sin(phase * TAU);
             let freq = min_freq + (lfo * 0.5 + 0.5) * depth * (max_freq - min_freq);
 
-            let omega = TAU * freq / self.sample_rate;
-            let tan_w = Libm::<f64>::tan(omega * 0.5);
-            let coef = (1.0 - tan_w) / (1.0 + tan_w);
+            // Allpass coefficient memoized on the swept frequency (bit-exact
+            // miss path). Shared across channels: at zero depth both sweeps
+            // freeze on the same frequency and the second channel hits.
+            let sample_rate = self.sample_rate;
+            let coef = self.coef_memo.get_or_compute([freq, sample_rate], || {
+                let omega = TAU * freq / sample_rate;
+                let tan_w = Libm::<f64>::tan(omega * 0.5);
+                (1.0 - tan_w) / (1.0 + tan_w)
+            });
 
             // Per-channel feedback tap from this chain's last stage.
             let mut signal = input + self.allpass_y1[ch][num_stages - 1] * feedback;
@@ -687,6 +723,8 @@ impl GraphModule for Phaser {
 pub struct Tremolo {
     lfo_phase: f64,
     sample_rate: f64,
+    /// Memoized rate map `0.1 · 200^cv` (one `pow` per sample while static).
+    rate_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -695,6 +733,7 @@ impl Tremolo {
         Self {
             lfo_phase: 0.0,
             sample_rate,
+            rate_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -731,8 +770,11 @@ impl GraphModule for Tremolo {
         let depth = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
         let shape = inputs.get_or(3, 0.0).clamp(0.0, 1.0);
 
-        // Rate: 0.1Hz to 20Hz (exponential)
-        let lfo_freq = 0.1 * Libm::<f64>::pow(200.0, rate_cv);
+        // Rate: 0.1Hz to 20Hz (exponential), memoized on the rate CV
+        // (bit-exact miss path).
+        let lfo_freq = self
+            .rate_memo
+            .get_or_compute([rate_cv], || 0.1 * Libm::<f64>::pow(200.0, rate_cv));
 
         // Generate LFO: blend between sine and triangle based on shape
         let phase_rad = self.lfo_phase * TAU;
@@ -774,6 +816,8 @@ pub struct Vibrato {
     write_pos: usize,
     lfo_phase: f64,
     sample_rate: f64,
+    /// Memoized rate map `0.1 · 150^cv` (one `pow` per sample while static).
+    rate_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -787,6 +831,7 @@ impl Vibrato {
             write_pos: 0,
             lfo_phase: 0.0,
             sample_rate,
+            rate_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::Audio),
@@ -823,8 +868,11 @@ impl GraphModule for Vibrato {
         let depth = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
         let mix = inputs.get_or(3, 1.0).clamp(0.0, 1.0);
 
-        // Rate: 0.1Hz to 15Hz (exponential)
-        let lfo_freq = 0.1 * Libm::<f64>::pow(150.0, rate_cv);
+        // Rate: 0.1Hz to 15Hz (exponential), memoized on the rate CV
+        // (bit-exact miss path).
+        let lfo_freq = self
+            .rate_memo
+            .get_or_compute([rate_cv], || 0.1 * Libm::<f64>::pow(150.0, rate_cv));
 
         // Base delay at center of modulation range
         let base_delay_ms = Self::MAX_DELAY_MS * 0.5;
@@ -2119,5 +2167,89 @@ mod tests {
         // Must not panic on the next tick.
         vib.tick(&inputs, &mut outputs);
         assert!(outputs.get(10).unwrap().is_finite());
+    }
+
+    // ---- Coefficient memoization (perf) ------------------------------------
+
+    /// Memoization must be observationally invisible: a phaser whose memos
+    /// (rate map and allpass coefficient) are invalidated before every tick
+    /// executes the pre-memoization computation every sample and must agree
+    /// bit-for-bit with the memoized phaser. Covers a frozen sweep (depth 0,
+    /// coefficient memo hits) and an active sweep with per-sample-modulated
+    /// rate (both memos miss).
+    #[test]
+    fn test_phaser_memo_bit_identical() {
+        let mut memoized = Phaser::new(44100.0);
+        let mut forced = Phaser::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut out_m = PortValues::new();
+        let mut out_f = PortValues::new();
+
+        for n in 0..20_000u32 {
+            let t = n as f64;
+            inputs.set(0, Libm::<f64>::sin(t * 0.043) * 3.0);
+            inputs.set(3, 0.4); // feedback
+            inputs.set(6, 0.5); // spread
+            if n < 10_000 {
+                // Frozen sweep: rate/coef memos hit after the first sample.
+                inputs.set(1, 0.3);
+                inputs.set(2, 0.0);
+            } else {
+                // Active sweep + modulated rate: memos miss every sample.
+                inputs.set(1, 0.3 + 0.2 * Libm::<f64>::sin(t * 0.001));
+                inputs.set(2, 0.7);
+            }
+
+            memoized.tick(&inputs, &mut out_m);
+            forced.rate_memo.invalidate();
+            forced.coef_memo.invalidate();
+            forced.tick(&inputs, &mut out_f);
+
+            for &id in &[10u32, 11, 12] {
+                assert_eq!(
+                    out_m.get(id).unwrap().to_bits(),
+                    out_f.get(id).unwrap().to_bits(),
+                    "Phaser output {id} diverged at sample {n}"
+                );
+            }
+        }
+        // In the frozen half both channels freeze on the same frequency, so
+        // the coefficient is computed once, not once per channel per sample.
+        assert!(memoized.rate_memo.recompute_count() <= 10_001);
+    }
+
+    /// Same equivalence for the delay line's memoized exponential time map,
+    /// exercising the feedback path (memoized values feed recirculating state).
+    #[test]
+    fn test_delay_line_memo_bit_identical() {
+        let mut memoized = DelayLine::new(44100.0);
+        let mut forced = DelayLine::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut out_m = PortValues::new();
+        let mut out_f = PortValues::new();
+
+        for n in 0..20_000u32 {
+            let t = n as f64;
+            inputs.set(0, Libm::<f64>::sin(t * 0.029) * 4.0);
+            inputs.set(2, 0.6); // feedback
+            inputs.set(3, 0.5); // mix
+            if n < 10_000 {
+                inputs.set(1, 0.4);
+            } else {
+                // Per-sample-modulated delay time (memo misses every sample).
+                inputs.set(1, 0.4 + 0.1 * Libm::<f64>::sin(t * 0.0007));
+            }
+
+            memoized.tick(&inputs, &mut out_m);
+            forced.delay_ms_memo.invalidate();
+            forced.tick(&inputs, &mut out_f);
+
+            assert_eq!(
+                out_m.get(10).unwrap().to_bits(),
+                out_f.get(10).unwrap().to_bits(),
+                "DelayLine output diverged at sample {n}"
+            );
+        }
+        assert!(memoized.delay_ms_memo.recompute_count() <= 10_001);
     }
 }

@@ -1,6 +1,8 @@
 //! Oscillator and source modules.
 
-use super::common::{polyblamp, polyblep, voct_to_hz, wrap_phase, EdgeDetector, GATE_THRESHOLD_V};
+use super::common::{
+    polyblamp, polyblep, voct_to_hz, wrap_phase, EdgeDetector, Memo, GATE_THRESHOLD_V,
+};
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use crate::rng;
 use alloc::vec;
@@ -29,6 +31,9 @@ pub struct Vco {
     phase: f64,
     sample_rate: f64,
     sync_edge: EdgeDetector,
+    /// Memoized frequency derivation (`voct_to_hz` + exponential FM `pow`):
+    /// pitch/FM inputs change only on note events or glide in practice.
+    freq_memo: Memo<3, f64>,
     spec: PortSpec,
 }
 
@@ -38,6 +43,7 @@ impl Vco {
             phase: 0.0,
             sample_rate,
             sync_edge: EdgeDetector::new(),
+            freq_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "voct", SignalKind::VoltPerOctave),
@@ -67,25 +73,39 @@ impl Default for Vco {
     }
 }
 
-impl GraphModule for Vco {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
+impl Vco {
+    /// Output-port bits for [`GraphModule::tick_masked`], in `PortSpec` order.
+    const WANT_SIN: u32 = 1 << 0;
+    const WANT_TRI: u32 = 1 << 1;
+    const WANT_SAW: u32 = 1 << 2;
+    const WANT_SQR: u32 = 1 << 3;
 
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+    /// The whole of [`GraphModule::tick`], with each waveform gated on `wanted`.
+    ///
+    /// All four waveforms are pure functions of `phase`, `pw` and `dt` — no accumulator,
+    /// no history — so any subset can be skipped without touching state evolution. What
+    /// must *not* be skipped, and is not: the memoized frequency derivation, the hard-sync
+    /// edge detector, and the phase advance. `tick` calls this with an all-ones mask, so
+    /// the unmasked path is literally this code with every branch taken.
+    fn tick_wanted(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
         let voct = inputs.get_or(0, 0.0);
         let fm = inputs.get_or(1, 0.0);
         let pw = inputs.get_or(2, 0.5).clamp(0.05, 0.95);
         let sync = inputs.get_or(3, 0.0);
         let fm_lin = inputs.get_or(4, 0.0);
 
-        // V/Oct to frequency: 0V = C4 (261.63 Hz).
-        let base_freq = voct_to_hz(voct);
-        // Exponential FM: raw ±5V == ±5 octaves.
-        let mut freq = base_freq * Libm::<f64>::pow(2.0, fm);
-        // Linear through-zero FM: ±5V == ±100% of base frequency. This can drive
-        // `freq` (and thus the phase increment) negative for through-zero FM.
-        freq += (fm_lin / 5.0) * base_freq;
+        // Frequency derivation memoized on its driving inputs (bit-exact: the
+        // miss path below is the original computation, unchanged and in order).
+        let freq = self.freq_memo.get_or_compute([voct, fm, fm_lin], || {
+            // V/Oct to frequency: 0V = C4 (261.63 Hz).
+            let base_freq = voct_to_hz(voct);
+            // Exponential FM: raw ±5V == ±5 octaves.
+            let mut freq = base_freq * Libm::<f64>::pow(2.0, fm);
+            // Linear through-zero FM: ±5V == ±100% of base frequency. This can drive
+            // `freq` (and thus the phase increment) negative for through-zero FM.
+            freq += (fm_lin / 5.0) * base_freq;
+            freq
+        });
 
         // Normalized phase increment (may be negative under through-zero FM).
         let dt = freq / self.sample_rate;
@@ -103,35 +123,48 @@ impl GraphModule for Vco {
         let phase = self.phase;
 
         // Sine is inherently bandlimited.
-        let sin = Libm::<f64>::sin(phase * TAU) * 5.0;
+        let sin = if wanted & Self::WANT_SIN != 0 {
+            Libm::<f64>::sin(phase * TAU) * 5.0
+        } else {
+            0.0
+        };
 
         // Bandlimited saw: naive ramp minus PolyBLEP at the wrap.
-        let mut saw = 2.0 * phase - 1.0;
-        saw -= polyblep(phase, dt_abs);
+        let mut saw = 0.0;
+        if wanted & Self::WANT_SAW != 0 {
+            saw = 2.0 * phase - 1.0;
+            saw -= polyblep(phase, dt_abs);
+        }
 
         // Bandlimited square/pulse: PolyBLEP at both the rising (wrap) and
         // falling (pulse-width) edges.
-        let mut sqr = if phase < pw { 1.0 } else { -1.0 };
-        sqr += polyblep(phase, dt_abs);
-        let pw_edge = {
-            let x = phase + (1.0 - pw);
-            x - Libm::<f64>::floor(x)
-        };
-        sqr -= polyblep(pw_edge, dt_abs);
+        let mut sqr = 0.0;
+        if wanted & Self::WANT_SQR != 0 {
+            sqr = if phase < pw { 1.0 } else { -1.0 };
+            sqr += polyblep(phase, dt_abs);
+            let pw_edge = {
+                let x = phase + (1.0 - pw);
+                x - Libm::<f64>::floor(x)
+            };
+            sqr -= polyblep(pw_edge, dt_abs);
+        }
 
         // Bandlimited triangle via PolyBLAMP corrections at its two corners
         // (slope changes of ±8 per unit phase => ±4*dt per sample).
-        let mut tri = 1.0 - 4.0 * Libm::<f64>::fabs(phase - 0.5);
-        let corner_half = {
-            let x = phase - 0.5;
-            if x < 0.0 {
-                x + 1.0
-            } else {
-                x
-            }
-        };
-        tri += 4.0 * dt_abs * polyblamp(phase, dt_abs);
-        tri -= 4.0 * dt_abs * polyblamp(corner_half, dt_abs);
+        let mut tri = 0.0;
+        if wanted & Self::WANT_TRI != 0 {
+            tri = 1.0 - 4.0 * Libm::<f64>::fabs(phase - 0.5);
+            let corner_half = {
+                let x = phase - 0.5;
+                if x < 0.0 {
+                    x + 1.0
+                } else {
+                    x
+                }
+            };
+            tri += 4.0 * dt_abs * polyblamp(phase, dt_abs);
+            tri -= 4.0 * dt_abs * polyblamp(corner_half, dt_abs);
+        }
 
         // Bounded hard-sync correction. The reset introduces a value step in the
         // saw and square that is not at a natural phase wrap, so the wrap-BLEP
@@ -144,25 +177,52 @@ impl GraphModule for Vco {
             // Phase-equivalent position of the (past) discontinuity for PolyBLEP.
             let equiv = (1.0 - frac) * dt_abs;
             let blep = polyblep(equiv, dt_abs);
-            // Saw step (normalized): from (2*p_old-1) down to (2*0-1) = -2*p_old.
-            let saw_step = -2.0 * p_old;
-            saw += (saw_step / 2.0) * blep;
-            // Square step: from sign(p_old<pw) to +1 (phase reset to 0 < pw).
-            let old_sqr = if p_old < pw { 1.0 } else { -1.0 };
-            let sqr_step = 1.0 - old_sqr;
-            sqr += (sqr_step / 2.0) * blep;
+            if wanted & Self::WANT_SAW != 0 {
+                // Saw step (normalized): from (2*p_old-1) down to (2*0-1) = -2*p_old.
+                let saw_step = -2.0 * p_old;
+                saw += (saw_step / 2.0) * blep;
+            }
+            if wanted & Self::WANT_SQR != 0 {
+                // Square step: from sign(p_old<pw) to +1 (phase reset to 0 < pw).
+                let old_sqr = if p_old < pw { 1.0 } else { -1.0 };
+                let sqr_step = 1.0 - old_sqr;
+                sqr += (sqr_step / 2.0) * blep;
+            }
         }
 
-        // Scale to ±5V.
-        outputs.set(10, sin);
-        outputs.set(11, tri * 5.0);
-        outputs.set(12, saw * 5.0);
-        outputs.set(13, sqr * 5.0);
+        // Scale to ±5V. A port nobody reads is left unwritten rather than written with a
+        // placeholder, so it keeps its previous routing value (see `NodeExec::scatter`).
+        if wanted & Self::WANT_SIN != 0 {
+            outputs.set(10, sin);
+        }
+        if wanted & Self::WANT_TRI != 0 {
+            outputs.set(11, tri * 5.0);
+        }
+        if wanted & Self::WANT_SAW != 0 {
+            outputs.set(12, saw * 5.0);
+        }
+        if wanted & Self::WANT_SQR != 0 {
+            outputs.set(13, sqr * 5.0);
+        }
 
         // Advance phase (dt may be negative under through-zero FM). Q198:
         // wrap_phase also recovers from a non-finite dt (extreme V/Oct or FM
         // overflowing voct_to_hz) instead of latching the accumulator to NaN.
         self.phase = wrap_phase(self.phase + dt);
+    }
+}
+
+impl GraphModule for Vco {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_wanted(inputs, outputs, u32::MAX);
+    }
+
+    fn tick_masked(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
+        self.tick_wanted(inputs, outputs, wanted);
     }
 
     fn reset(&mut self) {
@@ -187,6 +247,8 @@ pub struct Lfo {
     phase: f64,
     sample_rate: f64,
     reset_edge: EdgeDetector,
+    /// Memoized rate map `0.01 * 3000^cv` (one `pow` per sample while static).
+    freq_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -196,6 +258,7 @@ impl Lfo {
             phase: 0.0,
             sample_rate,
             reset_edge: EdgeDetector::new(),
+            freq_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "rate", SignalKind::CvUnipolar)
@@ -222,40 +285,77 @@ impl Default for Lfo {
     }
 }
 
-impl GraphModule for Lfo {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
+impl Lfo {
+    /// Output-port bits for [`GraphModule::tick_masked`], in `PortSpec` order.
+    const WANT_SIN: u32 = 1 << 0;
+    const WANT_TRI: u32 = 1 << 1;
+    const WANT_SAW: u32 = 1 << 2;
+    const WANT_SQR: u32 = 1 << 3;
+    const WANT_SIN_UNI: u32 = 1 << 4;
 
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+    /// The whole of [`GraphModule::tick`], with each waveform gated on `wanted`.
+    ///
+    /// Every waveform is a pure function of `phase`, `scale` and `depth`, so skipping any
+    /// of them is invisible to the rest. The memoized rate map, the reset edge detector and
+    /// the phase advance are unconditional. `tick` calls this with an all-ones mask.
+    fn tick_wanted(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
         let rate_cv = inputs.get_or(0, 0.5);
         let depth = inputs.get_or(1, 10.0) / 10.0; // Normalize to 0-1
         let reset = inputs.get_or(2, 0.0);
 
-        // Map rate CV (0-1) to frequency (0.01 Hz - 30 Hz, exponential)
-        let freq = 0.01 * Libm::<f64>::pow(3000.0, rate_cv.clamp(0.0, 1.0));
+        // Map rate CV (0-1) to frequency (0.01 Hz - 30 Hz, exponential),
+        // memoized on the rate CV (bit-exact miss path).
+        let freq = self.freq_memo.get_or_compute([rate_cv], || {
+            0.01 * Libm::<f64>::pow(3000.0, rate_cv.clamp(0.0, 1.0))
+        });
 
         // Reset on trigger
         if self.reset_edge.rising(reset) {
             self.phase = 0.0;
         }
 
-        // Generate waveforms scaled by depth (±5V * depth)
+        // Generate waveforms scaled by depth (±5V * depth). A port nobody reads is left
+        // unwritten rather than written with a placeholder, so it keeps its previous
+        // routing value (see `NodeExec::scatter`).
         let scale = 5.0 * depth;
-        let sin = Libm::<f64>::sin(self.phase * TAU) * scale;
-        let tri = (1.0 - 4.0 * Libm::<f64>::fabs(self.phase - 0.5)) * scale;
-        let saw = (2.0 * self.phase - 1.0) * scale;
-        let sqr = if self.phase < 0.5 { scale } else { -scale };
-        let sin_uni = (Libm::<f64>::sin(self.phase * TAU) * 0.5 + 0.5) * depth * 10.0;
-
-        outputs.set(10, sin);
-        outputs.set(11, tri);
-        outputs.set(12, saw);
-        outputs.set(13, sqr);
-        outputs.set(14, sin_uni);
+        if wanted & Self::WANT_SIN != 0 {
+            outputs.set(10, Libm::<f64>::sin(self.phase * TAU) * scale);
+        }
+        if wanted & Self::WANT_TRI != 0 {
+            outputs.set(
+                11,
+                (1.0 - 4.0 * Libm::<f64>::fabs(self.phase - 0.5)) * scale,
+            );
+        }
+        if wanted & Self::WANT_SAW != 0 {
+            outputs.set(12, (2.0 * self.phase - 1.0) * scale);
+        }
+        if wanted & Self::WANT_SQR != 0 {
+            outputs.set(13, if self.phase < 0.5 { scale } else { -scale });
+        }
+        if wanted & Self::WANT_SIN_UNI != 0 {
+            outputs.set(
+                14,
+                (Libm::<f64>::sin(self.phase * TAU) * 0.5 + 0.5) * depth * 10.0,
+            );
+        }
 
         // Q198: wrap_phase recovers from a non-finite rate instead of latching.
         self.phase = wrap_phase(self.phase + freq / self.sample_rate);
+    }
+}
+
+impl GraphModule for Lfo {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_wanted(inputs, outputs, u32::MAX);
+    }
+
+    fn tick_masked(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
+        self.tick_wanted(inputs, outputs, wanted);
     }
 
     fn reset(&mut self) {
@@ -282,6 +382,8 @@ pub struct Supersaw {
     /// center voice (advances at half the center rate).
     sub_phase: f64,
     sample_rate: f64,
+    /// Memoized `voct_to_hz` (one `pow` per sample while the pitch is static).
+    freq_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -312,6 +414,7 @@ impl Supersaw {
             phases,
             sub_phase: 0.0,
             sample_rate,
+            freq_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "voct", SignalKind::VoltPerOctave).with_default(0.0),
@@ -349,8 +452,8 @@ impl GraphModule for Supersaw {
         let detune = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let mix = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
 
-        // Base frequency from V/Oct
-        let base_freq = voct_to_hz(voct); // C4 at 0V
+        // Base frequency from V/Oct, memoized (bit-exact miss path). C4 at 0V.
+        let base_freq = self.freq_memo.get_or_compute([voct], || voct_to_hz(voct));
 
         let mut sum = 0.0;
         let mut total_mix = 0.0;
@@ -429,6 +532,8 @@ pub struct KarplusStrong {
     last_output: f64,
     /// Rising-edge detector for the trigger (excite once per pluck).
     trigger_edge: EdgeDetector,
+    /// Memoized `voct_to_hz` (one `pow` per sample while the pitch is static).
+    freq_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -447,6 +552,7 @@ impl KarplusStrong {
             sample_rate,
             last_output: 0.0,
             trigger_edge: EdgeDetector::new(),
+            freq_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "voct", SignalKind::VoltPerOctave).with_default(0.0),
@@ -508,7 +614,8 @@ impl GraphModule for KarplusStrong {
         // capacity (`max_len`), not the current buffer length: a prior high-note
         // pluck shrinks `buffer`, but a later low note must still be able to
         // request its full (longer) period and grow the buffer back on pluck.
-        let freq = voct_to_hz(voct);
+        // The V/Oct→Hz `pow` is memoized on the pitch (bit-exact miss path).
+        let freq = self.freq_memo.get_or_compute([voct], || voct_to_hz(voct));
         let period = (self.sample_rate / freq).clamp(2.0, self.max_len as f64 - 1.0);
         let period_int = period as usize;
 
@@ -672,36 +779,71 @@ impl Default for NoiseGenerator {
     }
 }
 
-impl GraphModule for NoiseGenerator {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
+impl NoiseGenerator {
+    /// Output-port bits for [`GraphModule::tick_masked`], in `PortSpec` order.
+    const WANT_WHITE: u32 = 1 << 0;
+    const WANT_PINK: u32 = 1 << 1;
+    const WANT_WHITE2: u32 = 1 << 2;
+    const WANT_PINK2: u32 = 1 << 3;
 
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+    /// The whole of [`GraphModule::tick`], with each write gated on `wanted`.
+    ///
+    /// **Every draw stays unconditional.** All four sources have side effects on retained
+    /// state — the two `random_bipolar` calls advance the shared RNG stream, and each
+    /// `sample()` steps its own pink-noise filter — so skipping one would shift the values
+    /// the *remaining* outputs produce on later samples. Only the two correlation mixes
+    /// (pure arithmetic) and the writes themselves are skipped. `tick` calls this with an
+    /// all-ones mask.
+    fn tick_wanted(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
         // Phase 3: Adjustable correlation
         let correlation = inputs.get_or(0, self.correlation).clamp(0.0, 1.0);
 
         // Primary white noise
         let white1 = rng::random_bipolar();
 
-        // Phase 3: Correlated white noise for second channel
-        // Mix between independent noise and correlated (shared) noise
+        // Phase 3: Correlated white noise for second channel. The draw is unconditional
+        // (it advances the shared RNG stream); only the mix below is skippable.
         let independent = rng::random_bipolar();
-        let white2 = white1 * correlation + independent * (1.0 - correlation);
 
         // Primary pink noise
         let pink1 = self.pink.sample();
 
-        // Phase 3: Correlated pink noise
+        // Phase 3: Correlated pink noise. Likewise unconditional — `sample()` steps the
+        // second pink-noise filter's own state.
         let pink2_independent = self.pink2.sample();
-        let pink2 = pink1 * correlation + pink2_independent * (1.0 - correlation);
 
         self.last_white = white1;
 
-        outputs.set(10, white1 * 5.0);
-        outputs.set(11, pink1 * 5.0);
-        outputs.set(12, white2 * 5.0);
-        outputs.set(13, pink2 * 5.0);
+        // A port nobody reads is left unwritten rather than written with a placeholder, so
+        // it keeps its previous routing value (see `NodeExec::scatter`).
+        if wanted & Self::WANT_WHITE != 0 {
+            outputs.set(10, white1 * 5.0);
+        }
+        if wanted & Self::WANT_PINK != 0 {
+            outputs.set(11, pink1 * 5.0);
+        }
+        if wanted & Self::WANT_WHITE2 != 0 {
+            let white2 = white1 * correlation + independent * (1.0 - correlation);
+            outputs.set(12, white2 * 5.0);
+        }
+        if wanted & Self::WANT_PINK2 != 0 {
+            let pink2 = pink1 * correlation + pink2_independent * (1.0 - correlation);
+            outputs.set(13, pink2 * 5.0);
+        }
+    }
+}
+
+impl GraphModule for NoiseGenerator {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_wanted(inputs, outputs, u32::MAX);
+    }
+
+    fn tick_masked(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
+        self.tick_wanted(inputs, outputs, wanted);
     }
 
     fn reset(&mut self) {
@@ -789,6 +931,8 @@ pub struct Wavetable {
     /// Previous sync input for edge detection
     prev_sync: f64,
     sample_rate: f64,
+    /// Memoized `voct_to_hz` (one `pow` per sample while the pitch is static).
+    freq_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -821,6 +965,7 @@ impl Wavetable {
             phase: 0.0,
             prev_sync: 0.0,
             sample_rate,
+            freq_memo: Memo::new(0.0),
             spec,
         };
         osc.generate_tables();
@@ -965,8 +1110,9 @@ impl GraphModule for Wavetable {
         }
         self.prev_sync = sync;
 
-        // Calculate frequency from V/Oct (0V = C4 = 261.63 Hz)
-        let frequency = voct_to_hz(v_oct);
+        // Calculate frequency from V/Oct (0V = C4 = 261.63 Hz), memoized on the
+        // pitch (bit-exact miss path).
+        let frequency = self.freq_memo.get_or_compute([v_oct], || voct_to_hz(v_oct));
         let phase_inc = frequency / self.sample_rate;
 
         // Select tables based on table CV and morph
@@ -1029,6 +1175,13 @@ pub struct FormantOsc {
     /// 5 resonator states (2 state variables each)
     resonator_state: [[f64; 2]; 5],
     sample_rate: f64,
+    /// Memoized fundamental frequency (`voct_to_hz` `pow`). Keyed on the
+    /// vibrato-modulated pitch, so it hits whenever vibrato depth is zero.
+    freq_memo: Memo<1, f64>,
+    /// Memoized per-formant resonator coefficients (shift `pow` plus five
+    /// sin/cos pairs per sample while vowel/shift are static). Each entry is
+    /// `[b0/norm, a1/norm, a2/norm]` for one formant.
+    coef_memo: Memo<3, [[f64; 3]; 5]>,
     spec: PortSpec,
 }
 
@@ -1073,12 +1226,14 @@ impl FormantOsc {
             vibrato_phase: 0.0,
             resonator_state: [[0.0; 2]; 5],
             sample_rate,
+            freq_memo: Memo::new(0.0),
+            coef_memo: Memo::new([[0.0; 3]; 5]),
             spec,
         }
     }
 
     /// Get interpolated formant frequencies for a vowel position (0-1)
-    fn get_formants(&self, vowel: f64, shift: f64) -> [f64; 5] {
+    fn get_formants(vowel: f64, shift: f64) -> [f64; 5] {
         let vowel = vowel.clamp(0.0, 1.0);
         let idx = vowel * 4.0;
         let idx0 = (idx as usize).min(3);
@@ -1097,35 +1252,39 @@ impl FormantOsc {
         result
     }
 
-    /// Process a sample through a 2-pole resonator (state-variable filter style)
-    fn process_resonator(
-        &mut self,
-        input: f64,
-        freq: f64,
-        bandwidth: f64,
-        formant_idx: usize,
-    ) -> f64 {
-        let omega = 2.0 * core::f64::consts::PI * freq / self.sample_rate;
-        let omega = omega.clamp(0.01, core::f64::consts::PI * 0.45);
+    /// Normalized 2-pole resonator coefficients `[b0/norm, a1/norm, a2/norm]`
+    /// for every formant of the given vowel position/shift.
+    ///
+    /// This is the parameter-derived half of the old per-sample
+    /// `process_resonator`, split out so it can be memoized. The per-sample
+    /// Direct Form II transposed update in `tick` consumes the normalized
+    /// quotients exactly as the original expressions did (IEEE-754 negation of
+    /// a correctly rounded quotient equals the quotient of the negated
+    /// numerator, so `-(a1/norm)` is bit-identical to the original
+    /// `-a1 / norm`).
+    fn resonator_coefs(vowel: f64, shift: f64, sample_rate: f64) -> [[f64; 3]; 5] {
+        let formants = Self::get_formants(vowel, shift);
+        let mut coefs = [[0.0; 3]; 5];
+        for (i, coef) in coefs.iter_mut().enumerate() {
+            let freq = formants[i];
+            let bandwidth = Self::BANDWIDTHS[i];
 
-        let q = freq / bandwidth;
-        let alpha = Libm::<f64>::sin(omega) / (2.0 * q);
+            let omega = 2.0 * core::f64::consts::PI * freq / sample_rate;
+            let omega = omega.clamp(0.01, core::f64::consts::PI * 0.45);
 
-        // Simple 2-pole bandpass resonator
-        let cos_omega = Libm::<f64>::cos(omega);
-        let b0 = alpha;
-        let a1 = -2.0 * cos_omega;
-        let a2 = 1.0 - alpha;
-        let norm = 1.0 + alpha;
+            let q = freq / bandwidth;
+            let alpha = Libm::<f64>::sin(omega) / (2.0 * q);
 
-        let state = &mut self.resonator_state[formant_idx];
+            // Simple 2-pole bandpass resonator
+            let cos_omega = Libm::<f64>::cos(omega);
+            let b0 = alpha;
+            let a1 = -2.0 * cos_omega;
+            let a2 = 1.0 - alpha;
+            let norm = 1.0 + alpha;
 
-        // Direct Form II transposed
-        let output = b0 / norm * input + state[0];
-        state[0] = -a1 / norm * output + state[1];
-        state[1] = -b0 / norm * input - a2 / norm * output;
-
-        output
+            *coef = [b0 / norm, a1 / norm, a2 / norm];
+        }
+        coefs
     }
 
     /// Generate glottal pulse (simplified LF model approximation)
@@ -1170,20 +1329,34 @@ impl GraphModule for FormantOsc {
         let vibrato_semitones = vibrato * vibrato_depth * 0.5; // Max ±0.5 semitones
         let v_oct_with_vibrato = v_oct + vibrato_semitones / 12.0;
 
-        // Calculate fundamental frequency
-        let frequency = voct_to_hz(v_oct_with_vibrato);
+        // Calculate fundamental frequency, memoized on the vibrato-modulated
+        // pitch (a hit whenever vibrato depth is zero and pitch is static).
+        let frequency = self
+            .freq_memo
+            .get_or_compute([v_oct_with_vibrato], || voct_to_hz(v_oct_with_vibrato));
         let phase_inc = frequency / self.sample_rate;
 
         // Generate glottal pulse excitation
         let excitation = Self::glottal_pulse(self.phase);
 
-        // Get formant frequencies for current vowel
-        let formants = self.get_formants(vowel, formant_shift);
+        // Formant resonator coefficients, memoized on vowel/shift/sample-rate
+        // (see `resonator_coefs` for the bit-exactness argument).
+        let sample_rate = self.sample_rate;
+        let coefs = self
+            .coef_memo
+            .get_or_compute([vowel, formant_shift, sample_rate], || {
+                Self::resonator_coefs(vowel, formant_shift, sample_rate)
+            });
 
-        // Process through parallel resonators and sum
+        // Process through parallel resonators (Direct Form II transposed) and
+        // sum. `c = [b0/norm, a1/norm, a2/norm]`; the update below is the
+        // original `process_resonator` body with the quotients precomputed.
         let mut output = 0.0;
-        for (i, &freq) in formants.iter().enumerate() {
-            let formant_out = self.process_resonator(excitation, freq, Self::BANDWIDTHS[i], i);
+        for (i, c) in coefs.iter().enumerate() {
+            let state = &mut self.resonator_state[i];
+            let formant_out = c[0] * excitation + state[0];
+            state[0] = -c[1] * formant_out + state[1];
+            state[1] = -c[0] * excitation - c[2] * formant_out;
             output += formant_out * Self::AMPLITUDES[i];
         }
 
@@ -2495,5 +2668,122 @@ mod tests {
             ks.tick(&inputs, &mut outputs);
             assert!(outputs.get(10).unwrap().is_finite());
         }
+    }
+
+    // ---- Coefficient memoization (perf) ------------------------------------
+
+    /// Memoization must be observationally invisible: a VCO whose frequency
+    /// memo is invalidated before every tick executes the pre-memoization
+    /// derivation (`voct_to_hz` + FM `pow`) every sample and must agree
+    /// bit-for-bit with the memoized VCO, with static pitch, per-sample
+    /// exponential FM, and through-zero linear FM.
+    #[test]
+    fn test_vco_memo_bit_identical() {
+        let mut memoized = Vco::new(44100.0);
+        let mut forced = Vco::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut out_m = PortValues::new();
+        let mut out_f = PortValues::new();
+
+        for n in 0..20_000u32 {
+            let t = n as f64;
+            inputs.set(0, 0.25);
+            inputs.set(2, 0.4);
+            if n >= 10_000 {
+                // Audio-rate FM: the memo misses every sample.
+                inputs.set(1, 2.0 * Libm::<f64>::sin(t * 0.09));
+                inputs.set(4, 4.0 * Libm::<f64>::sin(t * 0.031));
+            }
+
+            memoized.tick(&inputs, &mut out_m);
+            forced.freq_memo.invalidate();
+            forced.tick(&inputs, &mut out_f);
+
+            for &id in &[10u32, 11, 12, 13] {
+                assert_eq!(
+                    out_m.get(id).unwrap().to_bits(),
+                    out_f.get(id).unwrap().to_bits(),
+                    "VCO output {id} diverged at sample {n}"
+                );
+            }
+        }
+        assert!(memoized.freq_memo.recompute_count() <= 10_001);
+        assert_eq!(forced.freq_memo.recompute_count(), 20_000);
+    }
+
+    /// The FormantOsc coefficient block was refactored for memoization (the
+    /// resonator quotients are precomputed), so equivalence is proven against a
+    /// verbatim reimplementation of the pre-memoization per-sample math:
+    /// `voct_to_hz` every sample plus the original `process_resonator` body
+    /// with `b0/norm`, `-a1/norm`, `-b0/norm`, `-a2/norm` derived inside the
+    /// sample loop. Covers vibrato off (all memos hit) and vibrato on (the
+    /// frequency memo misses every sample).
+    #[test]
+    fn test_formant_osc_matches_per_sample_reference() {
+        let sample_rate = 44100.0;
+        let mut osc = FormantOsc::new(sample_rate);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        // Reference (pre-memoization) state.
+        let mut phase = 0.0f64;
+        let mut vibrato_phase = 0.0f64;
+        let mut res_state = [[0.0f64; 2]; 5];
+
+        for n in 0..8_000u32 {
+            let (v_oct, vowel_in, shift, depth_in) = if n < 4_000 {
+                (0.25, 0.3, 1.0, 0.0)
+            } else {
+                (0.25, 0.3, 1.0, 0.8)
+            };
+            inputs.set(0, v_oct);
+            inputs.set(1, vowel_in);
+            inputs.set(2, shift);
+            inputs.set(3, depth_in);
+
+            osc.tick(&inputs, &mut outputs);
+            let got = outputs.get(10).unwrap();
+
+            // ---- reference: original tick body, no caching ----
+            let vowel = vowel_in.clamp(0.0, 1.0);
+            let vibrato_depth: f64 = depth_in.clamp(0.0, 1.0);
+            let vibrato = Libm::<f64>::sin(vibrato_phase * 2.0 * core::f64::consts::PI);
+            let vibrato_semitones = vibrato * vibrato_depth * 0.5;
+            let v_oct_with_vibrato = v_oct + vibrato_semitones / 12.0;
+            let frequency = voct_to_hz(v_oct_with_vibrato);
+            let phase_inc = frequency / sample_rate;
+            let excitation = FormantOsc::glottal_pulse(phase);
+            let formants = FormantOsc::get_formants(vowel, shift);
+            let mut output = 0.0;
+            for (i, &freq) in formants.iter().enumerate() {
+                let omega = 2.0 * core::f64::consts::PI * freq / sample_rate;
+                let omega = omega.clamp(0.01, core::f64::consts::PI * 0.45);
+                let q = freq / FormantOsc::BANDWIDTHS[i];
+                let alpha = Libm::<f64>::sin(omega) / (2.0 * q);
+                let cos_omega = Libm::<f64>::cos(omega);
+                let b0 = alpha;
+                let a1 = -2.0 * cos_omega;
+                let a2 = 1.0 - alpha;
+                let norm = 1.0 + alpha;
+                let state = &mut res_state[i];
+                let formant_out = b0 / norm * excitation + state[0];
+                state[0] = -a1 / norm * formant_out + state[1];
+                state[1] = -b0 / norm * excitation - a2 / norm * formant_out;
+                output += formant_out * FormantOsc::AMPLITUDES[i];
+            }
+            phase = wrap_phase(phase + phase_inc);
+            vibrato_phase = wrap_phase(vibrato_phase + FormantOsc::VIBRATO_RATE / sample_rate);
+            let want = output.clamp(-1.0, 1.0) * 5.0;
+
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "FormantOsc diverged from per-sample reference at sample {n}"
+            );
+        }
+        // Vibrato-off half must have been served from cache; the coefficient
+        // memo recomputes only when vowel/shift change (never here).
+        assert!(osc.freq_memo.recompute_count() <= 4_002);
+        assert_eq!(osc.coef_memo.recompute_count(), 1);
     }
 }

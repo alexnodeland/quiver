@@ -81,7 +81,7 @@ impl Rng {
     /// thread-local `RNG_STATE` initializer — so with the `std` feature, ANY
     /// first touch of the global RNG (including `rng::seed(..)` itself) would
     /// bring down a wasm module. Fall back to a fixed seed there; wasm callers
-    /// wanting entropy should call [`seed`](crate::rng::seed) explicitly.
+    /// wanting entropy should call [`seed`] explicitly.
     #[cfg(feature = "std")]
     pub fn from_system_time() -> Self {
         #[cfg(not(target_arch = "wasm32"))]

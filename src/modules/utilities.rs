@@ -1,6 +1,6 @@
 //! Utility, logic, CV, and sequencing modules.
 
-use super::common::{sanitize_audio, EdgeDetector, GATE_HIGH_V, GATE_THRESHOLD_V};
+use super::common::{sanitize_audio, EdgeDetector, Memo, GATE_HIGH_V, GATE_THRESHOLD_V};
 use crate::port::{GraphModule, ParamDef, ParamId, PortDef, PortSpec, PortValues, SignalKind};
 use crate::rng;
 use alloc::format;
@@ -1018,6 +1018,10 @@ impl GraphModule for SampleAndHold {
 pub struct SlewLimiter {
     current: f64,
     sample_rate: f64,
+    /// Memoized rise rate (one `pow` per sample while the rise CV is static).
+    rise_memo: Memo<2, f64>,
+    /// Memoized fall rate (one `pow` per sample while the fall CV is static).
+    fall_memo: Memo<2, f64>,
     spec: PortSpec,
 }
 
@@ -1026,6 +1030,8 @@ impl SlewLimiter {
         Self {
             current: 0.0,
             sample_rate,
+            rise_memo: Memo::new(0.0),
+            fall_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "in", SignalKind::CvBipolar),
@@ -1041,11 +1047,11 @@ impl SlewLimiter {
         }
     }
 
-    fn cv_to_rate(&self, cv: f64) -> f64 {
+    fn cv_to_rate(cv: f64, sample_rate: f64) -> f64 {
         // Map 0-1 CV to rate: 0 = instant, 1 = very slow (~10 seconds)
         // Rate is in units per sample
         let time = 0.001 + Libm::<f64>::pow(cv.clamp(0.0, 1.0), 2.0) * 10.0; // 1ms to 10s
-        1.0 / (time * self.sample_rate)
+        1.0 / (time * sample_rate)
     }
 }
 
@@ -1067,13 +1073,20 @@ impl GraphModule for SlewLimiter {
 
         let diff = target - self.current;
 
+        // Rates memoized on their CVs (bit-exact miss path). Each branch keeps
+        // its own memo so the two CVs do not evict each other.
+        let sample_rate = self.sample_rate;
         if diff > 0.0 {
             // Rising
-            let rate = self.cv_to_rate(rise_cv);
+            let rate = self.rise_memo.get_or_compute([rise_cv, sample_rate], || {
+                Self::cv_to_rate(rise_cv, sample_rate)
+            });
             self.current += Libm::<f64>::fmin(diff, rate * 10.0); // Scale for voltage range
         } else if diff < 0.0 {
             // Falling
-            let rate = self.cv_to_rate(fall_cv);
+            let rate = self.fall_memo.get_or_compute([fall_cv, sample_rate], || {
+                Self::cv_to_rate(fall_cv, sample_rate)
+            });
             self.current += Libm::<f64>::fmax(diff, -rate * 10.0);
         }
 
@@ -1243,6 +1256,9 @@ pub struct Clock {
     /// outputs so they actually divide the tempo (Q035).
     cycle: u64,
     sample_rate: f64,
+    /// Memoized tempo map `20 · 15^(cv/10)` (one `pow` per sample while the
+    /// bpm CV is static).
+    bpm_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
@@ -1259,6 +1275,7 @@ impl Clock {
             phase: 0.0,
             cycle: 0,
             sample_rate,
+            bpm_memo: Memo::new(0.0),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "bpm", SignalKind::CvUnipolar)
@@ -1296,7 +1313,10 @@ impl GraphModule for Clock {
         let bpm_cv = inputs.get_or(0, Self::DEFAULT_BPM_CV); // Default 120 BPM
         let reset = inputs.get_or(1, 0.0);
 
-        let bpm = Self::cv_to_bpm(bpm_cv);
+        // Tempo map memoized on the bpm CV (bit-exact miss path).
+        let bpm = self
+            .bpm_memo
+            .get_or_compute([bpm_cv], || Self::cv_to_bpm(bpm_cv));
         let freq = bpm / 60.0; // Hz
 
         // Reset on trigger
@@ -4373,5 +4393,60 @@ whole tone
         sq.set_sample_rate(48000.0);
         sq.tick(&inputs, &mut outputs);
         assert!(outputs.get(10).unwrap().is_finite());
+    }
+
+    // ---- Coefficient memoization (perf) ------------------------------------
+
+    /// Memoization must be observationally invisible: a slew limiter and a
+    /// clock whose memos are invalidated before every tick execute the
+    /// pre-memoization computation every sample and must agree bit-for-bit
+    /// with the memoized modules under both constant and per-sample-modulated
+    /// parameters.
+    #[test]
+    fn test_utilities_memos_bit_identical() {
+        let mut slew_m = SlewLimiter::new(44100.0);
+        let mut slew_f = SlewLimiter::new(44100.0);
+        let mut clk_m = Clock::new(44100.0);
+        let mut clk_f = Clock::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut out_m = PortValues::new();
+        let mut out_f = PortValues::new();
+
+        for n in 0..20_000u32 {
+            let t = n as f64;
+            let sweep = if n < 10_000 {
+                0.5
+            } else {
+                0.5 + 0.3 * Libm::<f64>::sin(t * 0.002)
+            };
+
+            // SlewLimiter: square-wave target exercises both rise and fall.
+            inputs.set(0, if (n / 500) % 2 == 0 { 4.0 } else { -4.0 });
+            inputs.set(1, sweep);
+            inputs.set(2, 0.3);
+            slew_m.tick(&inputs, &mut out_m);
+            slew_f.rise_memo.invalidate();
+            slew_f.fall_memo.invalidate();
+            slew_f.tick(&inputs, &mut out_f);
+            assert_eq!(
+                out_m.get(10).unwrap().to_bits(),
+                out_f.get(10).unwrap().to_bits(),
+                "SlewLimiter diverged at sample {n}"
+            );
+
+            // Clock: bpm CV modulated in the second half.
+            inputs.set(0, 5.0 + sweep);
+            clk_m.tick(&inputs, &mut out_m);
+            clk_f.bpm_memo.invalidate();
+            clk_f.tick(&inputs, &mut out_f);
+            for &id in &[10u32, 11, 12] {
+                assert_eq!(
+                    out_m.get(id).unwrap().to_bits(),
+                    out_f.get(id).unwrap().to_bits(),
+                    "Clock output {id} diverged at sample {n}"
+                );
+            }
+        }
+        assert!(clk_m.bpm_memo.recompute_count() <= 10_001);
     }
 }
