@@ -1401,7 +1401,12 @@ mod tests {
             inputs.set(0, bad);
             vco.tick(&inputs, &mut outputs);
         }
-        // Extreme finite V/Oct overflows voct_to_hz (2^1100 == inf) — same latch risk.
+        // Extreme finite V/Oct. This used to overflow `voct_to_hz` (2^1100 ==
+        // inf) and reach the accumulator as a non-finite dt; `MAX_ABS_VOCT`
+        // now clamps it thirty octaves short of that, so this line exercises
+        // the clamp rather than the recovery. The recovery is still under test
+        // — the NaN and ±inf inputs above cannot be clamped into range and
+        // still take that path.
         inputs.set(0, 1100.0);
         vco.tick(&inputs, &mut outputs);
 

@@ -14,10 +14,37 @@ pub const GATE_HIGH_V: f64 = 5.0;
 /// Threshold at which a gate/trigger/clock signal is considered "high".
 pub const GATE_THRESHOLD_V: f64 = 2.5;
 
+/// Widest V/Oct magnitude `voct_to_hz` will evaluate, in octaves either side
+/// of C4.
+///
+/// Chosen so that **no reachable musical value is affected** and overflow is
+/// impossible. At +32 the result is ~1.1 THz and at −32 it is ~6e-8 Hz (a
+/// period of about 190 days); the audible band sits inside ±11, and even a
+/// 192 kHz Nyquist is only +8.5. Overflow needs roughly 2^1024, so this clamps
+/// thirty octaves before anything can go non-finite.
+pub const MAX_ABS_VOCT: f64 = 32.0;
+
 /// Convert a 1V/octave pitch signal to frequency in Hz (0V = C4).
+///
+/// The input is clamped to ±[`MAX_ABS_VOCT`] so the result is always finite for
+/// a finite input. Without it, `2^1100` is `inf`, which propagates into a phase
+/// increment and then into the accumulator — the modules recover from that
+/// (Q198: `wrap_phase` re-seeds rather than latching NaN), but recovering from
+/// a value is not the same as never producing it, and only one of the two is a
+/// property you can state.
+///
+/// A NaN input stays NaN: `f64::clamp` passes it through, and the downstream
+/// recovery path exists precisely for inputs that carry no pitch at all. This
+/// clamp is about *finite* garbage.
+///
+/// Deliberately **not** a Nyquist clamp. Bounding aliasing needs the sample
+/// rate, which this function does not take and should not — that is a per-
+/// oscillator decision, and folding it in here would silently change the
+/// frequency of every module at high pitch rather than only preventing
+/// overflow.
 #[inline]
 pub fn voct_to_hz(voct: f64) -> f64 {
-    C4_HZ * Libm::<f64>::pow(2.0, voct)
+    C4_HZ * Libm::<f64>::pow(2.0, voct.clamp(-MAX_ABS_VOCT, MAX_ABS_VOCT))
 }
 
 /// One-pole smoothing coefficient for an envelope of `time_seconds` at
@@ -326,7 +353,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Memo;
+    use super::{voct_to_hz, Memo, C4_HZ};
+    use libm::Libm;
 
     #[test]
     fn test_memo_first_call_always_computes() {
@@ -380,5 +408,46 @@ mod tests {
         let v = memo.get_or_compute([5.0], || 2.0);
         assert_eq!(v.to_bits(), 2.0f64.to_bits());
         assert_eq!(memo.recompute_count(), 2);
+    }
+
+    /// **A finite V/Oct always yields a finite frequency.** Before the clamp,
+    /// `2^1100` was `inf`, which reached the phase accumulator as a non-finite
+    /// increment; the modules recovered, but the property could not be stated.
+    #[test]
+    fn voct_to_hz_is_finite_for_any_finite_input() {
+        for &v in &[
+            0.0, 1.0, -1.0, 8.5, -14.7, 32.0, -32.0, 1100.0, -1100.0, 1e300, -1e300,
+        ] {
+            let hz = voct_to_hz(v);
+            assert!(hz.is_finite(), "voct_to_hz({v}) = {hz}");
+            assert!(
+                hz > 0.0,
+                "voct_to_hz({v}) = {hz} is not a positive frequency"
+            );
+        }
+    }
+
+    /// The clamp must not touch anything a musician can reach. The audible band
+    /// is inside ±11 octaves of C4 and even a 192 kHz Nyquist is +8.5, so every
+    /// value in that range must come back exactly as `C4 * 2^v`.
+    #[test]
+    fn voct_to_hz_is_untouched_across_the_reachable_range() {
+        for step in -110..=110 {
+            let v = step as f64 / 10.0;
+            let expected = C4_HZ * Libm::<f64>::pow(2.0, v);
+            assert_eq!(
+                voct_to_hz(v).to_bits(),
+                expected.to_bits(),
+                "voct_to_hz({v}) moved"
+            );
+        }
+    }
+
+    /// NaN carries no pitch, so it is passed through rather than clamped into
+    /// a plausible-looking frequency — the downstream recovery path exists for
+    /// exactly that case.
+    #[test]
+    fn voct_to_hz_passes_nan_through() {
+        assert!(voct_to_hz(f64::NAN).is_nan());
     }
 }
