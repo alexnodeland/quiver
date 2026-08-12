@@ -1,6 +1,6 @@
 {
   "name": "@quiver-dsp/react",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "React utilities for Quiver modular synthesizer",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -45,8 +45,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@quiver-dsp/types": "^0.2.0",
-    "@quiver-dsp/wasm": "^0.2.0"
+    "@quiver-dsp/types": "^0.3.0",
+    "@quiver-dsp/wasm": "^0.3.0"
   },
   "peerDependencies": {
     "@xyflow/react": ">=12.0.0",
