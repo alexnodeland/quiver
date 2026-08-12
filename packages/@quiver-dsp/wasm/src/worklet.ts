@@ -52,6 +52,7 @@ type WorkletMessage =
   | { type: 'load_patch'; patch: unknown }
   | { type: 'save_patch'; name: string }
   | { type: 'set_param'; nodeId: string; paramIndex: number; value: number }
+  | { type: 'set_param_by_name'; nodeId: string; paramName: string; value: number }
   | { type: 'add_module'; typeId: string; name: string }
   | { type: 'remove_module'; name: string }
   | { type: 'connect'; from: string; to: string; attenuation?: number; offset?: number }
@@ -176,6 +177,9 @@ class QuiverProcessor extends AudioWorkletProcessor {
           break;
         case 'add_midi_inputs':
           engine.add_midi_inputs();
+          break;
+        case 'set_param_by_name':
+          engine.set_param_by_name(message.nodeId, message.paramName, message.value);
           break;
         case 'add_audio_input':
           engine.add_audio_input();

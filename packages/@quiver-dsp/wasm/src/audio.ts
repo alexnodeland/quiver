@@ -64,6 +64,8 @@ export interface QuiverAudioNode {
   /** Inject the engine-owned external audio input module (`audio_in`). Cable
    * from `audio_in.out` to run the node's Web Audio input through the patch. */
   addAudioInput: () => void;
+  /** Set a parameter by its port name (e.g. `('tape', 'time', 4.2)`). */
+  setParamByName: (nodeId: string, paramName: string, value: number) => void;
   /** MIDI note on (drives the shared midi_* CV sources). */
   midiNoteOn: (note: number, velocity: number) => void;
   /** MIDI note off. */
@@ -231,6 +233,8 @@ export async function createQuiverAudioNode(
     setOutput: (name) => post({ type: 'set_output', name }),
     addMidiInputs: () => post({ type: 'add_midi_inputs' }),
     addAudioInput: () => post({ type: 'add_audio_input' }),
+    setParamByName: (nodeId, paramName, value) =>
+      post({ type: 'set_param_by_name', nodeId, paramName, value }),
     midiNoteOn: (note, velocity) => post({ type: 'midi_note_on', note, velocity }),
     midiNoteOff: (note, velocity) => post({ type: 'midi_note_off', note, velocity }),
     midiCc: (cc, value) => post({ type: 'midi_cc', cc, value }),
