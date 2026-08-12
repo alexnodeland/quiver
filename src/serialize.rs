@@ -493,6 +493,16 @@ impl ModuleRegistry {
         );
 
         self.register_factory_with_keywords(
+            "tape_delay",
+            "Tape Delay",
+            "Effects",
+            "Long tape-style delay: time in seconds (up to 12 s), feedback past unity with saturation in the loop",
+            &["tape", "delay", "echo", "loop", "feedback", "self-oscillation"],
+            &[],
+            |sr| Box::new(DelayLine::tape(sr)),
+        );
+
+        self.register_factory_with_keywords(
             "chorus",
             "Chorus",
             "Effects",

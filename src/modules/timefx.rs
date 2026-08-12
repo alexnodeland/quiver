@@ -1,6 +1,7 @@
 //! Delay-based and time-domain effect modules.
 
 use super::common::{env_coef, read_interpolated, sanitize_audio, Memo};
+use crate::analog::saturation;
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -64,11 +65,25 @@ impl GraphModule for UnitDelay {
 /// A multi-sample delay line with feedback and wet/dry mix.
 /// Supports CV-controlled delay time for effects like chorus and flanging.
 ///
-/// Maximum delay time is 2 seconds at any sample rate.
+/// The default maximum delay time is 2 seconds at any sample rate; a longer
+/// buffer can be requested with [`DelayLine::with_max_delay`]. Two opt-in
+/// modes cover tape-echo territory: [`DelayLine::with_unclamped_feedback`]
+/// permits feedback at and past unity (self-oscillation) with tape-style
+/// saturation in the recirculation path, and [`DelayLine::with_linear_time`]
+/// reinterprets the `time` input as seconds directly instead of the
+/// exponential CV map. [`DelayLine::tape`] combines all three.
 pub struct DelayLine {
     buffer: Vec<f64>,
     write_pos: usize,
     sample_rate: f64,
+    /// Maximum delay time in seconds for this instance (buffer is sized from it).
+    max_delay_secs: f64,
+    /// Opt-in: allow feedback past unity, with saturation in the loop.
+    unclamped_feedback: bool,
+    /// Opt-in: `time` input is seconds directly rather than exponential CV.
+    linear_time: bool,
+    /// Registry identity — `"delay_line"`, or `"tape_delay"` for [`DelayLine::tape`].
+    type_id_str: &'static str,
     /// Slew-smoothed read distance, tracking the delay setpoint gradually to
     /// avoid zipper/pitch glitches when the `time` CV jumps.
     smoothed_delay: f64,
@@ -76,25 +91,47 @@ pub struct DelayLine {
     delay_smooth_coef: f64,
     /// Whether `smoothed_delay` has been snapped to its first setpoint yet.
     delay_primed: bool,
-    /// Memoized time map `1ms · 2000^cv` (one `pow` per sample while static).
+    /// Memoized time map `1ms · (max_ms)^cv` (one `pow` per sample while static).
     delay_ms_memo: Memo<1, f64>,
     spec: PortSpec,
 }
 
 impl DelayLine {
-    /// Maximum delay time in seconds
+    /// Default maximum delay time in seconds
     const MAX_DELAY_SECS: f64 = 2.0;
+
+    /// Feedback ceiling in unclamped mode. Past-unity growth is bounded by the
+    /// in-loop saturation, so this is a sanity rail, not the safety mechanism.
+    const UNCLAMPED_FEEDBACK_MAX: f64 = 1.5;
+
+    /// Maximum delay for the [`DelayLine::tape`] preset: comfortable headroom
+    /// above the 1.5–8 s tape-echo range (~4.6 MB of f64 buffer at 48 kHz).
+    const TAPE_MAX_DELAY_SECS: f64 = 12.0;
 
     /// Time constant for delay-time smoothing (a few ms de-zippers modulation
     /// without audibly lagging deliberate delay-time changes).
     const DELAY_SMOOTH_SECS: f64 = 0.005;
 
     pub fn new(sample_rate: f64) -> Self {
-        let buffer_size = (sample_rate * Self::MAX_DELAY_SECS) as usize + 1;
+        Self::with_max_delay(sample_rate, Self::MAX_DELAY_SECS)
+    }
+
+    /// A delay line whose buffer holds up to `max_delay_secs` of signal.
+    ///
+    /// `DelayLine::new` delegates here with the 2 s default, so existing
+    /// patches are unaffected. The exponential time map spans
+    /// `1 ms..max_delay_secs` for whatever maximum is chosen.
+    pub fn with_max_delay(sample_rate: f64, max_delay_secs: f64) -> Self {
+        let max_delay_secs = max_delay_secs.max(0.001);
+        let buffer_size = (sample_rate * max_delay_secs) as usize + 1;
         Self {
             buffer: vec![0.0; buffer_size],
             write_pos: 0,
             sample_rate,
+            max_delay_secs,
+            unclamped_feedback: false,
+            linear_time: false,
+            type_id_str: "delay_line",
             smoothed_delay: 0.0,
             delay_smooth_coef: env_coef(Self::DELAY_SMOOTH_SECS, sample_rate),
             delay_primed: false,
@@ -116,6 +153,36 @@ impl DelayLine {
             },
         }
     }
+
+    /// Opt in to feedback at and past unity (up to 1.5), with tape-style
+    /// saturation applied to the recirculated sample so past-unity feedback
+    /// compresses into mud instead of growing without bound. Hardware delays
+    /// self-oscillate; with this flag, so does this one. Non-finite input is
+    /// already sanitised before it can enter the buffer, so a NaN cannot latch.
+    pub fn with_unclamped_feedback(mut self) -> Self {
+        self.unclamped_feedback = true;
+        self
+    }
+
+    /// Opt in to a linear time input: the `time` port takes **seconds**
+    /// directly (clamped to `0..max_delay_secs`) instead of the exponential
+    /// `1 ms · (max_ms)^cv` map. The 5 ms read-distance slew still applies, so
+    /// delay-time changes glide in pitch exactly as in the default mode.
+    pub fn with_linear_time(mut self) -> Self {
+        self.linear_time = true;
+        self
+    }
+
+    /// Tape-echo preset: 12 s maximum delay, linear-seconds time input, and
+    /// unclamped feedback with saturation in the loop. Registered in the
+    /// module registry as `"tape_delay"`.
+    pub fn tape(sample_rate: f64) -> Self {
+        let mut tape = Self::with_max_delay(sample_rate, Self::TAPE_MAX_DELAY_SECS)
+            .with_unclamped_feedback()
+            .with_linear_time();
+        tape.type_id_str = "tape_delay";
+        tape
+    }
 }
 
 impl Default for DelayLine {
@@ -133,17 +200,27 @@ impl GraphModule for DelayLine {
         // Q160: sanitize so a non-finite input can never enter the feedback
         // buffer (where it would recirculate forever, latching NaN).
         let input = sanitize_audio(inputs.get_or(0, 0.0));
-        let time_cv = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
-        let feedback = inputs.get_or(2, 0.0).clamp(0.0, 0.99); // Prevent runaway
+        let feedback_ceiling = if self.unclamped_feedback {
+            Self::UNCLAMPED_FEEDBACK_MAX // Runaway is bounded by in-loop saturation
+        } else {
+            0.99 // Prevent runaway
+        };
+        let feedback = inputs.get_or(2, 0.0).clamp(0.0, feedback_ceiling);
         let mix = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
 
-        // Map time CV (0-1) to delay time (1ms to max delay, exponential),
-        // memoized on the time CV (bit-exact miss path).
-        let delay_ms = self.delay_ms_memo.get_or_compute([time_cv], || {
-            let min_delay_ms = 1.0;
-            let max_delay_ms = Self::MAX_DELAY_SECS * 1000.0;
-            min_delay_ms * Libm::<f64>::pow(max_delay_ms / min_delay_ms, time_cv)
-        });
+        let delay_ms = if self.linear_time {
+            // Linear mode: the `time` input is seconds, straight through.
+            inputs.get_or(1, 0.5).clamp(0.0, self.max_delay_secs) * 1000.0
+        } else {
+            // Map time CV (0-1) to delay time (1ms to max delay, exponential),
+            // memoized on the time CV (bit-exact miss path).
+            let time_cv = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
+            let max_delay_ms = self.max_delay_secs * 1000.0;
+            self.delay_ms_memo.get_or_compute([time_cv], || {
+                let min_delay_ms = 1.0;
+                min_delay_ms * Libm::<f64>::pow(max_delay_ms / min_delay_ms, time_cv)
+            })
+        };
         let target_delay =
             (delay_ms * self.sample_rate / 1000.0).clamp(1.0, (self.buffer.len() - 1) as f64);
 
@@ -162,8 +239,15 @@ impl GraphModule for DelayLine {
         // Read from delay line
         let delayed = read_interpolated(&self.buffer, self.write_pos, delay_samples);
 
-        // Write input + feedback to buffer
-        self.buffer[self.write_pos] = input + delayed * feedback;
+        // Write input + feedback to buffer. In unclamped mode the recirculated
+        // sample passes through tape-style saturation (unity gain at the
+        // origin) so past-unity feedback compresses instead of detonating.
+        let recirculated = input + delayed * feedback;
+        self.buffer[self.write_pos] = if self.unclamped_feedback {
+            saturation::tanh_sat(recirculated / 5.0, 1.0) * 5.0
+        } else {
+            recirculated
+        };
 
         // Advance write position
         self.write_pos = (self.write_pos + 1) % self.buffer.len();
@@ -182,7 +266,7 @@ impl GraphModule for DelayLine {
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
-        let buffer_size = (sample_rate * Self::MAX_DELAY_SECS) as usize + 1;
+        let buffer_size = (sample_rate * self.max_delay_secs) as usize + 1;
         self.buffer = vec![0.0; buffer_size];
         self.write_pos = 0;
         self.smoothed_delay = 0.0;
@@ -195,7 +279,7 @@ impl GraphModule for DelayLine {
     }
 
     fn type_id(&self) -> &'static str {
-        "delay_line"
+        self.type_id_str
     }
 }
 
@@ -1332,6 +1416,153 @@ mod tests {
         let out = outputs.get(10).unwrap();
         assert!(out.abs() < 0.01);
     }
+    #[test]
+    fn test_delay_line_with_max_delay_sizes_buffer() {
+        // Default is unchanged: 2 s at the given sample rate.
+        assert_eq!(DelayLine::new(1000.0).buffer.len(), 2001);
+        // A requested maximum sizes the buffer accordingly.
+        assert_eq!(DelayLine::with_max_delay(1000.0, 8.0).buffer.len(), 8001);
+        // set_sample_rate resizes from the per-instance maximum, not the default.
+        let mut long = DelayLine::with_max_delay(1000.0, 8.0);
+        long.set_sample_rate(2000.0);
+        assert_eq!(long.buffer.len(), 16001);
+    }
+
+    #[test]
+    fn test_delay_line_long_linear_delay_echoes() {
+        // 3 s echo through an 8 s buffer, with the time input in seconds.
+        let sr = 1000.0;
+        let mut delay = DelayLine::with_max_delay(sr, 8.0).with_linear_time();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(1, 3.0); // 3 seconds, linear
+        inputs.set(2, 0.0); // no feedback
+        inputs.set(3, 1.0); // fully wet
+
+        inputs.set(0, 1.0);
+        delay.tick(&inputs, &mut outputs);
+        inputs.set(0, 0.0);
+
+        let mut peak_at = 0;
+        let mut peak = 0.0_f64;
+        for n in 1..3100 {
+            delay.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap().abs();
+            if out > peak {
+                peak = out;
+                peak_at = n;
+            }
+        }
+        assert!(peak > 0.5, "echo should emerge, peak={peak}");
+        assert!(
+            (2990..=3010).contains(&peak_at),
+            "echo should land ~3000 samples later, landed at {peak_at}"
+        );
+    }
+
+    #[test]
+    fn test_delay_line_feedback_clamped_by_default() {
+        // Without the opt-in, a feedback input past unity clamps to 0.99 and decays.
+        let mut delay = DelayLine::new(1000.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(1, 0.0); // minimum time
+        inputs.set(2, 1.2); // past unity, will be clamped
+        inputs.set(3, 1.0); // fully wet
+
+        inputs.set(0, 1.0);
+        delay.tick(&inputs, &mut outputs);
+        inputs.set(0, 0.0);
+
+        let mut late_peak = 0.0_f64;
+        for n in 0..4000 {
+            delay.tick(&inputs, &mut outputs);
+            if n >= 3900 {
+                late_peak = late_peak.max(outputs.get(10).unwrap().abs());
+            }
+        }
+        assert!(
+            late_peak < 1e-3,
+            "clamped feedback must decay, got {late_peak}"
+        );
+    }
+
+    #[test]
+    fn test_delay_line_unclamped_feedback_self_oscillates_bounded() {
+        // With the opt-in, feedback past unity sustains — and the in-loop
+        // saturation keeps it bounded rather than letting it detonate.
+        let mut delay = DelayLine::new(1000.0).with_unclamped_feedback();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(1, 0.0); // minimum time
+        inputs.set(2, 1.2); // past unity, honoured in this mode
+        inputs.set(3, 1.0); // fully wet
+
+        inputs.set(0, 1.0);
+        delay.tick(&inputs, &mut outputs);
+        inputs.set(0, 0.0);
+
+        let mut late_peak = 0.0_f64;
+        let mut overall_peak = 0.0_f64;
+        for n in 0..4000 {
+            delay.tick(&inputs, &mut outputs);
+            let out = outputs.get(10).unwrap().abs();
+            overall_peak = overall_peak.max(out);
+            if n >= 3900 {
+                late_peak = late_peak.max(out);
+            }
+        }
+        assert!(
+            late_peak > 0.5,
+            "unclamped feedback must sustain, got {late_peak}"
+        );
+        assert!(
+            overall_peak <= 5.0 + 1e-9,
+            "saturation must bound the loop at the ±5V rail, got {overall_peak}"
+        );
+    }
+
+    #[test]
+    fn test_delay_line_linear_time_preserves_slew() {
+        // The 5 ms read-distance slew must keep applying in linear mode: a step
+        // in the time input glides rather than jumping.
+        let sr = 1000.0;
+        let mut delay = DelayLine::with_max_delay(sr, 8.0).with_linear_time();
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+
+        inputs.set(1, 1.0); // 1 second
+        inputs.set(0, 0.0);
+        delay.tick(&inputs, &mut outputs);
+        // First tick snaps to the setpoint rather than sweeping up from zero.
+        assert!((delay.smoothed_delay - 1000.0).abs() < 1e-6);
+
+        inputs.set(1, 2.0); // step to 2 seconds
+        delay.tick(&inputs, &mut outputs);
+        // One-pole smoothing with a 5 ms time constant at 1 kHz retains
+        // exp(-0.2) ≈ 0.819 of the gap per tick: the read distance must have
+        // moved, but only a fraction of the way.
+        assert!(
+            delay.smoothed_delay > 1000.0 && delay.smoothed_delay < 1500.0,
+            "time step must glide, smoothed_delay={}",
+            delay.smoothed_delay
+        );
+    }
+
+    #[test]
+    fn test_tape_delay_preset() {
+        let tape = DelayLine::tape(1000.0);
+        assert_eq!(tape.type_id(), "tape_delay");
+        assert_eq!(tape.buffer.len(), 12001);
+        assert!(tape.unclamped_feedback);
+        assert!(tape.linear_time);
+        // The plain constructor keeps its identity.
+        assert_eq!(DelayLine::new(1000.0).type_id(), "delay_line");
+    }
+
     #[test]
     fn test_chorus() {
         let mut chorus = Chorus::new(44100.0);
