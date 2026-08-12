@@ -1,6 +1,6 @@
 {
   "name": "@quiver-dsp/types",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "TypeScript type definitions for Quiver modular synthesizer",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
