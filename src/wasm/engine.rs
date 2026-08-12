@@ -20,6 +20,11 @@ pub const MIDI_VELOCITY_MODULE: &str = "midi_velocity";
 pub const MIDI_MOD_MODULE: &str = "midi_mod";
 pub const MIDI_BEND_MODULE: &str = "midi_bend";
 
+/// Well-known module name for the engine-owned external audio input (see
+/// [`QuiverEngine::add_audio_input`]). Cable from `audio_in.out` to run
+/// external audio (a worklet input, a microphone) through the patch.
+pub const AUDIO_IN_MODULE: &str = "audio_in";
+
 /// Shared atomic handles for the engine-owned MIDI CV sources.
 ///
 /// Each handle is a clone of the `Arc<AtomicF64>` held inside an [`ExternalInput`]
@@ -77,6 +82,12 @@ pub struct QuiverEngine {
     // modules created by `add_midi_inputs` (Q096).
     midi: MidiInputs,
 
+    // Engine-owned external audio source handle, shared with the in-patch
+    // `audio_in` module created by `add_audio_input`. `process_block_with_input`
+    // writes one sample here before each tick — the audio-rate input path that
+    // makes effect-style patches possible from the worklet.
+    audio_in: Arc<AtomicF64>,
+
     // MIDI state mirrored for the scalar getters (`midi_note`, `midi_velocity`, ...).
     midi_note: Option<f64>,
     midi_velocity: Option<f64>,
@@ -115,6 +126,7 @@ impl QuiverEngine {
             observer_interval: 8,
             observer_countdown: 0,
             midi: MidiInputs::new(),
+            audio_in: Arc::new(AtomicF64::new(0.0)),
             midi_note: None,
             midi_velocity: None,
             midi_gate: false,
@@ -579,6 +591,54 @@ impl QuiverEngine {
         unsafe { js_sys::Float32Array::view(&self.block_interleaved[..interleaved_len]) }
     }
 
+    /// One tick with an external audio sample: publish the sample to the shared
+    /// `audio_in` handle, then advance the patch. Kept separate so the input
+    /// semantics are natively testable (the block wrapper returns a JS view).
+    fn tick_with_input(&mut self, sample: f64) -> (f64, f64) {
+        self.audio_in.set(sample);
+        self.patch.tick()
+    }
+
+    /// Process a block of external audio through the patch, one input sample per
+    /// tick, and return interleaved stereo like [`process_block`](Self::process_block).
+    ///
+    /// Call [`add_audio_input`](Self::add_audio_input) and cable from
+    /// `audio_in.out` first — without that the input is simply unused and this
+    /// renders like `process_block`. The block length is `input.len()`.
+    ///
+    /// Renders per-sample rather than via the allocation-free block path because
+    /// each tick must see its own input sample. Output carries the same ±10V
+    /// safety clamp and the same ownership rule as `process_block`: the returned
+    /// `Float32Array` is a view into WASM memory, valid only until the next
+    /// engine call — read it immediately.
+    pub fn process_block_with_input(&mut self, input: &[f32]) -> js_sys::Float32Array {
+        const SAFETY_LIMIT: f64 = 10.0; // Max output voltage
+
+        let num_samples = input.len();
+        let interleaved_len = num_samples * 2;
+        if self.block_interleaved.len() < interleaved_len {
+            self.block_interleaved.resize(interleaved_len, 0.0);
+        }
+
+        for (i, &sample) in input.iter().enumerate() {
+            let (left, right) = self.tick_with_input(f64::from(sample));
+            self.block_interleaved[i * 2] = left.clamp(-SAFETY_LIMIT, SAFETY_LIMIT) as f32;
+            self.block_interleaved[i * 2 + 1] = right.clamp(-SAFETY_LIMIT, SAFETY_LIMIT) as f32;
+        }
+
+        // Same decimated observer collection as `process_block` (Q093).
+        if self.observer_interval <= 1 || self.observer_countdown == 0 {
+            self.observer.collect_from_patch(&self.patch);
+            self.observer_countdown = self.observer_interval.saturating_sub(1);
+        } else {
+            self.observer_countdown -= 1;
+        }
+
+        // SAFETY: view into `block_interleaved`, valid until the next engine call
+        // (documented ownership rule on `process_block`).
+        unsafe { js_sys::Float32Array::view(&self.block_interleaved[..interleaved_len]) }
+    }
+
     /// Set how often the state observer collects values, in blocks.
     ///
     /// `1` collects on every [`process_block`](Self::process_block); higher values
@@ -609,6 +669,27 @@ impl QuiverEngine {
     // =========================================================================
     // MIDI Support for Worklet Integration
     // =========================================================================
+
+    /// Inject the engine-owned external audio input module into the current patch.
+    ///
+    /// Adds an [`ExternalInput`](crate::io::ExternalInput) named `audio_in` with a
+    /// single `out` port carrying whatever
+    /// [`process_block_with_input`](Self::process_block_with_input) was last given
+    /// (one sample per tick). Cable it like any source: `audio_in.out -> vca.in`.
+    ///
+    /// Idempotent: if a module named `audio_in` already exists it is left
+    /// untouched, so it is safe to call after building or loading a patch. Like
+    /// the MIDI modules, it is engine-managed and not in the registry, so a patch
+    /// saved while it is present cannot be re-instantiated by `load_patch` on a
+    /// fresh engine — call `add_audio_input()` again after loading.
+    pub fn add_audio_input(&mut self) {
+        if self.patch.get_node_id_by_name(AUDIO_IN_MODULE).is_none() {
+            self.patch.add_boxed(
+                AUDIO_IN_MODULE,
+                Box::new(ExternalInput::audio(Arc::clone(&self.audio_in))),
+            );
+        }
+    }
 
     /// Inject the engine-owned MIDI CV source modules into the current patch.
     ///
@@ -925,6 +1006,23 @@ mod native_tests {
         assert_eq!(engine.module_count(), 0);
         assert_eq!(engine.cable_count(), 0);
         assert_eq!(engine.pending_update_count(), 0);
+    }
+
+    #[test]
+    fn audio_input_path_feeds_the_patch_per_sample() {
+        let mut engine = QuiverEngine::new(44_100.0);
+        engine.add_audio_input();
+        engine.add_audio_input(); // idempotent: still one module
+        assert_eq!(engine.module_count(), 1);
+
+        assert!(engine.set_output(AUDIO_IN_MODULE).is_ok());
+        assert!(engine.compile().is_ok());
+
+        // Each tick sees exactly the sample published for it.
+        let (left, _right) = engine.tick_with_input(0.7);
+        assert!((left - 0.7).abs() < 1e-12);
+        let (left, _right) = engine.tick_with_input(-0.25);
+        assert!((left + 0.25).abs() < 1e-12);
     }
 
     #[test]
