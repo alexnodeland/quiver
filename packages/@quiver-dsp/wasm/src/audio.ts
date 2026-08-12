@@ -110,7 +110,10 @@ export async function createQuiverAudioNode(
   await audioContext.audioWorklet.addModule(String(workletUrl));
 
   const node = new AudioWorkletNode(audioContext, 'quiver-processor', {
-    numberOfInputs: 0,
+    // One input, so effect-style patches can be fed (the processor forwards
+    // a connected input through `audio_in` — see add_audio_input). A node
+    // with nothing connected still renders as a pure generator.
+    numberOfInputs: 1,
     numberOfOutputs: 1,
     outputChannelCount: [outputChannels],
   });
