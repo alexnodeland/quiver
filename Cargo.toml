@@ -4,7 +4,7 @@
 # the LIBRARY name stays `quiver` (see `[lib] name` below): consumers
 # `cargo add quiver-dsp` but still write `use quiver::prelude::*`.
 name = "quiver-dsp"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.78"
 authors = ["Alex Nodeland"]
