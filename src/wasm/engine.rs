@@ -451,7 +451,20 @@ impl QuiverEngine {
         param_name: &str,
         value: f64,
     ) -> Result<(), JsValue> {
-        // Find the module and get its param definitions
+        let node_id = self
+            .get_node_id_by_name(node_name)
+            .ok_or_else(|| JsValue::from_str(&format!("Unknown module: {}", node_name)))?;
+
+        // `Patch::set_param_by_id` is the full name-based surface: a
+        // control-input port name sets the per-node base-value override (the
+        // way an un-cabled `vca.gain` or `delay.time` is actually driven —
+        // most modules carry no ParamDefs and surface state through ports),
+        // and anything else falls through to the module's introspection.
+        if self.patch.set_param_by_id(node_id, param_name, value) {
+            return Ok(());
+        }
+
+        // Last resort: a legacy ParamDef, addressed by its numeric id.
         let param_id = self
             .patch
             .nodes()
@@ -469,11 +482,6 @@ impl QuiverEngine {
                     param_name, node_name
                 ))
             })?;
-
-        // Set the parameter
-        let node_id = self
-            .get_node_id_by_name(node_name)
-            .ok_or_else(|| JsValue::from_str(&format!("Unknown module: {}", node_name)))?;
         self.patch.set_param(node_id, param_id, value);
         Ok(())
     }
@@ -1006,6 +1014,20 @@ mod native_tests {
         assert_eq!(engine.module_count(), 0);
         assert_eq!(engine.cable_count(), 0);
         assert_eq!(engine.pending_update_count(), 0);
+    }
+
+    #[test]
+    fn set_param_by_name_reaches_port_overrides() {
+        // Most modules carry no ParamDefs: an un-cabled control input (a
+        // vca's `gain`, a delay's `time`) is driven through the per-node port
+        // override, and the name-based setter must reach it.
+        let mut engine = QuiverEngine::new(44_100.0);
+        assert!(engine.add_module("vca", "level").is_ok());
+        assert!(engine.set_param_by_name("level", "gain", 0.5).is_ok());
+        assert!(engine.set_param_by_name("level", "cv", 0.25).is_ok());
+        assert!(engine.add_module("tape_delay", "tape").is_ok());
+        assert!(engine.set_param_by_name("tape", "time", 4.2).is_ok());
+        assert!(engine.set_param_by_name("tape", "feedback", 0.0).is_ok());
     }
 
     #[test]
