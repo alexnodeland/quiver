@@ -58,6 +58,7 @@ type WorkletMessage =
   | { type: 'disconnect'; from: string; to: string }
   | { type: 'set_output'; name: string }
   | { type: 'add_midi_inputs' }
+  | { type: 'add_audio_input' }
   | { type: 'midi_note_on'; note: number; velocity: number }
   | { type: 'midi_note_off'; note: number; velocity: number }
   | { type: 'midi_cc'; cc: number; value: number }
@@ -176,6 +177,9 @@ class QuiverProcessor extends AudioWorkletProcessor {
         case 'add_midi_inputs':
           engine.add_midi_inputs();
           break;
+        case 'add_audio_input':
+          engine.add_audio_input();
+          break;
         case 'midi_note_on':
           engine.midi_note_on(message.note, message.velocity);
           break;
@@ -206,7 +210,7 @@ class QuiverProcessor extends AudioWorkletProcessor {
   }
 
   process(
-    _inputs: Float32Array[][],
+    inputs: Float32Array[][],
     outputs: Float32Array[][],
     _parameters: Record<string, Float32Array>
   ): boolean {
@@ -222,9 +226,18 @@ class QuiverProcessor extends AudioWorkletProcessor {
     const right = output[1];
     const numSamples = left.length;
 
+    // When the node has a connected input, feed channel 0 through the patch's
+    // `audio_in` module (see `add_audio_input`); a mono treatment is deliberate —
+    // effect-style patches decide their own stereo story. With no input, render
+    // as a pure generator.
+    const inputChannel = inputs[0]?.[0];
+
     try {
       // View into WASM memory — read it immediately, before any other engine call.
-      const stereo = this.engine.process_block(numSamples);
+      const stereo =
+        inputChannel && inputChannel.length === numSamples
+          ? this.engine.process_block_with_input(inputChannel)
+          : this.engine.process_block(numSamples);
       for (let i = 0; i < numSamples; i++) {
         left[i] = stereo[i * 2];
         right[i] = stereo[i * 2 + 1];
