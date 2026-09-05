@@ -2,7 +2,6 @@
 
 use super::common::{sanitize_audio, EdgeDetector, Memo, GATE_HIGH_V, GATE_THRESHOLD_V};
 use crate::port::{GraphModule, ParamDef, ParamId, PortDef, PortSpec, PortValues, SignalKind};
-use crate::rng;
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -2038,6 +2037,8 @@ pub struct BernoulliGate {
     gate_a: f64,
     /// Latched gate B state (see `gate_a`).
     gate_b: f64,
+    /// Coin-flip source (global stream until seeded; see [`GraphModule::seed`]).
+    rng: crate::rng::ModuleRng,
     spec: PortSpec,
 }
 
@@ -2047,6 +2048,7 @@ impl BernoulliGate {
             prev_trigger: 0.0,
             gate_a: 0.0,
             gate_b: 0.0,
+            rng: crate::rng::ModuleRng::new(),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "trig", SignalKind::Trigger),
@@ -2087,8 +2089,7 @@ impl GraphModule for BernoulliGate {
 
         if rising_edge {
             // Random decision based on probability
-            let rand_val: f64 = rng::random();
-            if rand_val < prob {
+            if self.rng.next_bool_with_probability(prob) {
                 trig_a = GATE_HIGH_V;
             } else {
                 trig_b = GATE_HIGH_V;
@@ -2118,6 +2119,11 @@ impl GraphModule for BernoulliGate {
         self.prev_trigger = 0.0;
         self.gate_a = 0.0;
         self.gate_b = 0.0;
+        self.rng.reset();
+    }
+
+    fn seed(&mut self, seed: u64) {
+        self.rng.seed(seed);
     }
 
     fn set_sample_rate(&mut self, _: f64) {}
@@ -2441,8 +2447,9 @@ pub struct Arpeggiator {
     prev_clock: f64,
     /// Previous reset state for edge detection
     prev_reset: f64,
-    /// Random number generator
-    rng: crate::rng::Rng,
+    /// Random-pattern source. Owns a fixed-seed stream by default (its
+    /// pre-0.4.0 behaviour); [`GraphModule::seed`] replaces the seed.
+    rng: crate::rng::ModuleRng,
     /// Output gate state
     gate_out: f64,
     /// Trigger countdown (samples remaining)
@@ -2481,7 +2488,11 @@ impl Arpeggiator {
             captured_note: None,
             prev_clock: 0.0,
             prev_reset: 0.0,
-            rng: crate::rng::Rng::from_seed(42),
+            rng: {
+                let mut rng = crate::rng::ModuleRng::new();
+                rng.seed(42);
+                rng
+            },
             gate_out: 0.0,
             trigger_countdown: 0,
             sample_rate,
@@ -2674,8 +2685,13 @@ impl GraphModule for Arpeggiator {
         self.prev_gate = 0.0;
         self.prev_clock = 0.0;
         self.prev_reset = 0.0;
+        self.rng.reset();
         self.gate_out = 0.0;
         self.trigger_countdown = 0;
+    }
+
+    fn seed(&mut self, seed: u64) {
+        self.rng.seed(seed);
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {

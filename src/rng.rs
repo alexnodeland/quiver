@@ -182,6 +182,109 @@ impl Default for Rng {
     }
 }
 
+/// Derive a distinct child seed from a parent `seed` and an `index`.
+///
+/// Used by [`Patch::seed`](crate::graph::Patch::seed) to give every node its own
+/// stream from one patch-level seed (and by `PolyPatch` to give every voice its
+/// own patch seed): `derive_seed(s, i)` for different `i` are decorrelated
+/// splitmix64 outputs, so two modules never share a stream, and the mapping is a
+/// pure function of `(seed, index)` — no global state involved.
+#[inline]
+pub fn derive_seed(seed: u64, index: u64) -> u64 {
+    splitmix64(seed ^ splitmix64(index.wrapping_add(0x9e37_79b9_7f4a_7c15)))
+}
+
+/// A module-owned random stream that stays on the thread-global stream until it
+/// is seeded.
+///
+/// This is the per-module half of the determinism contract:
+///
+/// * **Unseeded** (the default, and every module constructed before 0.4.0): draws
+///   come from the thread-global stream ([`random`]), exactly as before, so
+///   [`seed`] keeps working for callers who reseed the thread and existing
+///   renders are unchanged.
+/// * **Seeded** (via [`GraphModule::seed`](crate::port::GraphModule::seed), which
+///   [`Patch::seed`](crate::graph::Patch::seed) calls with a per-node seed): draws
+///   come from an owned xoroshiro128+ stream, so what one module consumes no
+///   longer shifts what another one sees, two patches on one thread cannot
+///   influence each other, and [`ModuleRng::reset`] rewinds the stream to its
+///   seeded start so `reset()` really restores a stochastic module's output.
+///
+/// The draw helpers mirror the global ones bit for bit (`next_bipolar` is
+/// `next_f64() * 2.0 - 1.0`, `next_bool_with_probability(p)` is `next_f64() < p`),
+/// so a module reads the same way in both modes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModuleRng {
+    /// `Some((seed, stream))` once seeded; `None` while on the global stream.
+    owned: Option<(u64, Rng)>,
+}
+
+impl ModuleRng {
+    /// A stream that draws from the thread-global RNG until [`seed`](Self::seed).
+    #[inline]
+    pub const fn new() -> Self {
+        Self { owned: None }
+    }
+
+    /// Switch to an owned stream starting from `seed`.
+    #[inline]
+    pub fn seed(&mut self, seed: u64) {
+        self.owned = Some((seed, Rng::from_seed(seed)));
+    }
+
+    /// Rewind an owned stream to its seed. A no-op while unseeded (there is
+    /// nothing deterministic to rewind to on the global stream).
+    #[inline]
+    pub fn reset(&mut self) {
+        if let Some((seed, rng)) = &mut self.owned {
+            *rng = Rng::from_seed(*seed);
+        }
+    }
+
+    /// Whether this stream has been seeded (owned) or still draws globally.
+    #[inline]
+    pub fn is_seeded(&self) -> bool {
+        self.owned.is_some()
+    }
+
+    /// Next f64 in `[0.0, 1.0)`.
+    #[inline]
+    pub fn next_f64(&mut self) -> f64 {
+        match &mut self.owned {
+            Some((_, rng)) => rng.next_f64(),
+            None => random(),
+        }
+    }
+
+    /// Next f64 in `[-1.0, 1.0)`.
+    #[inline]
+    pub fn next_bipolar(&mut self) -> f64 {
+        self.next_f64() * 2.0 - 1.0
+    }
+
+    /// Next u64 (owned stream), or 64 fresh bits assembled from the global
+    /// stream while unseeded.
+    #[inline]
+    pub fn next_u64(&mut self) -> u64 {
+        match &mut self.owned {
+            Some((_, rng)) => rng.next_u64(),
+            None => {
+                // Two 53-bit global draws cover 64 bits; used only by consumers
+                // that never ran on the global stream before (`Arpeggiator`).
+                let hi = (random() * (1u64 << 32) as f64) as u64;
+                let lo = (random() * (1u64 << 32) as f64) as u64;
+                (hi << 32) | lo
+            }
+        }
+    }
+
+    /// `true` with the given probability.
+    #[inline]
+    pub fn next_bool_with_probability(&mut self, probability: f64) -> bool {
+        self.next_f64() < probability
+    }
+}
+
 /// Splitmix64 mixing function for deriving state from seeds.
 #[inline]
 fn splitmix64(mut x: u64) -> u64 {
@@ -383,6 +486,49 @@ mod tests {
 
         // After jump, sequences should be different
         assert_ne!(rng1.next_u64(), rng2.next_u64());
+    }
+
+    #[test]
+    fn test_module_rng_unseeded_tracks_global_stream() {
+        // An unseeded ModuleRng is the global stream: the same draws, in order.
+        seed(777);
+        let a: Vec<f64> = (0..8).map(|_| random_bipolar()).collect();
+        seed(777);
+        let mut m = ModuleRng::new();
+        assert!(!m.is_seeded());
+        let b: Vec<f64> = (0..8).map(|_| m.next_bipolar()).collect();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_module_rng_seeded_is_independent_and_rewinds() {
+        let mut m = ModuleRng::new();
+        m.seed(0xABCD);
+        assert!(m.is_seeded());
+        let first: Vec<f64> = (0..16).map(|_| m.next_f64()).collect();
+        // Perturbing the global stream must not matter.
+        seed(1);
+        let _ = random();
+        m.reset();
+        let again: Vec<f64> = (0..16).map(|_| m.next_f64()).collect();
+        assert_eq!(first, again);
+        // Same as a bare Rng from that seed.
+        let mut r = Rng::from_seed(0xABCD);
+        for v in first {
+            assert_eq!(v, r.next_f64());
+        }
+    }
+
+    #[test]
+    fn test_derive_seed_is_distinct_per_index() {
+        let mut seen = alloc::vec::Vec::new();
+        for i in 0..64u64 {
+            let d = derive_seed(42, i);
+            assert!(!seen.contains(&d), "derive_seed collision at index {i}");
+            seen.push(d);
+        }
+        assert_ne!(derive_seed(1, 0), derive_seed(2, 0));
+        assert_eq!(derive_seed(9, 3), derive_seed(9, 3));
     }
 
     #[test]

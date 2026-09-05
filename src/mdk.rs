@@ -696,8 +696,19 @@ fn harness_typical_input(kind: SignalKind) -> f64 {
 }
 
 impl<M: GraphModule> ModuleTestHarness<M> {
-    /// Create a new test harness for a module
-    pub fn new(module: M, sample_rate: f64) -> Self {
+    /// Fixed seed handed to the module under test (see [`new`](Self::new)).
+    pub const SEED: u64 = 0x4D44_4B5F_5345_4544; // "MDK_SEED"
+
+    /// Create a new test harness for a module.
+    ///
+    /// The module is seeded once via [`GraphModule::seed`] with [`SEED`](Self::SEED),
+    /// so a stochastic module (noise, `BernoulliGate`, `KarplusStrong`, …) that owns
+    /// its stream is reproducible under the harness and passes `reset_clears_state`
+    /// like any other module. A module that ignores `seed` and keeps drawing from the
+    /// thread-global stream will fail that check — which is the point: the kit holds
+    /// modules to the determinism contract [`GraphModule::seed`] documents.
+    pub fn new(mut module: M, sample_rate: f64) -> Self {
+        module.seed(Self::SEED);
         Self {
             module,
             sample_rate,

@@ -847,7 +847,7 @@ pub struct Granular {
     spawn_timer: usize,
 
     /// Random number generator for spray and density jitter
-    rng: crate::rng::Rng,
+    rng: crate::rng::ModuleRng,
 
     /// Smoothed constant-power normalization divisor (Q028). Tracks the expected
     /// steady-state grain overlap rather than the instantaneous active count,
@@ -875,7 +875,11 @@ impl Granular {
             write_pos: 0,
             grains: [Grain::default(); MAX_GRAINS],
             spawn_timer: 0,
-            rng: crate::rng::Rng::from_seed(42),
+            rng: {
+                let mut rng = crate::rng::ModuleRng::new();
+                rng.seed(42);
+                rng
+            },
             norm_smooth: 1.0,
             norm_smooth_coef: env_coef(0.05, sample_rate),
             speed_memo: Memo::new(0.0),
@@ -1052,8 +1056,12 @@ impl GraphModule for Granular {
         self.write_pos = 0;
         self.grains = [Grain::default(); MAX_GRAINS];
         self.spawn_timer = 0;
-        self.rng = crate::rng::Rng::from_seed(42);
+        self.rng.reset();
         self.norm_smooth = 1.0;
+    }
+
+    fn seed(&mut self, seed: u64) {
+        self.rng.seed(seed);
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {

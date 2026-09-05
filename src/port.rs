@@ -682,6 +682,29 @@ pub trait GraphModule: Send + Sync {
     /// Set sample rate
     fn set_sample_rate(&mut self, sample_rate: f64);
 
+    /// Give this module its own random stream, starting from `seed`.
+    ///
+    /// The default is a no-op: a deterministic module has nothing to seed. A module
+    /// that draws randomness (noise sources, `KarplusStrong`'s excitation,
+    /// `BernoulliGate`, the analog-modelling drift in `AnalogVco`, `Granular`,
+    /// `Arpeggiator`) should own a [`ModuleRng`](crate::rng::ModuleRng) (or an
+    /// [`Rng`](crate::rng::Rng)), reseed it here, and rewind it in
+    /// [`reset`](Self::reset), so that:
+    ///
+    /// * two renders of the same seeded module are identical regardless of what any
+    ///   other module (or another patch on the same thread) consumed;
+    /// * `reset()` genuinely restores its output sequence.
+    ///
+    /// [`Patch::seed`](crate::graph::Patch::seed) calls this on every node with a
+    /// per-node seed derived from one patch seed (and re-applies it on
+    /// [`Patch::reset`](crate::graph::Patch::reset)). A module that is never seeded
+    /// keeps drawing from the thread-global stream ([`rng::random`](crate::rng::random)),
+    /// so existing behaviour — including `quiver::rng::seed` — is unchanged until a
+    /// caller opts in.
+    fn seed(&mut self, seed: u64) {
+        let _ = seed;
+    }
+
     /// Whether this module breaks a feedback cycle in the patch graph.
     ///
     /// The graph normally rejects any cable cycle with [`PatchError::CycleDetected`].

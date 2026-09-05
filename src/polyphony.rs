@@ -904,6 +904,9 @@ pub struct PolyPatch {
     /// Output buffers (left, right)
     output_left: f64,
     output_right: f64,
+    /// Seed given to [`seed`](Self::seed); re-applied whenever the voice graphs are
+    /// rebuilt (sample-rate or unison-count change).
+    seed: Option<u64>,
 }
 
 impl PolyPatch {
@@ -950,10 +953,38 @@ impl PolyPatch {
             grace_samples: 0,
             output_left: 0.0,
             output_right: 0.0,
+            seed: None,
         };
         poly.recompute_coeffs();
         poly.voices = poly.build_voices()?;
         Ok(poly)
+    }
+
+    /// Seed every voice graph deterministically.
+    ///
+    /// Sub-voice `(voice, unison member)` gets [`Patch::seed`] with
+    /// [`derive_seed`](crate::rng::derive_seed)`(seed, voice * unison + member)`, so
+    /// each voice has its own streams (two voices playing the same note do not produce
+    /// identical noise) while the whole instrument is a pure function of `seed`. The
+    /// seed survives [`set_sample_rate`](Self::set_sample_rate) and
+    /// [`set_unison`](Self::set_unison) rebuilds, and [`reset`](Self::reset) replays it
+    /// through each voice's `Patch::reset`.
+    pub fn seed(&mut self, seed: u64) {
+        self.seed = Some(seed);
+        self.apply_seed();
+    }
+
+    fn apply_seed(&mut self) {
+        let Some(seed) = self.seed else { return };
+        let unison = self.unison.voices.max(1) as u64;
+        for (vi, slot) in self.voices.iter_mut().enumerate() {
+            for (si, sub) in slot.subs.iter_mut().enumerate() {
+                sub.patch.seed(crate::rng::derive_seed(
+                    seed,
+                    vi as u64 * unison + si as u64,
+                ));
+            }
+        }
     }
 
     fn recompute_coeffs(&mut self) {
@@ -1040,6 +1071,7 @@ impl PolyPatch {
         self.recompute_coeffs();
         if let Ok(voices) = self.build_voices() {
             self.voices = voices;
+            self.apply_seed();
         }
         self.smoothed_count = 0.0;
     }
@@ -1080,6 +1112,7 @@ impl PolyPatch {
         if count_changed {
             if let Ok(voices) = self.build_voices() {
                 self.voices = voices;
+                self.apply_seed();
             }
         }
     }

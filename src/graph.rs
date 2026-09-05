@@ -684,6 +684,11 @@ pub struct Patch {
 
     // Human-facing metadata, preserved across to_def/from_def.
     meta: PatchMeta,
+
+    /// The seed given to [`seed`](Patch::seed), if any. Re-applied on
+    /// [`reset`](Patch::reset) and to every node added afterwards, so a seeded patch
+    /// stays seeded as it is edited.
+    seed: Option<u64>,
 }
 
 impl Patch {
@@ -708,7 +713,64 @@ impl Patch {
             validation_mode: ValidationMode::Warn,
             warnings: Vec::new(),
             meta: PatchMeta::default(),
+            seed: None,
         }
+    }
+
+    /// Give every module in the patch its own deterministic random stream.
+    ///
+    /// Each node receives [`GraphModule::seed`] with a seed derived from `seed` and the
+    /// node's identity ([`derive_seed`](crate::rng::derive_seed)), so no two nodes share a
+    /// stream and the whole render is a pure function of `(patch, seed)`: two seeded
+    /// patches on one thread cannot influence each other, nothing here touches
+    /// [`rng::seed`](crate::rng::seed), and [`reset`](Self::reset) re-applies the same
+    /// seeds so a reset patch replays the same audio. Nodes added later are seeded on
+    /// insertion with the same derivation.
+    ///
+    /// A patch that is never seeded keeps the pre-0.4.0 behaviour: stochastic modules
+    /// draw from the thread-global stream, which [`rng::seed`](crate::rng::seed) controls.
+    ///
+    /// Not part of the audio path (it reseeds every module); call it before or between
+    /// renders, not from the audio callback.
+    ///
+    /// ```
+    /// use quiver::prelude::*;
+    ///
+    /// fn build() -> Patch {
+    ///     let mut patch = Patch::new(44100.0);
+    ///     let noise = patch.add("noise", NoiseGenerator::new());
+    ///     let out = patch.add("out", StereoOutput::new());
+    ///     patch.connect(noise.out("white"), out.in_("left")).unwrap();
+    ///     patch.set_output(out.id());
+    ///     patch
+    /// }
+    ///
+    /// let (mut a, mut b) = (build(), build());
+    /// a.seed(7);
+    /// b.seed(7);
+    /// for _ in 0..64 {
+    ///     assert_eq!(a.tick(), b.tick());
+    /// }
+    /// ```
+    pub fn seed(&mut self, seed: u64) {
+        self.seed = Some(seed);
+        for (id, node) in &self.nodes {
+            if let Some(module) = self.modules.get_mut(node.module_slot) {
+                module.seed(Self::node_seed(seed, id));
+            }
+        }
+    }
+
+    /// The seed this patch was given, if [`seed`](Self::seed) was called.
+    pub fn seed_value(&self) -> Option<u64> {
+        self.seed
+    }
+
+    /// Per-node seed: a pure function of the patch seed and the node's stable identity
+    /// (slot index + generation), so it does not shift when other nodes are removed.
+    fn node_seed(seed: u64, id: NodeId) -> u64 {
+        use slotmap::Key;
+        crate::rng::derive_seed(seed, id.data().as_ffi())
     }
 
     /// Read the patch's editable metadata (name, author, description, tags).
@@ -776,6 +838,10 @@ impl Patch {
             position: None,
             param_overrides: StdMap::new(),
         });
+        // A seeded patch stays seeded: late additions get the same derivation.
+        if let Some(seed) = self.seed {
+            self.modules[module_slot].seed(Self::node_seed(seed, id));
+        }
         self.invalidate();
         NodeHandle { id, spec }
     }
@@ -1624,10 +1690,16 @@ impl Patch {
         self.routing.read_output()
     }
 
-    /// Reset all modules in the patch
+    /// Reset all modules in the patch.
+    ///
+    /// If the patch was [`seed`](Self::seed)ed, every node's random stream is re-derived
+    /// from that seed as well, so a reset patch renders the same audio again.
     pub fn reset(&mut self) {
         for module in &mut self.modules {
             module.reset();
+        }
+        if let Some(seed) = self.seed {
+            self.seed(seed);
         }
         for value in self.routing.out_buf.iter_mut() {
             *value = 0.0;

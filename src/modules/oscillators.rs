@@ -4,7 +4,7 @@ use super::common::{
     polyblamp, polyblep, voct_to_hz, wrap_phase, EdgeDetector, Memo, GATE_THRESHOLD_V,
 };
 use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
-use crate::rng;
+use crate::rng::ModuleRng;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::f64::consts::TAU;
@@ -562,6 +562,9 @@ pub struct KarplusStrong {
     trigger_edge: EdgeDetector,
     /// Memoized `voct_to_hz` (one `pow` per sample while the pitch is static).
     freq_memo: Memo<1, f64>,
+    /// Excitation noise source (global stream until seeded; see
+    /// [`GraphModule::seed`]).
+    rng: ModuleRng,
     spec: PortSpec,
 }
 
@@ -591,6 +594,7 @@ impl KarplusStrong {
             ap_y1: 0.0,
             trigger_edge: EdgeDetector::new(),
             freq_memo: Memo::new(0.0),
+            rng: ModuleRng::new(),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "voct", SignalKind::VoltPerOctave).with_default(0.0),
@@ -625,7 +629,7 @@ impl KarplusStrong {
         let period = self.buffer.len();
         for i in 0..period {
             // Blend between noise and impulse based on brightness
-            let noise = rng::random_bipolar();
+            let noise = self.rng.next_bipolar();
             let impulse = if i < period / 4 { 1.0 } else { 0.0 };
             self.buffer[i] = noise * brightness + impulse * (1.0 - brightness);
         }
@@ -760,6 +764,11 @@ impl GraphModule for KarplusStrong {
     fn reset(&mut self) {
         self.clear_loop_state();
         self.trigger_edge.reset();
+        self.rng.reset();
+    }
+
+    fn seed(&mut self, seed: u64) {
+        self.rng.seed(seed);
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
@@ -798,13 +807,14 @@ impl PinkNoiseState {
         }
     }
 
-    fn sample(&mut self) -> f64 {
+    /// Next pink sample, drawing the refreshed rows from `rng`.
+    fn sample(&mut self, rng: &mut ModuleRng) -> f64 {
         self.index = self.index.wrapping_add(1);
         let changed_bits = (self.index ^ (self.index.wrapping_sub(1))).trailing_ones() as usize;
 
         for i in 0..changed_bits.min(16) {
             self.running_sum -= self.rows[i];
-            self.rows[i] = rng::random_bipolar();
+            self.rows[i] = rng.next_bipolar();
             self.running_sum += self.rows[i];
         }
 
@@ -826,6 +836,10 @@ pub struct NoiseGenerator {
     pub(crate) correlation: f64,
     /// Phase 3: Last white noise sample for correlation
     last_white: f64,
+    /// The one stream every draw (white, and both pink filters) comes from —
+    /// the thread-global stream until seeded (see [`GraphModule::seed`]), in
+    /// which case the draw order is unchanged and only the source differs.
+    rng: ModuleRng,
     spec: PortSpec,
 }
 
@@ -836,6 +850,7 @@ impl NoiseGenerator {
             pink2: PinkNoiseState::new(),
             correlation: 0.3, // Default 30% correlation (realistic)
             last_white: 0.0,
+            rng: ModuleRng::new(),
             spec: PortSpec {
                 inputs: vec![
                     // Phase 3: Correlation control
@@ -876,7 +891,7 @@ impl NoiseGenerator {
     /// The whole of [`GraphModule::tick`], with each write gated on `wanted`.
     ///
     /// **Every draw stays unconditional.** All four sources have side effects on retained
-    /// state — the two `random_bipolar` calls advance the shared RNG stream, and each
+    /// state — the two bipolar draws advance the module's RNG stream, and each
     /// `sample()` steps its own pink-noise filter — so skipping one would shift the values
     /// the *remaining* outputs produce on later samples. Only the two correlation mixes
     /// (pure arithmetic) and the writes themselves are skipped. `tick` calls this with an
@@ -886,18 +901,18 @@ impl NoiseGenerator {
         let correlation = inputs.get_or(0, self.correlation).clamp(0.0, 1.0);
 
         // Primary white noise
-        let white1 = rng::random_bipolar();
+        let white1 = self.rng.next_bipolar();
 
         // Phase 3: Correlated white noise for second channel. The draw is unconditional
-        // (it advances the shared RNG stream); only the mix below is skippable.
-        let independent = rng::random_bipolar();
+        // (it advances the RNG stream); only the mix below is skippable.
+        let independent = self.rng.next_bipolar();
 
         // Primary pink noise
-        let pink1 = self.pink.sample();
+        let pink1 = self.pink.sample(&mut self.rng);
 
         // Phase 3: Correlated pink noise. Likewise unconditional — `sample()` steps the
         // second pink-noise filter's own state.
-        let pink2_independent = self.pink2.sample();
+        let pink2_independent = self.pink2.sample(&mut self.rng);
 
         self.last_white = white1;
 
@@ -937,6 +952,13 @@ impl GraphModule for NoiseGenerator {
         self.pink = PinkNoiseState::new();
         self.pink2 = PinkNoiseState::new();
         self.last_white = 0.0;
+        // Rewinds to the seed when seeded; a no-op on the global stream, where a
+        // noise source is stochastic across resets by design.
+        self.rng.reset();
+    }
+
+    fn seed(&mut self, seed: u64) {
+        self.rng.seed(seed);
     }
 
     fn set_sample_rate(&mut self, _: f64) {}
