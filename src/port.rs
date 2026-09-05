@@ -709,11 +709,13 @@ pub trait GraphModule: Send + Sync {
     ///
     /// The graph normally rejects any cable cycle with [`PatchError::CycleDetected`].
     /// A module that returns `true` (delay-style modules such as `UnitDelay` and
-    /// `DelayLine`) is treated as a one-sample delay boundary: [`Patch::compile`] excludes
-    /// the edges feeding *into* it from the topological sort, so a loop routed through it
-    /// compiles. At runtime such a module reads its inputs from the previous tick's output
-    /// buffers, giving the classic single-sample feedback delay. Cycles that contain no
-    /// cycle-breaker still fail to compile.
+    /// `DelayLine`) is treated as a one-sample delay boundary: when the schedule cannot
+    /// make progress because of a cycle, [`Patch::compile`] schedules such a module ahead
+    /// of the producers still feeding it, and at runtime it reads *those* inputs from the
+    /// previous tick's output buffers — the classic single-sample feedback delay. Only the
+    /// edges that close a cycle are deferred this way; an input reached by an acyclic path
+    /// is read in the same tick like any other, so a delay at the end of a chain adds no
+    /// latency. Cycles that contain no cycle-breaker still fail to compile.
     ///
     /// [`PatchError::CycleDetected`]: crate::graph::PatchError::CycleDetected
     /// [`Patch::compile`]: crate::graph::Patch::compile

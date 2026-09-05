@@ -11,6 +11,14 @@
 //! captured from the pre-optimization engine; **do not update them** to make a failing test
 //! pass — a mismatch means the numerics moved.
 //!
+//! **Deliberate rebaseline, 0.4.0 (Q-N4):** `delay_chorus` changed from
+//! `0x0bd3_4a0e_47ac_ee37` to `0x8b20_c2b4_31f7_8812`. Until 0.3.x the scheduler dropped
+//! *every* cable into a cycle-breaker from the topological sort, so in this acyclic patch the
+//! `DelayLine` was scheduled before the VCO (the delay was `add`ed first) and read the VCO's
+//! *previous* sample — one sample of latency that depended on node insertion order. The
+//! scheduler now defers only cables that close a cycle, so the delay reads the current sample.
+//! The other four patches contain no cycle-breaker and are bit-identical to 0.1.1.
+//!
 //! Coverage is chosen to exercise every path in `Patch::tick_step`:
 //!
 //! | patch | exercises |
@@ -275,10 +283,11 @@ fn golden_lfo_modulated() {
 #[test]
 fn golden_delay_chorus() {
     let mut patch = patch_delay_chorus();
+    // Rebaselined in 0.4.0 — see the module docs (Q-N4). Previously 0x0bd3_4a0e_47ac_ee37.
     assert_golden(
         "delay_chorus",
         render_hash(&mut patch),
-        0x0bd3_4a0e_47ac_ee37,
+        0x8b20_c2b4_31f7_8812,
     );
 }
 

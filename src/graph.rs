@@ -626,8 +626,8 @@ fn collect_normalled_pending(inputs: &[InputPlan]) -> Vec<NormalledPlan> {
 ///
 /// All buffers are preallocated at compile time so [`Patch::tick`] performs no heap
 /// allocation. `out_buf` persists across ticks, which is what gives cycle-breaker
-/// (delay-style) modules their one-sample feedback: a downstream node not yet executed this
-/// tick still holds last tick's value.
+/// (delay-style) modules their one-sample feedback: the producer on a deferred feedback edge
+/// runs later in the tick than the breaker, so the breaker reads last tick's value.
 #[derive(Default)]
 struct Routing {
     /// Per-node execution records, in topological (execution) order.
@@ -1537,20 +1537,32 @@ impl Patch {
             .unwrap_or(false)
     }
 
+    /// Schedule the nodes: a topological sort that defers only genuine feedback edges.
+    ///
+    /// Kahn's algorithm over **every** cable, seeded in node insertion order so ties are
+    /// deterministic. When it stalls — every unscheduled node still waits on an unscheduled
+    /// producer — the remaining subgraph contains a cycle. The first (insertion-order)
+    /// unscheduled cycle-breaker that actually lies on one of those cycles is then scheduled
+    /// anyway: its still-pending incoming cables are the loop's feedback edges, and because
+    /// their producers run later in the same tick the breaker reads their **previous-tick**
+    /// values from the persistent output buffer — the classic one-sample feedback delay. If
+    /// no such breaker exists the cycle is genuine and compilation fails with
+    /// [`PatchError::CycleDetected`].
+    ///
+    /// Only edges that *had* to be deferred are. An acyclic path into a `DelayLine` keeps the
+    /// ordinary producer-before-consumer order, so the delay reads its input in the same
+    /// tick with no extra sample of latency — whatever order the nodes were `add`ed in.
+    /// (Before 0.4.0 every edge into a breaker was dropped from the sort, so whether a
+    /// breaker saw the current or the previous sample depended on insertion order.) When
+    /// several breakers sit on one cycle, the first-inserted one takes the deferred edge;
+    /// that is the one remaining insertion-order dependence, and it has no topological
+    /// tie-break.
     fn topological_sort(&self) -> Result<Vec<NodeId>, PatchError> {
         let mut in_degree: StdMap<NodeId, usize> = self.nodes.keys().map(|k| (k, 0)).collect();
         let mut successors: StdMap<NodeId, Vec<NodeId>> =
             self.nodes.keys().map(|k| (k, Vec::new())).collect();
 
         for cable in &self.cables {
-            // Feedback support: exclude edges feeding INTO a cycle-breaker (delay) node.
-            // Such a node is scheduled without waiting for its upstream producers and, at
-            // runtime, reads their previous-tick output buffers — a one-sample feedback
-            // delay. This lets loops routed through a UnitDelay/DelayLine compile while
-            // genuine breakerless cycles are still rejected below.
-            if self.node_breaks_feedback(cable.to.node) {
-                continue;
-            }
             if let Some(deg) = in_degree.get_mut(&cable.to.node) {
                 *deg += 1;
             }
@@ -1571,36 +1583,86 @@ impl Patch {
 
         let mut result = Vec::with_capacity(self.nodes.len());
 
-        while let Some(node) = queue.pop_front() {
-            result.push(node);
-            // Successor lists are built in cable order (a Vec), keeping this deterministic.
-            if let Some(succ) = successors.get(&node) {
-                for &s in succ {
-                    if let Some(deg) = in_degree.get_mut(&s) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push_back(s);
+        loop {
+            while let Some(node) = queue.pop_front() {
+                result.push(node);
+                // Successor lists are built in cable order (a Vec), keeping this deterministic.
+                if let Some(succ) = successors.get(&node) {
+                    for &s in succ {
+                        if let Some(deg) = in_degree.get_mut(&s) {
+                            // A breaker forced below already had its degree zeroed and was
+                            // scheduled; its deferred producers must not re-queue it.
+                            if *deg > 0 {
+                                *deg -= 1;
+                                if *deg == 0 {
+                                    queue.push_back(s);
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
 
-        if result.len() != self.nodes.len() {
-            // Collect stuck nodes deterministically and capture their names for Display.
-            let nodes: Vec<NodeId> = self
+            if result.len() == self.nodes.len() {
+                return Ok(result);
+            }
+
+            // Stalled on a cycle. Collect the stuck nodes deterministically; schedule the
+            // first cycle-breaker that is really on a cycle among them (a breaker merely
+            // downstream of the cycle must wait like any other node, or it would take a
+            // needless sample of latency).
+            let stuck: Vec<NodeId> = self
                 .nodes
                 .keys()
                 .filter(|k| in_degree.get(k).copied().unwrap_or(0) > 0)
                 .collect();
-            let names = nodes
-                .iter()
-                .map(|&id| self.get_name(id).unwrap_or("<unknown>").to_string())
-                .collect();
-            return Err(PatchError::CycleDetected { nodes, names });
+            let breaker = stuck.iter().copied().find(|&n| {
+                self.node_breaks_feedback(n) && Self::on_cycle_among(n, &successors, &in_degree)
+            });
+            match breaker {
+                Some(b) => {
+                    if let Some(deg) = in_degree.get_mut(&b) {
+                        *deg = 0;
+                    }
+                    queue.push_back(b);
+                }
+                None => {
+                    let names = stuck
+                        .iter()
+                        .map(|&id| self.get_name(id).unwrap_or("<unknown>").to_string())
+                        .collect();
+                    return Err(PatchError::CycleDetected {
+                        nodes: stuck,
+                        names,
+                    });
+                }
+            }
         }
+    }
 
-        Ok(result)
+    /// Whether `start` can reach itself through nodes that are still unscheduled (positive
+    /// remaining in-degree). Compile-time only; the graphs are small.
+    fn on_cycle_among(
+        start: NodeId,
+        successors: &StdMap<NodeId, Vec<NodeId>>,
+        in_degree: &StdMap<NodeId, usize>,
+    ) -> bool {
+        let mut stack = vec![start];
+        let mut visited: Vec<NodeId> = Vec::new();
+        while let Some(n) = stack.pop() {
+            for &s in successors.get(&n).into_iter().flatten() {
+                if s == start {
+                    return true;
+                }
+                // A scheduled node (degree 0 after the drain) is not part of the cycle.
+                if in_degree.get(&s).copied().unwrap_or(0) == 0 || visited.contains(&s) {
+                    continue;
+                }
+                visited.push(s);
+                stack.push(s);
+            }
+        }
+        false
     }
 
     /// The error from the most recent failed compile (auto or explicit), if any.
@@ -2837,6 +2899,130 @@ mod tests {
             peak_early,
             peak_late
         );
+    }
+
+    // Q-N4: an acyclic path into a cycle-breaker is scheduled like any other edge, so
+    // the breaker reads its producer's CURRENT sample regardless of insertion order.
+    #[test]
+    fn test_acyclic_edge_into_breaker_is_not_deferred() {
+        // Build src -> delay -> out with the delay added before and after the source.
+        fn render(delay_first: bool) -> (Vec<f64>, Vec<NodeId>) {
+            let mut patch = Patch::new(44100.0);
+            let (src, delay) = if delay_first {
+                let d = patch.add("delay", FeedbackDelay::new());
+                let s = patch.add("src", ConstSource::new(1.0));
+                (s, d)
+            } else {
+                let s = patch.add("src", ConstSource::new(1.0));
+                let d = patch.add("delay", FeedbackDelay::new());
+                (s, d)
+            };
+            let out = patch.add("out", Passthrough::new());
+            patch.connect(src.out("out"), delay.in_("in")).unwrap();
+            patch.connect(delay.out("out"), out.in_("in")).unwrap();
+            patch.set_output(out.id());
+            patch.compile().unwrap();
+            let samples = (0..4).map(|_| patch.tick().0).collect();
+            (samples, patch.execution_order().to_vec())
+        }
+        let (a, _) = render(false);
+        let (b, _) = render(true);
+        // FeedbackDelay is a unit delay: the constant appears on the second sample in both
+        // cases. Before 0.4.0, adding the delay first cost a further sample.
+        assert_eq!(a, vec![0.0, 1.0, 1.0, 1.0]);
+        assert_eq!(a, b, "output depends on node insertion order");
+    }
+
+    // Q-N4: a feedback loop with one breaker renders identically whatever the insertion
+    // order — the deferred edge is the loop's, not "whatever fed the delay".
+    #[test]
+    fn test_feedback_loop_output_is_insertion_order_independent() {
+        fn render(order: [usize; 3]) -> Vec<f64> {
+            let mut patch = Patch::new(44100.0);
+            let mut handles: [Option<NodeHandle>; 3] = [None, None, None];
+            for &which in &order {
+                handles[which] = Some(match which {
+                    0 => patch.add("src", ConstSource::new(1.0)),
+                    1 => patch.add("sum", SumModule::new()),
+                    _ => patch.add("delay", FeedbackDelay::new()),
+                });
+            }
+            let src = handles[0].clone().unwrap();
+            let sum = handles[1].clone().unwrap();
+            let delay = handles[2].clone().unwrap();
+            // src -> sum.a ; delay.out -> sum.b (x0.5, the feedback edge) ; sum -> delay.in
+            patch.connect(src.out("out"), sum.in_("a")).unwrap();
+            patch
+                .connect_attenuated(delay.out("out"), sum.in_("b"), 0.5)
+                .unwrap();
+            patch.connect(sum.out("out"), delay.in_("in")).unwrap();
+            patch.set_output(delay.id());
+            patch.compile().unwrap();
+            (0..8).map(|_| patch.tick().0).collect()
+        }
+        let reference = render([0, 1, 2]);
+        for order in [[2, 1, 0], [1, 2, 0], [0, 2, 1], [2, 0, 1], [1, 0, 2]] {
+            assert_eq!(
+                render(order),
+                reference,
+                "insertion order {order:?} changed output"
+            );
+        }
+        // Only the delay -> sum edge is deferred, so the loop carries exactly two samples
+        // of latency (the unit delay's own plus the deferred edge): the constant appears at
+        // sample 2 and the first echo (x0.5) two samples later.
+        assert_eq!(reference[..6], [0.0, 0.0, 1.0, 1.0, 1.5, 1.5]);
+    }
+
+    // Q-N4: a breaker that is merely downstream of a cycle is not forced early.
+    #[test]
+    fn test_breaker_downstream_of_a_cycle_keeps_zero_latency() {
+        let mut patch = Patch::new(44100.0);
+        // Inserted first so a naive "first stuck breaker" pick would grab it.
+        let tail = patch.add("tail", FeedbackDelay::new());
+        let src = patch.add("src", ConstSource::new(1.0));
+        let sum = patch.add("sum", SumModule::new());
+        let loop_delay = patch.add("loop_delay", FeedbackDelay::new());
+        patch.connect(src.out("out"), sum.in_("a")).unwrap();
+        patch
+            .connect_attenuated(loop_delay.out("out"), sum.in_("b"), 0.5)
+            .unwrap();
+        patch.connect(sum.out("out"), loop_delay.in_("in")).unwrap();
+        patch.connect(sum.out("out"), tail.in_("in")).unwrap();
+        patch.set_output(tail.id());
+        patch.compile().unwrap();
+        let order = patch.execution_order();
+        let pos = |id: NodeId| order.iter().position(|&n| n == id).unwrap();
+        assert!(
+            pos(sum.id()) < pos(tail.id()),
+            "downstream breaker scheduled before its producer: {order:?}"
+        );
+        assert!(
+            pos(loop_delay.id()) < pos(sum.id()),
+            "loop breaker not deferred"
+        );
+        // tail sees sum's current sample: constant arrives on the second tick.
+        let out: Vec<f64> = (0..3).map(|_| patch.tick().0).collect();
+        assert_eq!(out, vec![0.0, 1.0, 1.0]);
+    }
+
+    // Q-N4: a breaker feeding itself compiles (self-loop) and a self-loop without a breaker
+    // still does not.
+    #[test]
+    fn test_self_loop_needs_a_breaker() {
+        let mut patch = Patch::new(44100.0);
+        let d = patch.add("d", FeedbackDelay::new());
+        patch.connect(d.out("out"), d.in_("in")).unwrap();
+        patch.set_output(d.id());
+        assert!(patch.compile().is_ok());
+
+        let mut patch = Patch::new(44100.0);
+        let p = patch.add("p", Passthrough::new());
+        patch.connect(p.out("out"), p.in_("in")).unwrap();
+        assert!(matches!(
+            patch.compile(),
+            Err(PatchError::CycleDetected { .. })
+        ));
     }
 
     // Q077: a cycle with no breaker still fails to compile.
