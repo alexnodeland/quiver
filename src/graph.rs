@@ -174,10 +174,25 @@ struct Node {
     name: String,
     position: Option<(f32, f32)>,
     /// Per-node overrides for the base (unpatched) value of control-input ports, keyed by
-    /// port name. Set through [`Patch::set_param_by_id`] and applied at [`Patch::compile`]
-    /// as the [`InputPlan`] default, so an unpatched knob-style input takes this value.
-    /// Empty for a freshly added node.
-    param_overrides: StdMap<String, f64>,
+    /// port id. Set through [`Patch::set_param_by_id`] and applied as the [`InputPlan`]
+    /// default — in place when the patch is compiled, or baked in at the next
+    /// [`Patch::compile`] otherwise — so an unpatched knob-style input takes this value.
+    ///
+    /// A `Vec` with capacity for one entry per input, allocated when the node is added:
+    /// `set_param_by_id` is called from audio threads (the WASM worklet does so from
+    /// `process()`), so it must neither hash a `String` key nor grow anything. Empty for a
+    /// freshly added node.
+    param_overrides: Vec<(PortId, f64)>,
+}
+
+impl Node {
+    /// The recorded override for `port`, if any.
+    fn override_for(&self, port: PortId) -> Option<f64> {
+        self.param_overrides
+            .iter()
+            .find(|(p, _)| *p == port)
+            .map(|(_, v)| *v)
+    }
 }
 
 /// Editable, human-facing metadata for a [`Patch`].
@@ -611,8 +626,8 @@ fn collect_normalled_pending(inputs: &[InputPlan]) -> Vec<NormalledPlan> {
 ///
 /// All buffers are preallocated at compile time so [`Patch::tick`] performs no heap
 /// allocation. `out_buf` persists across ticks, which is what gives cycle-breaker
-/// (delay-style) modules their one-sample feedback: a downstream node not yet executed this
-/// tick still holds last tick's value.
+/// (delay-style) modules their one-sample feedback: the producer on a deferred feedback edge
+/// runs later in the tick than the breaker, so the breaker reads last tick's value.
 #[derive(Default)]
 struct Routing {
     /// Per-node execution records, in topological (execution) order.
@@ -665,6 +680,9 @@ pub struct Patch {
     execution_order: Vec<NodeId>,
     // Compiled, preallocated routing (dense buffers + adjacency). Rebuilt by compile().
     routing: Routing,
+    // Bumped every time `routing` is replaced (compile or invalidate), so a cached
+    // output slot (see `output_slot`) can be validated with one integer compare.
+    routing_generation: u64,
 
     // True when the graph has been mutated since the last successful compile().
     // tick() checks this and recompiles lazily.
@@ -684,6 +702,11 @@ pub struct Patch {
 
     // Human-facing metadata, preserved across to_def/from_def.
     meta: PatchMeta,
+
+    /// The seed given to [`seed`](Patch::seed), if any. Re-applied on
+    /// [`reset`](Patch::reset) and to every node added afterwards, so a seeded patch
+    /// stays seeded as it is edited.
+    seed: Option<u64>,
 }
 
 impl Patch {
@@ -697,6 +720,7 @@ impl Patch {
             next_cable_id: 0,
             execution_order: Vec::new(),
             routing: Routing::default(),
+            routing_generation: 0,
             // A fresh patch is "dirty" so the first tick() compiles automatically even if
             // the caller forgets to call compile().
             dirty: true,
@@ -708,7 +732,64 @@ impl Patch {
             validation_mode: ValidationMode::Warn,
             warnings: Vec::new(),
             meta: PatchMeta::default(),
+            seed: None,
         }
+    }
+
+    /// Give every module in the patch its own deterministic random stream.
+    ///
+    /// Each node receives [`GraphModule::seed`] with a seed derived from `seed` and the
+    /// node's identity ([`derive_seed`](crate::rng::derive_seed)), so no two nodes share a
+    /// stream and the whole render is a pure function of `(patch, seed)`: two seeded
+    /// patches on one thread cannot influence each other, nothing here touches
+    /// [`rng::seed`](crate::rng::seed), and [`reset`](Self::reset) re-applies the same
+    /// seeds so a reset patch replays the same audio. Nodes added later are seeded on
+    /// insertion with the same derivation.
+    ///
+    /// A patch that is never seeded keeps the pre-0.4.0 behaviour: stochastic modules
+    /// draw from the thread-global stream, which [`rng::seed`](crate::rng::seed) controls.
+    ///
+    /// Not part of the audio path (it reseeds every module); call it before or between
+    /// renders, not from the audio callback.
+    ///
+    /// ```
+    /// use quiver::prelude::*;
+    ///
+    /// fn build() -> Patch {
+    ///     let mut patch = Patch::new(44100.0);
+    ///     let noise = patch.add("noise", NoiseGenerator::new());
+    ///     let out = patch.add("out", StereoOutput::new());
+    ///     patch.connect(noise.out("white"), out.in_("left")).unwrap();
+    ///     patch.set_output(out.id());
+    ///     patch
+    /// }
+    ///
+    /// let (mut a, mut b) = (build(), build());
+    /// a.seed(7);
+    /// b.seed(7);
+    /// for _ in 0..64 {
+    ///     assert_eq!(a.tick(), b.tick());
+    /// }
+    /// ```
+    pub fn seed(&mut self, seed: u64) {
+        self.seed = Some(seed);
+        for (id, node) in &self.nodes {
+            if let Some(module) = self.modules.get_mut(node.module_slot) {
+                module.seed(Self::node_seed(seed, id));
+            }
+        }
+    }
+
+    /// The seed this patch was given, if [`seed`](Self::seed) was called.
+    pub fn seed_value(&self) -> Option<u64> {
+        self.seed
+    }
+
+    /// Per-node seed: a pure function of the patch seed and the node's stable identity
+    /// (slot index + generation), so it does not shift when other nodes are removed.
+    fn node_seed(seed: u64, id: NodeId) -> u64 {
+        use slotmap::Key;
+        crate::rng::derive_seed(seed, id.data().as_ffi())
     }
 
     /// Read the patch's editable metadata (name, author, description, tags).
@@ -774,8 +855,13 @@ impl Patch {
             module_slot,
             name: name.into(),
             position: None,
-            param_overrides: StdMap::new(),
+            // One slot per input port up front, so `set_param_by_id` never grows it.
+            param_overrides: Vec::with_capacity(spec.inputs.len()),
         });
+        // A seeded patch stays seeded: late additions get the same derivation.
+        if let Some(seed) = self.seed {
+            self.modules[module_slot].seed(Self::node_seed(seed, id));
+        }
         self.invalidate();
         NodeHandle { id, spec }
     }
@@ -1168,6 +1254,7 @@ impl Patch {
     fn invalidate(&mut self) {
         self.execution_order.clear();
         self.routing = Routing::default();
+        self.routing_generation = self.routing_generation.wrapping_add(1);
         self.dirty = true;
     }
 
@@ -1394,12 +1481,9 @@ impl Patch {
                 }
                 // A per-node parameter override (set via `set_param_by_id`) replaces the
                 // spec's static default for this unpatched control input. Baked in here at
-                // compile time so the zero-alloc tick path is untouched.
-                let default = node
-                    .param_overrides
-                    .get(&input.name)
-                    .copied()
-                    .unwrap_or(input.default);
+                // compile time so the zero-alloc tick path is untouched; later overrides
+                // are written straight into this plan (see `set_param_by_id`).
+                let default = node.override_for(input.id).unwrap_or(input.default);
                 inputs.push(InputPlan {
                     port_id: input.id,
                     default,
@@ -1449,6 +1533,7 @@ impl Patch {
         });
 
         self.routing = routing;
+        self.routing_generation = self.routing_generation.wrapping_add(1);
     }
 
     /// Whether the module at `node` is a feedback cycle-breaker (delay-style).
@@ -1458,20 +1543,32 @@ impl Patch {
             .unwrap_or(false)
     }
 
+    /// Schedule the nodes: a topological sort that defers only genuine feedback edges.
+    ///
+    /// Kahn's algorithm over **every** cable, seeded in node insertion order so ties are
+    /// deterministic. When it stalls — every unscheduled node still waits on an unscheduled
+    /// producer — the remaining subgraph contains a cycle. The first (insertion-order)
+    /// unscheduled cycle-breaker that actually lies on one of those cycles is then scheduled
+    /// anyway: its still-pending incoming cables are the loop's feedback edges, and because
+    /// their producers run later in the same tick the breaker reads their **previous-tick**
+    /// values from the persistent output buffer — the classic one-sample feedback delay. If
+    /// no such breaker exists the cycle is genuine and compilation fails with
+    /// [`PatchError::CycleDetected`].
+    ///
+    /// Only edges that *had* to be deferred are. An acyclic path into a `DelayLine` keeps the
+    /// ordinary producer-before-consumer order, so the delay reads its input in the same
+    /// tick with no extra sample of latency — whatever order the nodes were `add`ed in.
+    /// (Before 0.4.0 every edge into a breaker was dropped from the sort, so whether a
+    /// breaker saw the current or the previous sample depended on insertion order.) When
+    /// several breakers sit on one cycle, the first-inserted one takes the deferred edge;
+    /// that is the one remaining insertion-order dependence, and it has no topological
+    /// tie-break.
     fn topological_sort(&self) -> Result<Vec<NodeId>, PatchError> {
         let mut in_degree: StdMap<NodeId, usize> = self.nodes.keys().map(|k| (k, 0)).collect();
         let mut successors: StdMap<NodeId, Vec<NodeId>> =
             self.nodes.keys().map(|k| (k, Vec::new())).collect();
 
         for cable in &self.cables {
-            // Feedback support: exclude edges feeding INTO a cycle-breaker (delay) node.
-            // Such a node is scheduled without waiting for its upstream producers and, at
-            // runtime, reads their previous-tick output buffers — a one-sample feedback
-            // delay. This lets loops routed through a UnitDelay/DelayLine compile while
-            // genuine breakerless cycles are still rejected below.
-            if self.node_breaks_feedback(cable.to.node) {
-                continue;
-            }
             if let Some(deg) = in_degree.get_mut(&cable.to.node) {
                 *deg += 1;
             }
@@ -1492,36 +1589,87 @@ impl Patch {
 
         let mut result = Vec::with_capacity(self.nodes.len());
 
-        while let Some(node) = queue.pop_front() {
-            result.push(node);
-            // Successor lists are built in cable order (a Vec), keeping this deterministic.
-            if let Some(succ) = successors.get(&node) {
-                for &s in succ {
-                    if let Some(deg) = in_degree.get_mut(&s) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push_back(s);
+        loop {
+            while let Some(node) = queue.pop_front() {
+                result.push(node);
+                // Successor lists are built in cable order (a Vec), keeping this deterministic.
+                if let Some(succ) = successors.get(&node) {
+                    for &s in succ {
+                        if let Some(deg) = in_degree.get_mut(&s) {
+                            // A breaker forced below already had its degree zeroed and was
+                            // scheduled; its deferred producers must not re-queue it.
+                            if *deg > 0 {
+                                *deg -= 1;
+                                if *deg == 0 {
+                                    queue.push_back(s);
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
 
-        if result.len() != self.nodes.len() {
-            // Collect stuck nodes deterministically and capture their names for Display.
-            let nodes: Vec<NodeId> = self
+            if result.len() == self.nodes.len() {
+                return Ok(result);
+            }
+
+            // Stalled on a cycle. Collect the stuck nodes deterministically; schedule the
+            // first cycle-breaker that is really on a cycle among them (a breaker merely
+            // downstream of the cycle must wait like any other node, or it would take a
+            // needless sample of latency).
+            let stuck: Vec<NodeId> = self
                 .nodes
                 .keys()
                 .filter(|k| in_degree.get(k).copied().unwrap_or(0) > 0)
                 .collect();
-            let names = nodes
-                .iter()
-                .map(|&id| self.get_name(id).unwrap_or("<unknown>").to_string())
-                .collect();
-            return Err(PatchError::CycleDetected { nodes, names });
+            let breaker = stuck.iter().copied().find(|&n| {
+                self.node_breaks_feedback(n) && Self::on_cycle_among(n, &successors, &in_degree)
+            });
+            match breaker {
+                Some(b) => {
+                    if let Some(deg) = in_degree.get_mut(&b) {
+                        *deg = 0;
+                    }
+                    queue.push_back(b);
+                }
+                None => {
+                    let names = stuck
+                        .iter()
+                        .map(|&id| self.get_name(id).unwrap_or("<unknown>").to_string())
+                        .collect();
+                    return Err(PatchError::CycleDetected {
+                        nodes: stuck,
+                        names,
+                    });
+                }
+            }
         }
+    }
 
-        Ok(result)
+    /// Whether `start` can reach itself through nodes that are still unscheduled (positive
+    /// remaining in-degree). Compile-time only; the graphs are small.
+    fn on_cycle_among(
+        start: NodeId,
+        successors: &StdMap<NodeId, Vec<NodeId>>,
+        in_degree: &StdMap<NodeId, usize>,
+    ) -> bool {
+        let mut stack: Vec<NodeId> = Vec::with_capacity(8);
+        stack.push(start);
+        let mut visited: Vec<NodeId> = Vec::new();
+        while let Some(n) = stack.pop() {
+            for &s in successors.get(&n).into_iter().flatten() {
+                if s == start {
+                    return true;
+                }
+                // A scheduled node (degree 0 after the drain) is not part of the cycle.
+                if in_degree.get(&s).copied().unwrap_or(0) == 0 || visited.contains(&s) {
+                    continue;
+                }
+                visited.push(s);
+                stack.push(s);
+            }
+        }
+        false
     }
 
     /// The error from the most recent failed compile (auto or explicit), if any.
@@ -1624,10 +1772,16 @@ impl Patch {
         self.routing.read_output()
     }
 
-    /// Reset all modules in the patch
+    /// Reset all modules in the patch.
+    ///
+    /// If the patch was [`seed`](Self::seed)ed, every node's random stream is re-derived
+    /// from that seed as well, so a reset patch renders the same audio again.
     pub fn reset(&mut self) {
         for module in &mut self.modules {
             module.reset();
+        }
+        if let Some(seed) = self.seed {
+            self.seed(seed);
         }
         for value in self.routing.out_buf.iter_mut() {
             *value = 0.0;
@@ -1700,10 +1854,36 @@ impl Patch {
     /// `StateObserver::sync_output_keepalive` (with the `alloc` feature) does the pinning
     /// for a whole subscription bus in one call.
     pub fn get_output_value(&self, node: NodeId, port: PortId) -> Option<f64> {
+        self.output_slot(node, port)
+            .and_then(|slot| self.output_value_at(slot))
+    }
+
+    /// The dense routing slot of an output port, for repeated per-sample reads.
+    ///
+    /// [`get_output_value`](Self::get_output_value) hashes a `(node, port)` key on every
+    /// call; a meter that reads the same port every sample can instead resolve the slot
+    /// once and read [`output_value_at`](Self::output_value_at). A slot is valid only for
+    /// the routing it was resolved against: remember
+    /// [`routing_generation`](Self::routing_generation) alongside it and re-resolve when
+    /// the generation changes (every compile, and every structural edit, bumps it).
+    /// `None` until the patch is compiled or if the port does not exist.
+    pub fn output_slot(&self, node: NodeId, port: PortId) -> Option<usize> {
         self.routing
             .out_slot_index
             .get(&PortRef { node, port })
-            .map(|&slot| self.routing.out_buf[slot])
+            .copied()
+    }
+
+    /// The current value in a routing slot from [`output_slot`](Self::output_slot).
+    /// Bounds-checked, so a stale slot yields `None` rather than a panic.
+    pub fn output_value_at(&self, slot: usize) -> Option<f64> {
+        self.routing.out_buf.get(slot).copied()
+    }
+
+    /// A counter that changes whenever the compiled routing is rebuilt or dropped; see
+    /// [`output_slot`](Self::output_slot).
+    pub fn routing_generation(&self) -> u64 {
+        self.routing_generation
     }
 
     /// Get the signal kind for an output port by node ID and port ID
@@ -1772,11 +1952,7 @@ impl Patch {
             if !is_control_input(input.kind) {
                 continue;
             }
-            let value = n
-                .param_overrides
-                .get(&input.name)
-                .copied()
-                .unwrap_or(input.default);
+            let value = n.override_for(input.id).unwrap_or(input.default);
             infos.push(port_param_info(input, value));
         }
         infos
@@ -1789,7 +1965,7 @@ impl Patch {
         // Port parameters are authoritative.
         if let Some(port) = module.port_spec().input_by_name(id) {
             if is_control_input(port.kind) {
-                return Some(n.param_overrides.get(id).copied().unwrap_or(port.default));
+                return Some(n.override_for(port.id).unwrap_or(port.default));
             }
         }
         module
@@ -1798,25 +1974,71 @@ impl Patch {
             .map(|p| p.value)
     }
 
-    /// Set a parameter by id. Returns `true` if the id was recognized.
+    /// Set a parameter by id.
     ///
-    /// A control-input port id sets a per-node base-value override (and marks the graph for
-    /// recompile so the next tick observes it). Otherwise the module's `ModuleIntrospection`
-    /// is asked to set internal state.
+    /// A control-input port id sets that node's base (unpatched) value for the port. The
+    /// override is recorded and, when the patch is compiled, written **directly into the
+    /// compiled routing plan** — no recompile, no reallocation, and no reset of the routing
+    /// buffers (so a cycle-breaker's feedback path is not blanked for a sample). The next
+    /// `tick` reads the new value. This makes it safe to call from an audio callback: the
+    /// cost is a name lookup over the node's ports plus a linear scan of its inputs, and it
+    /// never allocates (see `tests/zero_alloc.rs`). If the patch is not compiled (or is
+    /// dirty from a structural edit) the value is simply baked in by the next compile.
+    ///
+    /// Returns `true` if the value now drives the input. Returns `false` if the id is
+    /// unknown, **or** if the input currently has a cable on it: a cabled input is the sum of
+    /// its cables and the base value has no effect, so the call is a no-op for the audio.
+    /// The override is still recorded in that case (a knob keeps its position) and takes
+    /// effect at the recompile that follows the cable's removal.
+    ///
+    /// Anything that is not a control-input port is passed to the module's
+    /// `ModuleIntrospection` to set internal state (waveform tables, oversampling, …); such
+    /// parameters are not part of the routing plan and follow the module's own rules.
     pub fn set_param_by_id(&mut self, node: NodeId, id: &str, value: f64) -> bool {
-        // Decide the routing without holding a mutable borrow across the invalidate() call.
-        let is_port = self
+        let port = self
             .module_of(node)
             .and_then(|m| m.port_spec().input_by_name(id))
-            .map(|p| is_control_input(p.kind))
-            .unwrap_or(false);
+            .filter(|p| is_control_input(p.kind))
+            .map(|p| p.id);
 
-        if is_port {
-            if let Some(n) = self.nodes.get_mut(node) {
-                n.param_overrides.insert(id.to_string(), value);
+        if let Some(port_id) = port {
+            let Some(n) = self.nodes.get_mut(node) else {
+                return false;
+            };
+            match n.param_overrides.iter_mut().find(|(p, _)| *p == port_id) {
+                Some(slot) => slot.1 = value,
+                // Capacity was reserved for every input at `add`, so this cannot grow.
+                None => n.param_overrides.push((port_id, value)),
             }
-            // The override is baked into InputPlan defaults at compile time.
-            self.invalidate();
+            let exec_idx = n.module_slot;
+
+            let port_ref = PortRef {
+                node,
+                port: port_id,
+            };
+            if self.cables.iter().any(|cable| cable.to == port_ref) {
+                // Cabled: the base value is shadowed. Recorded above; nothing to patch.
+                return false;
+            }
+
+            // Compiled and current: patch the plan in place. `module_slot` is the node's
+            // execution index after a successful compile (modules are permuted into
+            // execution order), so this is a direct index, not a search.
+            if !self.dirty && self.routing.nodes.len() == self.modules.len() {
+                if let Some(exec) = self.routing.nodes.get_mut(exec_idx) {
+                    if let Some(plan) = exec.inputs.iter_mut().find(|p| p.port_id == port_id) {
+                        plan.default = value;
+                    }
+                    if let Some(pending) = exec
+                        .normalled_pending
+                        .iter_mut()
+                        .find(|p| p.port_id == port_id)
+                    {
+                        pending.default = value;
+                    }
+                }
+            }
+            // Otherwise the next compile bakes the override in (build_routing).
             return true;
         }
 
@@ -2526,6 +2748,90 @@ mod tests {
         assert!((l1 - 3.0).abs() < 1e-9, "expected 3.0, got {}", l1);
     }
 
+    // Q-N3: `set_param_by_id` on a control input patches the compiled plan in place.
+    #[test]
+    fn test_set_param_by_id_after_compile_does_not_recompile_or_blank_buffers() {
+        use crate::modules::{DelayLine, Vca};
+        let mut patch = Patch::new(44100.0);
+        let src = patch.add("src", ConstSource::new(1.0));
+        let cv = patch.add("cv", ConstSource::new(10.0));
+        let vca = patch.add("vca", Vca::new());
+        let delay = patch.add("delay", DelayLine::new(44100.0));
+        let out = patch.add("out", Passthrough::new());
+        patch.connect(src.out("out"), vca.in_("in")).unwrap();
+        patch.connect(cv.out("out"), vca.in_("cv")).unwrap();
+        patch.connect(vca.out("out"), delay.in_("in")).unwrap();
+        patch.connect(delay.out("out"), out.in_("in")).unwrap();
+        patch.set_output(out.id());
+        patch.compile().unwrap();
+        for _ in 0..64 {
+            patch.tick();
+        }
+        assert!(!patch.dirty);
+        let order_before = patch.execution_order().to_vec();
+        let vca_before = patch.get_output_value(vca.id(), 10).unwrap();
+        assert!(vca_before.abs() > 0.5, "vca should be passing the source");
+
+        // Set the (unpatched) gain: takes effect on the next tick, with no recompile.
+        assert!(patch.set_param_by_id(vca.id(), "gain", 0.5));
+        assert!(
+            !patch.dirty,
+            "set_param_by_id must not dirty a compiled patch"
+        );
+        // The routing buffers were not reset: the delay's last output is still there.
+        assert_eq!(patch.get_output_value(vca.id(), 10), Some(vca_before));
+        patch.tick();
+        assert_eq!(patch.execution_order(), order_before.as_slice());
+        let vca_after = patch.get_output_value(vca.id(), 10).unwrap();
+        assert!(
+            (vca_after - vca_before * 0.5).abs() < 1e-9,
+            "gain override not applied in place: {vca_before} -> {vca_after}"
+        );
+        assert_eq!(patch.get_param_by_id(vca.id(), "gain"), Some(0.5));
+
+        // A cabled control input reports `false` (its base value is shadowed by the cable)
+        // and nothing changes on the next tick, but the value is remembered for when the
+        // cable goes away.
+        assert!(!patch.set_param_by_id(vca.id(), "cv", 2.5));
+        assert!(!patch.dirty);
+        patch.tick();
+        assert!((patch.get_output_value(vca.id(), 10).unwrap() - vca_after).abs() < 1e-9);
+        let cv_cable = patch
+            .cables()
+            .iter()
+            .find(|c| c.to == vca.in_("cv"))
+            .map(|c| c.id)
+            .unwrap();
+        patch.disconnect(cv_cable).unwrap();
+        patch.compile().unwrap();
+        patch.tick();
+        let uncabled = patch.get_output_value(vca.id(), 10).unwrap();
+        // 1.0 in × (2.5 V / 10 V) × gain 0.5
+        assert!(
+            (uncabled - 0.125).abs() < 1e-9,
+            "recorded override not applied once uncabled: {uncabled}"
+        );
+
+        // Unknown ids, and audio inputs (not knobs), are `false` and record nothing.
+        assert!(!patch.set_param_by_id(vca.id(), "no_such_port", 1.0));
+        assert!(!patch.set_param_by_id(vca.id(), "in", 1.0));
+        assert_eq!(patch.get_param_by_id(vca.id(), "in"), None);
+    }
+
+    // Q-N3: before the first compile the override is simply baked in by `compile`.
+    #[test]
+    fn test_set_param_by_id_before_compile_is_baked_in() {
+        use crate::modules::Vca;
+        let mut patch = Patch::new(44100.0);
+        let src = patch.add("src", ConstSource::new(1.0));
+        let vca = patch.add("vca", Vca::new());
+        patch.connect(src.out("out"), vca.in_("in")).unwrap();
+        patch.set_output(vca.id());
+        assert!(patch.set_param_by_id(vca.id(), "gain", 0.25));
+        let (l, _) = patch.tick();
+        assert!((l - 0.25).abs() < 1e-9, "got {l}");
+    }
+
     // Q076/Q181: a cycle-creating mutation surfaces via last_compile_error and ticks silent.
     #[test]
     fn test_cycle_mutation_surfaces_via_last_compile_error() {
@@ -2626,6 +2932,130 @@ mod tests {
             peak_early,
             peak_late
         );
+    }
+
+    // Q-N4: an acyclic path into a cycle-breaker is scheduled like any other edge, so
+    // the breaker reads its producer's CURRENT sample regardless of insertion order.
+    #[test]
+    fn test_acyclic_edge_into_breaker_is_not_deferred() {
+        // Build src -> delay -> out with the delay added before and after the source.
+        fn render(delay_first: bool) -> (Vec<f64>, Vec<NodeId>) {
+            let mut patch = Patch::new(44100.0);
+            let (src, delay) = if delay_first {
+                let d = patch.add("delay", FeedbackDelay::new());
+                let s = patch.add("src", ConstSource::new(1.0));
+                (s, d)
+            } else {
+                let s = patch.add("src", ConstSource::new(1.0));
+                let d = patch.add("delay", FeedbackDelay::new());
+                (s, d)
+            };
+            let out = patch.add("out", Passthrough::new());
+            patch.connect(src.out("out"), delay.in_("in")).unwrap();
+            patch.connect(delay.out("out"), out.in_("in")).unwrap();
+            patch.set_output(out.id());
+            patch.compile().unwrap();
+            let samples = (0..4).map(|_| patch.tick().0).collect();
+            (samples, patch.execution_order().to_vec())
+        }
+        let (a, _) = render(false);
+        let (b, _) = render(true);
+        // FeedbackDelay is a unit delay: the constant appears on the second sample in both
+        // cases. Before 0.4.0, adding the delay first cost a further sample.
+        assert_eq!(a, vec![0.0, 1.0, 1.0, 1.0]);
+        assert_eq!(a, b, "output depends on node insertion order");
+    }
+
+    // Q-N4: a feedback loop with one breaker renders identically whatever the insertion
+    // order — the deferred edge is the loop's, not "whatever fed the delay".
+    #[test]
+    fn test_feedback_loop_output_is_insertion_order_independent() {
+        fn render(order: [usize; 3]) -> Vec<f64> {
+            let mut patch = Patch::new(44100.0);
+            let mut handles: [Option<NodeHandle>; 3] = [None, None, None];
+            for &which in &order {
+                handles[which] = Some(match which {
+                    0 => patch.add("src", ConstSource::new(1.0)),
+                    1 => patch.add("sum", SumModule::new()),
+                    _ => patch.add("delay", FeedbackDelay::new()),
+                });
+            }
+            let src = handles[0].clone().unwrap();
+            let sum = handles[1].clone().unwrap();
+            let delay = handles[2].clone().unwrap();
+            // src -> sum.a ; delay.out -> sum.b (x0.5, the feedback edge) ; sum -> delay.in
+            patch.connect(src.out("out"), sum.in_("a")).unwrap();
+            patch
+                .connect_attenuated(delay.out("out"), sum.in_("b"), 0.5)
+                .unwrap();
+            patch.connect(sum.out("out"), delay.in_("in")).unwrap();
+            patch.set_output(delay.id());
+            patch.compile().unwrap();
+            (0..8).map(|_| patch.tick().0).collect()
+        }
+        let reference = render([0, 1, 2]);
+        for order in [[2, 1, 0], [1, 2, 0], [0, 2, 1], [2, 0, 1], [1, 0, 2]] {
+            assert_eq!(
+                render(order),
+                reference,
+                "insertion order {order:?} changed output"
+            );
+        }
+        // Only the delay -> sum edge is deferred, so the loop carries exactly two samples
+        // of latency (the unit delay's own plus the deferred edge): the constant appears at
+        // sample 2 and the first echo (x0.5) two samples later.
+        assert_eq!(reference[..6], [0.0, 0.0, 1.0, 1.0, 1.5, 1.5]);
+    }
+
+    // Q-N4: a breaker that is merely downstream of a cycle is not forced early.
+    #[test]
+    fn test_breaker_downstream_of_a_cycle_keeps_zero_latency() {
+        let mut patch = Patch::new(44100.0);
+        // Inserted first so a naive "first stuck breaker" pick would grab it.
+        let tail = patch.add("tail", FeedbackDelay::new());
+        let src = patch.add("src", ConstSource::new(1.0));
+        let sum = patch.add("sum", SumModule::new());
+        let loop_delay = patch.add("loop_delay", FeedbackDelay::new());
+        patch.connect(src.out("out"), sum.in_("a")).unwrap();
+        patch
+            .connect_attenuated(loop_delay.out("out"), sum.in_("b"), 0.5)
+            .unwrap();
+        patch.connect(sum.out("out"), loop_delay.in_("in")).unwrap();
+        patch.connect(sum.out("out"), tail.in_("in")).unwrap();
+        patch.set_output(tail.id());
+        patch.compile().unwrap();
+        let order = patch.execution_order();
+        let pos = |id: NodeId| order.iter().position(|&n| n == id).unwrap();
+        assert!(
+            pos(sum.id()) < pos(tail.id()),
+            "downstream breaker scheduled before its producer: {order:?}"
+        );
+        assert!(
+            pos(loop_delay.id()) < pos(sum.id()),
+            "loop breaker not deferred"
+        );
+        // tail sees sum's current sample: constant arrives on the second tick.
+        let out: Vec<f64> = (0..3).map(|_| patch.tick().0).collect();
+        assert_eq!(out, vec![0.0, 1.0, 1.0]);
+    }
+
+    // Q-N4: a breaker feeding itself compiles (self-loop) and a self-loop without a breaker
+    // still does not.
+    #[test]
+    fn test_self_loop_needs_a_breaker() {
+        let mut patch = Patch::new(44100.0);
+        let d = patch.add("d", FeedbackDelay::new());
+        patch.connect(d.out("out"), d.in_("in")).unwrap();
+        patch.set_output(d.id());
+        assert!(patch.compile().is_ok());
+
+        let mut patch = Patch::new(44100.0);
+        let p = patch.add("p", Passthrough::new());
+        patch.connect(p.out("out"), p.in_("in")).unwrap();
+        assert!(matches!(
+            patch.compile(),
+            Err(PatchError::CycleDetected { .. })
+        ));
     }
 
     // Q077: a cycle with no breaker still fails to compile.

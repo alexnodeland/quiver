@@ -76,7 +76,7 @@ instruments and tools — in native apps, plugins, or the browser — from Rust.
 - 🎛️ **Graph-Based Patching**: Build complex synthesizer patches with a flexible node/cable system
 - 🎚️ **Analog Modeling**: Realistic VCO drift, filter saturation, and component tolerances
 - 🎹 **Polyphony**: Built-in voice allocation with multiple algorithms
-- ⚡ **SIMD Optimization**: Optional vectorized processing for performance-critical applications
+- ⚡ **SIMD helpers**: Optional `wide`-backed `AudioBlock` / `RingBuffer` utilities (`simd` feature) for block-processing code you write on top of Quiver; the built-in modules and the patch engine themselves are scalar
 - 💾 **Serialization**: Save and load patches as JSON
 - 🔧 **`no_std` Support**: Run on embedded systems and WebAssembly targets
 
@@ -128,7 +128,7 @@ quiver-dsp = "0.2"
 |---------|---------|-------------|
 | `std` | Yes | Full functionality including OSC, plugins, visualization (implies `alloc`) |
 | `alloc` | No | Serialization, presets, and I/O for `no_std` + heap environments |
-| `simd` | No | SIMD vectorization for block processing (works with any tier) |
+| `simd` | No | Vectorized `AudioBlock` / `RingBuffer` helpers via `wide` (works with any tier). Does **not** vectorize the built-in modules or the patch interpreter |
 | `wasm` | No | WebAssembly bindings (`wasm-bindgen`) + TypeScript types (`tsify`); implies `alloc`. Powers [`packages/@quiver-dsp/wasm`](./packages/@quiver-dsp/wasm) and the [browser synth demo](./demos/browser) |
 
 ### `no_std` Support

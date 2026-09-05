@@ -682,15 +682,40 @@ pub trait GraphModule: Send + Sync {
     /// Set sample rate
     fn set_sample_rate(&mut self, sample_rate: f64);
 
+    /// Give this module its own random stream, starting from `seed`.
+    ///
+    /// The default is a no-op: a deterministic module has nothing to seed. A module
+    /// that draws randomness (noise sources, `KarplusStrong`'s excitation,
+    /// `BernoulliGate`, the analog-modelling drift in `AnalogVco`, `Granular`,
+    /// `Arpeggiator`) should own a [`ModuleRng`](crate::rng::ModuleRng) (or an
+    /// [`Rng`](crate::rng::Rng)), reseed it here, and rewind it in
+    /// [`reset`](Self::reset), so that:
+    ///
+    /// * two renders of the same seeded module are identical regardless of what any
+    ///   other module (or another patch on the same thread) consumed;
+    /// * `reset()` genuinely restores its output sequence.
+    ///
+    /// [`Patch::seed`](crate::graph::Patch::seed) calls this on every node with a
+    /// per-node seed derived from one patch seed (and re-applies it on
+    /// [`Patch::reset`](crate::graph::Patch::reset)). A module that is never seeded
+    /// keeps drawing from the thread-global stream ([`rng::random`](crate::rng::random)),
+    /// so existing behaviour — including `quiver::rng::seed` — is unchanged until a
+    /// caller opts in.
+    fn seed(&mut self, seed: u64) {
+        let _ = seed;
+    }
+
     /// Whether this module breaks a feedback cycle in the patch graph.
     ///
     /// The graph normally rejects any cable cycle with [`PatchError::CycleDetected`].
     /// A module that returns `true` (delay-style modules such as `UnitDelay` and
-    /// `DelayLine`) is treated as a one-sample delay boundary: [`Patch::compile`] excludes
-    /// the edges feeding *into* it from the topological sort, so a loop routed through it
-    /// compiles. At runtime such a module reads its inputs from the previous tick's output
-    /// buffers, giving the classic single-sample feedback delay. Cycles that contain no
-    /// cycle-breaker still fail to compile.
+    /// `DelayLine`) is treated as a one-sample delay boundary: when the schedule cannot
+    /// make progress because of a cycle, [`Patch::compile`] schedules such a module ahead
+    /// of the producers still feeding it, and at runtime it reads *those* inputs from the
+    /// previous tick's output buffers — the classic single-sample feedback delay. Only the
+    /// edges that close a cycle are deferred this way; an input reached by an acyclic path
+    /// is read in the same tick like any other, so a delay at the end of a chain adds no
+    /// latency. Cycles that contain no cycle-breaker still fail to compile.
     ///
     /// [`PatchError::CycleDetected`]: crate::graph::PatchError::CycleDetected
     /// [`Patch::compile`]: crate::graph::Patch::compile

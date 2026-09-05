@@ -8,6 +8,17 @@ use alloc::vec::Vec;
 use core::f64::consts::TAU;
 use libm::Libm;
 
+/// Give `buffer` exactly `len` zeroed samples, reusing its allocation when the
+/// length is already right (the common `Patch::add` → `set_sample_rate` at an
+/// unchanged rate) and reallocating only when it is not.
+fn resize_cleared(buffer: &mut Vec<f64>, len: usize) {
+    if buffer.len() == len {
+        buffer.fill(0.0);
+    } else {
+        *buffer = vec![0.0; len];
+    }
+}
+
 /// Unit Delay (single sample delay)
 ///
 /// Delays a signal by one sample. Essential for feedback loops.
@@ -112,6 +123,12 @@ impl DelayLine {
     /// without audibly lagging deliberate delay-time changes).
     const DELAY_SMOOTH_SECS: f64 = 0.005;
 
+    /// Longest buffer [`with_max_delay`](Self::with_max_delay) will allocate, in
+    /// seconds (~46 MB of `f64` at 96 kHz). A caller-supplied maximum is clamped
+    /// to `0.001..=MAX_DELAY_CAP_SECS`, and a non-finite one falls back to the
+    /// 2 s default, so a bad value cannot request a multi-gigabyte buffer.
+    pub const MAX_DELAY_CAP_SECS: f64 = 60.0;
+
     pub fn new(sample_rate: f64) -> Self {
         Self::with_max_delay(sample_rate, Self::MAX_DELAY_SECS)
     }
@@ -120,9 +137,15 @@ impl DelayLine {
     ///
     /// `DelayLine::new` delegates here with the 2 s default, so existing
     /// patches are unaffected. The exponential time map spans
-    /// `1 ms..max_delay_secs` for whatever maximum is chosen.
+    /// `1 ms..max_delay_secs` for whatever maximum is chosen. `max_delay_secs`
+    /// is bounded to `0.001..=`[`MAX_DELAY_CAP_SECS`](Self::MAX_DELAY_CAP_SECS)
+    /// (non-finite → the 2 s default).
     pub fn with_max_delay(sample_rate: f64, max_delay_secs: f64) -> Self {
-        let max_delay_secs = max_delay_secs.max(0.001);
+        let max_delay_secs = if max_delay_secs.is_finite() {
+            max_delay_secs.clamp(0.001, Self::MAX_DELAY_CAP_SECS)
+        } else {
+            Self::MAX_DELAY_SECS
+        };
         let buffer_size = (sample_rate * max_delay_secs) as usize + 1;
         Self {
             buffer: vec![0.0; buffer_size],
@@ -267,7 +290,10 @@ impl GraphModule for DelayLine {
     fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
         let buffer_size = (sample_rate * self.max_delay_secs) as usize + 1;
-        self.buffer = vec![0.0; buffer_size];
+        // `Patch::add` calls this right after construction, usually at the same
+        // rate: keep the (possibly multi-megabyte tape) buffer instead of
+        // allocating it twice; the state is cleared either way.
+        resize_cleared(&mut self.buffer, buffer_size);
         self.write_pos = 0;
         self.smoothed_delay = 0.0;
         self.delay_smooth_coef = env_coef(Self::DELAY_SMOOTH_SECS, sample_rate);
@@ -457,7 +483,7 @@ impl GraphModule for Chorus {
         let buffer_size =
             ((Self::MAX_MOD_DELAY_MS + Self::BASE_DELAY_MS) * sample_rate / 1000.0) as usize + 10;
         for buffer in &mut self.delay_buffers {
-            *buffer = vec![0.0; buffer_size];
+            resize_cleared(buffer, buffer_size);
         }
         self.write_pos = 0;
     }
@@ -602,7 +628,7 @@ impl GraphModule for Flanger {
         self.sample_rate = sample_rate;
         let buffer_size = (sample_rate * Self::MAX_DELAY_MS / 1000.0) as usize + 10;
         for buffer in &mut self.buffers {
-            *buffer = vec![0.0; buffer_size];
+            resize_cleared(buffer, buffer_size);
         }
         self.write_pos = 0;
     }

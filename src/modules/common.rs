@@ -112,10 +112,17 @@ pub fn sanitize_audio(x: f64) -> f64 {
     }
 }
 
-/// Flush denormalized numbers to zero to avoid CPU denormal penalties.
+/// Flush tiny values to exactly zero.
 ///
-/// Defined here for Wave B, which wires it into the DSP paths; not yet called.
-#[allow(dead_code)]
+/// Despite the name this is a *tiny-value* flush, not a strict denormal flush:
+/// the `1e-20` threshold is some 10²⁸⁸ times the largest `f64` subnormal
+/// (≈2.2e-308). That is deliberate. It is applied to recirculating state —
+/// feedback buffers, detector one-poles, the routing buffer in `scatter` — as a
+/// silence floor, so a decaying tail reaches exact zero instead of creeping
+/// through the subnormal range for seconds (which is what actually triggers
+/// denormal-arithmetic CPU penalties). It is not a substitute for FTZ/DAZ, and
+/// it does alter values in `(-1e-20, 1e-20)`: −400 dBFS, far below anything
+/// audible or representable in 24-bit output.
 #[inline]
 pub fn flush_denorm(x: f64) -> f64 {
     if Libm::<f64>::fabs(x) < 1e-20 {

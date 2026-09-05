@@ -427,14 +427,29 @@ impl VoctTrackingModel {
         }
     }
 
+    /// Replace the per-instance tracking errors from two unit random draws:
+    /// `base` in `[-1, 1)` (→ ±5 cents) and `octave` in `[0, 1)` (→ 1–3
+    /// cents/octave), the same mapping [`new`](Self::new) applies to the global
+    /// stream. Lets a seeded owner ([`AnalogVco`]) derive its "component
+    /// tolerances" from its own stream.
+    pub fn set_instance_errors(&mut self, base: f64, octave: f64) {
+        self.base_error_cents = base * 5.0;
+        self.octave_error_coef = 1.0 + octave * 2.0;
+    }
+
     /// Apply tracking error to a V/Oct value, returning the modified V/Oct
     pub fn apply(&mut self, voct: f64, dt: f64) -> f64 {
+        self.apply_with_noise(voct, dt, rng::random_bipolar())
+    }
+
+    /// [`apply`](Self::apply) with the drift noise sample (in `[-1, 1)`)
+    /// supplied by the caller, for owners with their own random stream.
+    pub fn apply_with_noise(&mut self, voct: f64, dt: f64, noise: f64) -> f64 {
         // Slow pitch drift modeled as an Ornstein-Uhlenbeck process (a
         // mean-reverting random walk): dX = -(X/tau) dt + sigma*sqrt(dt)*noise.
         // The sqrt(dt) noise scaling makes the wander sample-rate invariant in
         // wall-clock time (unlike a dt-scaled random walk, whose diffusion rate
         // is proportional to 1/sample_rate).
-        let noise = rng::random_bipolar();
         self.drift_state += -self.drift_state / self.drift_tau * dt
             + self.drift_sigma * Libm::<f64>::sqrt(dt) * noise;
         self.drift_state = self.drift_state.clamp(-25.0, 25.0);
@@ -568,6 +583,10 @@ pub struct AnalogVco {
     prev_sync: f64,
     sync_ramp: f64, // For soft sync ramping
 
+    /// Per-tick drift noise source: the thread-global stream until seeded (the
+    /// pre-0.4.0 behaviour), then an owned stream. See [`GraphModule::seed`].
+    rng: rng::ModuleRng,
+
     spec: PortSpec,
 }
 
@@ -584,6 +603,7 @@ impl AnalogVco {
             last_output: 0.0,
             prev_sync: 0.0,
             sync_ramp: 1.0,
+            rng: rng::ModuleRng::new(),
             spec: PortSpec {
                 inputs: vec![
                     PortDef::new(0, "voct", SignalKind::VoltPerOctave),
@@ -621,8 +641,11 @@ impl GraphModule for AnalogVco {
 
         let dt = 1.0 / self.sample_rate;
 
-        // Phase 3: Apply V/Oct tracking errors
-        let voct_with_error = self.voct_tracking.apply(voct, dt);
+        // Phase 3: Apply V/Oct tracking errors (drift noise from this module's
+        // own stream — the global one until seeded, so the draw order and values
+        // of an unseeded instance are exactly what `apply` would have drawn).
+        let drift_noise = self.rng.next_bipolar();
+        let voct_with_error = self.voct_tracking.apply_with_noise(voct, dt, drift_noise);
 
         // Apply component tolerance and thermal drift to frequency.
         // Q008: anchor at the exact shared C4 reference (`C4_HZ`), not an
@@ -690,6 +713,24 @@ impl GraphModule for AnalogVco {
         self.thermal.reset();
         self.voct_tracking.reset();
         self.hf_rolloff.reset();
+        self.rng.reset();
+    }
+
+    /// Seeding an `AnalogVco` fixes its "component tolerances" too: the
+    /// frequency-component offset, the DC offset and the V/Oct tracking errors
+    /// (four draws `new()` takes from the global stream, in that order) are
+    /// re-drawn from a stream derived from `seed`, and the per-tick drift noise
+    /// from another, so a seeded instance is a pure function of its seed
+    /// regardless of how many analog modules were constructed before it.
+    fn seed(&mut self, seed: u64) {
+        let mut instance = rng::Rng::from_seed(rng::derive_seed(seed, u64::MAX));
+        self.freq_component.instance_offset =
+            instance.next_f64_bipolar() * self.freq_component.tolerance;
+        self.dc_offset = instance.next_f64_bipolar() * 0.01;
+        let base = instance.next_f64_bipolar();
+        let octave = instance.next_f64();
+        self.voct_tracking.set_instance_errors(base, octave);
+        self.rng.seed(seed);
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {

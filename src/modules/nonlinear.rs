@@ -446,7 +446,9 @@ impl GraphModule for PitchShifter {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q-N6: a non-finite input must never reach the grain buffer (it would be read
+        // back for as long as the window lasts); treat it as silence.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
 
         // Map inputs
         // Shift: bipolar CV ±5V maps to ±24 semitones
@@ -847,7 +849,7 @@ pub struct Granular {
     spawn_timer: usize,
 
     /// Random number generator for spray and density jitter
-    rng: crate::rng::Rng,
+    rng: crate::rng::ModuleRng,
 
     /// Smoothed constant-power normalization divisor (Q028). Tracks the expected
     /// steady-state grain overlap rather than the instantaneous active count,
@@ -875,7 +877,11 @@ impl Granular {
             write_pos: 0,
             grains: [Grain::default(); MAX_GRAINS],
             spawn_timer: 0,
-            rng: crate::rng::Rng::from_seed(42),
+            rng: {
+                let mut rng = crate::rng::ModuleRng::new();
+                rng.seed(42);
+                rng
+            },
             norm_smooth: 1.0,
             norm_smooth_coef: env_coef(0.05, sample_rate),
             speed_memo: Memo::new(0.0),
@@ -952,7 +958,9 @@ impl GraphModule for Granular {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q-N6: sanitize before the circular buffer. With `freeze` engaged the buffer is
+        // never overwritten, so a NaN written into it would otherwise play back forever.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let position = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let size_cv = inputs.get_or(2, 0.3).clamp(0.0, 1.0);
         let density_cv = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
@@ -1052,8 +1060,12 @@ impl GraphModule for Granular {
         self.write_pos = 0;
         self.grains = [Grain::default(); MAX_GRAINS];
         self.spawn_timer = 0;
-        self.rng = crate::rng::Rng::from_seed(42);
+        self.rng.reset();
         self.norm_smooth = 1.0;
+    }
+
+    fn seed(&mut self, seed: u64) {
+        self.rng.seed(seed);
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
@@ -1127,7 +1139,8 @@ impl GraphModule for Wavefolder {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q-N6: the oversampler's half-band filters are stateful; keep NaN/Inf out.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let threshold = inputs.get_or(1, self.threshold).max(0.1);
 
         // Fold through the opt-in oversampler; `Oversample::Off` is exactly the

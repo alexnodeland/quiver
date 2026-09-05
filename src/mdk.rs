@@ -682,8 +682,48 @@ fn harness_test_tone(sample_index: usize, sample_rate: f64) -> f64 {
     TONE_AMP * (core::f64::consts::TAU * TONE_HZ * sample_index as f64 / sample_rate).sin()
 }
 
+/// A periodic 5 V pulse used to drive Gate / Trigger / Clock inputs in the
+/// stability, range and NaN-recovery checks: high for the first 10 ms of every
+/// 250 ms. Trigger-driven modules (`KarplusStrong`, envelopes, sequencers,
+/// `BernoulliGate`, sample players, …) do nothing until they are excited, so
+/// holding those inputs at a constant 0 V made the checks vacuous for them.
+fn harness_gate_pulse(sample_index: usize, sample_rate: f64) -> f64 {
+    const PERIOD_S: f64 = 0.25;
+    const HIGH_S: f64 = 0.01;
+    let period = (PERIOD_S * sample_rate).max(1.0) as usize;
+    let high = (HIGH_S * sample_rate).max(1.0) as usize;
+    if sample_index % period < high {
+        5.0
+    } else {
+        0.0
+    }
+}
+
+/// Whether an input of this kind is driven by [`harness_gate_pulse`].
+fn harness_is_pulse_input(kind: SignalKind) -> bool {
+    matches!(
+        kind,
+        SignalKind::Gate | SignalKind::Trigger | SignalKind::Clock
+    )
+}
+
+/// Refresh the per-sample driven inputs: audio inputs get the test tone,
+/// gate/trigger/clock inputs the pulse train. Everything else is left as set.
+fn harness_drive_inputs(inputs: &mut PortValues, spec: &PortSpec, n: usize, sample_rate: f64) {
+    let tone = harness_test_tone(n, sample_rate);
+    let pulse = harness_gate_pulse(n, sample_rate);
+    for input in &spec.inputs {
+        if input.kind == SignalKind::Audio {
+            inputs.set(input.id, tone);
+        } else if harness_is_pulse_input(input.kind) {
+            inputs.set(input.id, pulse);
+        }
+    }
+}
+
 /// Typical steady value for a (non-audio) input of the given signal kind.
-/// Audio-kind inputs are driven with [`harness_test_tone`] instead.
+/// Audio-kind inputs are driven with [`harness_test_tone`] and gate/trigger/
+/// clock inputs with [`harness_gate_pulse`] instead.
 fn harness_typical_input(kind: SignalKind) -> f64 {
     match kind {
         SignalKind::VoltPerOctave => 0.0,
@@ -696,8 +736,19 @@ fn harness_typical_input(kind: SignalKind) -> f64 {
 }
 
 impl<M: GraphModule> ModuleTestHarness<M> {
-    /// Create a new test harness for a module
-    pub fn new(module: M, sample_rate: f64) -> Self {
+    /// Fixed seed handed to the module under test (see [`new`](Self::new)).
+    pub const SEED: u64 = 0x4D44_4B5F_5345_4544; // "MDK_SEED"
+
+    /// Create a new test harness for a module.
+    ///
+    /// The module is seeded once via [`GraphModule::seed`] with [`SEED`](Self::SEED),
+    /// so a stochastic module (noise, `BernoulliGate`, `KarplusStrong`, …) that owns
+    /// its stream is reproducible under the harness and passes `reset_clears_state`
+    /// like any other module. A module that ignores `seed` and keeps drawing from the
+    /// thread-global stream will fail that check — which is the point: the kit holds
+    /// modules to the determinism contract [`GraphModule::seed`] documents.
+    pub fn new(mut module: M, sample_rate: f64) -> Self {
+        module.seed(Self::SEED);
         Self {
             module,
             sample_rate,
@@ -862,8 +913,10 @@ impl<M: GraphModule> ModuleTestHarness<M> {
     /// Audio-kind inputs are driven with a live test tone (not silence) so that
     /// audio-processing effects actually run signal through their processing and
     /// feedback paths — with silent input a reverb/delay/chorus outputs ~0 and
-    /// this check passes trivially regardless of feedback stability. Non-audio
-    /// inputs are held at typical steady values.
+    /// this check passes trivially regardless of feedback stability. Gate,
+    /// trigger and clock inputs are driven with a pulse train for the same
+    /// reason: an unexcited string, envelope or sequencer is trivially stable.
+    /// Other non-audio inputs are held at typical steady values.
     pub fn test_stability(&mut self) -> TestResult {
         self.module.reset();
 
@@ -871,21 +924,16 @@ impl<M: GraphModule> ModuleTestHarness<M> {
         let mut inputs = PortValues::new();
         let mut outputs = PortValues::new();
 
-        // Seed non-audio inputs; audio inputs are refreshed with the tone each
+        // Seed non-audio inputs; audio and gate-like inputs are refreshed each
         // sample inside the loop below.
         for input in &spec.inputs {
             inputs.set(input.id, harness_typical_input(input.kind));
         }
 
-        // Run for many samples with a live audio excitation.
+        // Run for many samples with a live audio excitation and gate pulses.
         let mut max_output = 0.0_f64;
         for n in 0..44100 {
-            let tone = harness_test_tone(n, self.sample_rate);
-            for input in &spec.inputs {
-                if input.kind == SignalKind::Audio {
-                    inputs.set(input.id, tone);
-                }
-            }
+            harness_drive_inputs(&mut inputs, &spec, n, self.sample_rate);
 
             self.module.tick(&inputs, &mut outputs);
 
@@ -933,24 +981,23 @@ impl<M: GraphModule> ModuleTestHarness<M> {
                 inputs.set(input.id, harness_typical_input(input.kind));
             }
 
-            // Inject the non-finite value on every audio input for a few samples.
+            // Inject the non-finite value on every audio input for a few samples,
+            // with gate-like inputs held high so trigger-driven state is live too.
             for input in &spec.inputs {
                 if input.kind == SignalKind::Audio {
                     inputs.set(input.id, bad);
+                } else if harness_is_pulse_input(input.kind) {
+                    inputs.set(input.id, 5.0);
                 }
             }
             for _ in 0..16 {
                 self.module.tick(&inputs, &mut outputs);
             }
 
-            // Feed a clean tone long enough to flush any legitimate transient.
+            // Feed a clean tone (and gate pulses) long enough to flush any
+            // legitimate transient.
             for n in 0..8192 {
-                let tone = harness_test_tone(n, self.sample_rate);
-                for input in &spec.inputs {
-                    if input.kind == SignalKind::Audio {
-                        inputs.set(input.id, tone);
-                    }
-                }
+                harness_drive_inputs(&mut inputs, &spec, n, self.sample_rate);
                 self.module.tick(&inputs, &mut outputs);
             }
 
@@ -1029,7 +1076,8 @@ impl<M: GraphModule> ModuleTestHarness<M> {
         let mut outputs = PortValues::new();
 
         // Set some typical modulation; audio inputs are driven with a live tone
-        // (below) so audio-processing modules produce a real, non-silent signal.
+        // and gate-like inputs with a pulse train (below) so audio-processing and
+        // trigger-driven modules alike produce a real, non-silent signal.
         for input in &spec.inputs {
             inputs.set(input.id, input.default);
         }
@@ -1037,12 +1085,7 @@ impl<M: GraphModule> ModuleTestHarness<M> {
         let mut violations = Vec::new();
 
         for n in 0..4410 {
-            let tone = harness_test_tone(n, self.sample_rate);
-            for input in &spec.inputs {
-                if input.kind == SignalKind::Audio {
-                    inputs.set(input.id, tone);
-                }
-            }
+            harness_drive_inputs(&mut inputs, &spec, n, self.sample_rate);
 
             self.module.tick(&inputs, &mut outputs);
 

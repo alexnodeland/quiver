@@ -9,6 +9,7 @@ use crate::modules::*;
 use crate::port::{GraphModule, PortSpec};
 use crate::StdMap;
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -67,8 +68,13 @@ pub struct PatchDef {
     ///
     /// Optional and additive: the schema marks `parameters` optional (default `{}`), so a patch
     /// that omits the key must still load. `serde(default)` keeps deserialization in sync.
+    ///
+    /// A `BTreeMap` (since 0.4.0; previously a `HashMap` under `std`) so that
+    /// [`to_json`](Self::to_json) serialises the keys in a canonical, sorted order — the same
+    /// patch always produces byte-identical JSON, which anyone hashing or diffing patch files
+    /// depends on.
     #[serde(default)]
-    pub parameters: StdMap<String, f64>,
+    pub parameters: BTreeMap<String, f64>,
 }
 
 impl PatchDef {
@@ -83,7 +89,7 @@ impl PatchDef {
             output: None,
             modules: vec![],
             cables: vec![],
-            parameters: StdMap::new(),
+            parameters: BTreeMap::new(),
         }
     }
 
@@ -1354,7 +1360,7 @@ impl Patch {
         // Record every parameter whose current value differs from its default, keyed
         // "module_name.param_id". Covers both control-input port base values and internal
         // (introspection) parameters; unchanged params are omitted to keep the JSON lean.
-        let mut parameters: StdMap<String, f64> = StdMap::new();
+        let mut parameters: BTreeMap<String, f64> = BTreeMap::new();
         for (node_id, node_name, _) in self.nodes() {
             for p in self.param_infos(node_id) {
                 if (p.value - p.default).abs() > f64::EPSILON {

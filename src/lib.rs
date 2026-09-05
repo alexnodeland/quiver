@@ -190,7 +190,7 @@ pub mod prelude {
     };
 
     // RNG (no_std compatible)
-    pub use crate::rng::{Rng, SeedableRng};
+    pub use crate::rng::{derive_seed, ModuleRng, Rng, SeedableRng};
 
     // ========================================================================
     // Alloc-tier exports (work with no_std + alloc)

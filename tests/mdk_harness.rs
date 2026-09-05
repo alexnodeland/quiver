@@ -23,18 +23,14 @@ use quiver::prelude::*;
 /// every entry STILL fails (see the stale-allowlist guard below), so an entry
 /// cannot silently mask a module that has since been fixed or changed.
 ///
-/// - `noise` / `reset_clears_state`: the white-noise output is drawn from a
-///   process-global RNG (`rng::random_bipolar`), so it is stochastic by design.
-///   The harness's reset check assumes `reset()` restores fully deterministic
-///   state; making a noise source replay an identical sequence after reset would
-///   defeat its purpose. Its filter state IS cleared on reset — only the random
-///   draw differs — so this is an inherent property, not a bug.
-///
-/// All modules with feedback/detector state now pass `nan_recovery`: every
-/// audio-kind input feeding such state goes through `sanitize_audio`, so a
-/// non-finite sample cannot latch. Any new entry here needs the same level of
-/// justification as `noise` below.
-const ALLOWLIST: &[(&str, &str)] = &[("noise", "reset_clears_state")];
+/// Currently empty. `noise` / `reset_clears_state` used to be listed because the
+/// white-noise output came from the process-global RNG; the harness now seeds
+/// every module (`GraphModule::seed`, Q-N2) and stochastic modules own their
+/// stream, so `reset()` rewinds it and the check passes. All modules with
+/// feedback/detector state pass `nan_recovery`: every audio-kind input feeding
+/// such state goes through `sanitize_audio`, so a non-finite sample cannot
+/// latch. Any new entry here needs a justification of the same weight.
+const ALLOWLIST: &[(&str, &str)] = &[];
 
 /// Adapter so a `Box<dyn GraphModule>` from the registry satisfies the
 /// `M: GraphModule` bound on `ModuleTestHarness` (there is no blanket impl for
@@ -53,6 +49,9 @@ impl GraphModule for Boxed {
     }
     fn set_sample_rate(&mut self, sr: f64) {
         self.0.set_sample_rate(sr)
+    }
+    fn seed(&mut self, seed: u64) {
+        self.0.seed(seed)
     }
     fn type_id(&self) -> &'static str {
         self.0.type_id()

@@ -4,7 +4,7 @@
 # the LIBRARY name stays `quiver` (see `[lib] name` below): consumers
 # `cargo add quiver-dsp` but still write `use quiver::prelude::*`.
 name = "quiver-dsp"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.78"
 authors = ["Alex Nodeland"]
@@ -54,7 +54,6 @@ bench = false
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"], optional = true }
 slotmap = { version = "1.0", default-features = false, features = ["serde"] }
-rand = { version = "0.8", optional = true }
 libm = "0.2"
 # Portable 64-bit atomics: targets whose `max_atomic_width < 64` (e.g. the
 # embedded `thumbv7em-none-eabihf` no_std CI target) do not provide
@@ -85,7 +84,7 @@ harness = false
 [features]
 default = ["std"]
 # Full standard library support (includes alloc)
-std = ["alloc", "serde/std", "slotmap/std", "rand"]
+std = ["alloc", "serde/std", "slotmap/std"]
 # Heap allocation support for no_std (enables serialization, presets, I/O)
 alloc = ["serde_json"]
 # SIMD vectorization (works with any feature combination)

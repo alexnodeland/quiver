@@ -215,6 +215,15 @@ struct PortBuffer {
     /// Resolved node id, cached lazily to avoid a per-sample name lookup (and
     /// the per-sample `String` allocation that a keyed map would require).
     node_id: Option<NodeId>,
+    /// Resolved routing slot of the metered port (see [`Patch::output_slot`]),
+    /// so the per-sample read is an indexed load rather than a hashed lookup.
+    ///
+    /// [`Patch::output_slot`]: crate::graph::Patch::output_slot
+    slot: Option<usize>,
+    /// The [`Patch::routing_generation`](crate::graph::Patch::routing_generation)
+    /// `node_id` and `slot` were resolved against; both are re-resolved when the
+    /// patch reports a different one (recompile, or a node removed and re-added).
+    generation: Option<u64>,
     /// Deferred result awaiting formatting on the poll side.
     ready: Option<ReadyResult>,
 }
@@ -227,6 +236,8 @@ impl PortBuffer {
             gate_active: false,
             kind,
             node_id: None,
+            slot: None,
+            generation: None,
             ready: None,
         }
     }
@@ -478,15 +489,16 @@ impl StateObserver {
     /// This is the real-time capture entry point: call it **once per audio
     /// sample** inside the engine's tick loop so that Scope/Spectrum/Level see
     /// every sample rather than one per block (which aliases everything above
-    /// `sample_rate / (2 * block_size)`). It is allocation-free: subscriptions
-    /// are iterated by index (no clone), node ids are resolved once and cached,
-    /// samples land in preallocated buffers, and formatting/serialization of any
-    /// filled buffer is deferred to `flush_ready` / [`Self::drain_updates`]
-    /// on the consumer side.
+    /// `sample_rate / (2 * block_size)`). It is allocation-free and hash-free:
+    /// subscriptions are iterated by index (no clone), each port's node id and
+    /// routing slot are resolved once per routing generation and cached, samples
+    /// land in preallocated buffers, and formatting/serialization of any filled
+    /// buffer is deferred to [`Self::drain_updates`] on the consumer side.
     pub fn collect_sample(&mut self, patch: &crate::graph::Patch) {
         const THRESHOLD_ON: f32 = 2.5;
         const THRESHOLD_OFF: f32 = 0.5;
 
+        let generation = patch.routing_generation();
         for i in 0..self.subscriptions.len() {
             // Disjoint field borrows: read the subscription, write its buffer.
             let (node_name, port_id) = match &self.subscriptions[i] {
@@ -503,12 +515,17 @@ impl StateObserver {
 
             let buffer = &mut self.buffers[i];
 
-            // Resolve the node id once (avoids a per-sample name scan/allocation).
-            if buffer.node_id.is_none() {
+            // Resolve the node id and routing slot once per routing generation (avoids
+            // a per-sample name scan and a per-sample hashed slot lookup).
+            if buffer.generation != Some(generation) {
                 buffer.node_id = patch.get_node_id_by_name(node_name);
+                buffer.slot = buffer
+                    .node_id
+                    .and_then(|nid| patch.output_slot(nid, port_id));
+                buffer.generation = Some(generation);
             }
-            let Some(nid) = buffer.node_id else { continue };
-            let Some(value) = patch.get_output_value(nid, port_id) else {
+            let Some(slot) = buffer.slot else { continue };
+            let Some(value) = patch.output_value_at(slot) else {
                 continue;
             };
             let sample = value as f32;
@@ -633,8 +650,11 @@ impl StateObserver {
         self.flush_ready();
     }
 
-    /// Collect parameter values (control-rate; off the audio path).
-    fn collect_params(&mut self, patch: &crate::graph::Patch) {
+    /// Collect parameter (`Param` subscription) values — control-rate work that
+    /// formats and allocates, so call it from the poll side (with
+    /// [`Self::drain_updates`]), never per sample. The WASM engine calls it from
+    /// `poll_updates`.
+    pub fn collect_params(&mut self, patch: &crate::graph::Patch) {
         // Iterate immutably, then enqueue, to avoid borrowing conflicts.
         let mut updates: Vec<ObservableValue> = Vec::new();
         for sub in &self.subscriptions {
