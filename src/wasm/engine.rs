@@ -445,6 +445,12 @@ impl QuiverEngine {
     /// Set a parameter value by name
     ///
     /// This is a convenience method that looks up the parameter index by name.
+    ///
+    /// Safe to call from the worklet's `process()`: a control-input port is
+    /// written straight into the compiled routing plan (no recompile, no
+    /// allocation — see [`Patch::set_param_by_id`]). Setting a port that
+    /// currently has a cable on it is accepted and recorded but has no audible
+    /// effect until the cable is removed.
     pub fn set_param_by_name(
         &mut self,
         node_name: &str,
@@ -461,6 +467,17 @@ impl QuiverEngine {
         // most modules carry no ParamDefs and surface state through ports),
         // and anything else falls through to the module's introspection.
         if self.patch.set_param_by_id(node_id, param_name, value) {
+            return Ok(());
+        }
+        // `false` for a control-input port means it is cabled: the override is
+        // recorded, the knob is just shadowed. Not an error for a UI.
+        let is_control_port = self
+            .patch
+            .nodes()
+            .find(|(id, _, _)| *id == node_id)
+            .and_then(|(_, _, module)| module.port_spec().input_by_name(param_name))
+            .is_some_and(|p| p.kind != SignalKind::Audio);
+        if is_control_port {
             return Ok(());
         }
 

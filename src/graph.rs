@@ -174,10 +174,25 @@ struct Node {
     name: String,
     position: Option<(f32, f32)>,
     /// Per-node overrides for the base (unpatched) value of control-input ports, keyed by
-    /// port name. Set through [`Patch::set_param_by_id`] and applied at [`Patch::compile`]
-    /// as the [`InputPlan`] default, so an unpatched knob-style input takes this value.
-    /// Empty for a freshly added node.
-    param_overrides: StdMap<String, f64>,
+    /// port id. Set through [`Patch::set_param_by_id`] and applied as the [`InputPlan`]
+    /// default — in place when the patch is compiled, or baked in at the next
+    /// [`Patch::compile`] otherwise — so an unpatched knob-style input takes this value.
+    ///
+    /// A `Vec` with capacity for one entry per input, allocated when the node is added:
+    /// `set_param_by_id` is called from audio threads (the WASM worklet does so from
+    /// `process()`), so it must neither hash a `String` key nor grow anything. Empty for a
+    /// freshly added node.
+    param_overrides: Vec<(PortId, f64)>,
+}
+
+impl Node {
+    /// The recorded override for `port`, if any.
+    fn override_for(&self, port: PortId) -> Option<f64> {
+        self.param_overrides
+            .iter()
+            .find(|(p, _)| *p == port)
+            .map(|(_, v)| *v)
+    }
 }
 
 /// Editable, human-facing metadata for a [`Patch`].
@@ -836,7 +851,8 @@ impl Patch {
             module_slot,
             name: name.into(),
             position: None,
-            param_overrides: StdMap::new(),
+            // One slot per input port up front, so `set_param_by_id` never grows it.
+            param_overrides: Vec::with_capacity(spec.inputs.len()),
         });
         // A seeded patch stays seeded: late additions get the same derivation.
         if let Some(seed) = self.seed {
@@ -1460,12 +1476,9 @@ impl Patch {
                 }
                 // A per-node parameter override (set via `set_param_by_id`) replaces the
                 // spec's static default for this unpatched control input. Baked in here at
-                // compile time so the zero-alloc tick path is untouched.
-                let default = node
-                    .param_overrides
-                    .get(&input.name)
-                    .copied()
-                    .unwrap_or(input.default);
+                // compile time so the zero-alloc tick path is untouched; later overrides
+                // are written straight into this plan (see `set_param_by_id`).
+                let default = node.override_for(input.id).unwrap_or(input.default);
                 inputs.push(InputPlan {
                     port_id: input.id,
                     default,
@@ -1844,11 +1857,7 @@ impl Patch {
             if !is_control_input(input.kind) {
                 continue;
             }
-            let value = n
-                .param_overrides
-                .get(&input.name)
-                .copied()
-                .unwrap_or(input.default);
+            let value = n.override_for(input.id).unwrap_or(input.default);
             infos.push(port_param_info(input, value));
         }
         infos
@@ -1861,7 +1870,7 @@ impl Patch {
         // Port parameters are authoritative.
         if let Some(port) = module.port_spec().input_by_name(id) {
             if is_control_input(port.kind) {
-                return Some(n.param_overrides.get(id).copied().unwrap_or(port.default));
+                return Some(n.override_for(port.id).unwrap_or(port.default));
             }
         }
         module
@@ -1870,25 +1879,71 @@ impl Patch {
             .map(|p| p.value)
     }
 
-    /// Set a parameter by id. Returns `true` if the id was recognized.
+    /// Set a parameter by id.
     ///
-    /// A control-input port id sets a per-node base-value override (and marks the graph for
-    /// recompile so the next tick observes it). Otherwise the module's `ModuleIntrospection`
-    /// is asked to set internal state.
+    /// A control-input port id sets that node's base (unpatched) value for the port. The
+    /// override is recorded and, when the patch is compiled, written **directly into the
+    /// compiled routing plan** — no recompile, no reallocation, and no reset of the routing
+    /// buffers (so a cycle-breaker's feedback path is not blanked for a sample). The next
+    /// `tick` reads the new value. This makes it safe to call from an audio callback: the
+    /// cost is a name lookup over the node's ports plus a linear scan of its inputs, and it
+    /// never allocates (see `tests/zero_alloc.rs`). If the patch is not compiled (or is
+    /// dirty from a structural edit) the value is simply baked in by the next compile.
+    ///
+    /// Returns `true` if the value now drives the input. Returns `false` if the id is
+    /// unknown, **or** if the input currently has a cable on it: a cabled input is the sum of
+    /// its cables and the base value has no effect, so the call is a no-op for the audio.
+    /// The override is still recorded in that case (a knob keeps its position) and takes
+    /// effect at the recompile that follows the cable's removal.
+    ///
+    /// Anything that is not a control-input port is passed to the module's
+    /// `ModuleIntrospection` to set internal state (waveform tables, oversampling, …); such
+    /// parameters are not part of the routing plan and follow the module's own rules.
     pub fn set_param_by_id(&mut self, node: NodeId, id: &str, value: f64) -> bool {
-        // Decide the routing without holding a mutable borrow across the invalidate() call.
-        let is_port = self
+        let port = self
             .module_of(node)
             .and_then(|m| m.port_spec().input_by_name(id))
-            .map(|p| is_control_input(p.kind))
-            .unwrap_or(false);
+            .filter(|p| is_control_input(p.kind))
+            .map(|p| p.id);
 
-        if is_port {
-            if let Some(n) = self.nodes.get_mut(node) {
-                n.param_overrides.insert(id.to_string(), value);
+        if let Some(port_id) = port {
+            let Some(n) = self.nodes.get_mut(node) else {
+                return false;
+            };
+            match n.param_overrides.iter_mut().find(|(p, _)| *p == port_id) {
+                Some(slot) => slot.1 = value,
+                // Capacity was reserved for every input at `add`, so this cannot grow.
+                None => n.param_overrides.push((port_id, value)),
             }
-            // The override is baked into InputPlan defaults at compile time.
-            self.invalidate();
+            let exec_idx = n.module_slot;
+
+            let port_ref = PortRef {
+                node,
+                port: port_id,
+            };
+            if self.cables.iter().any(|cable| cable.to == port_ref) {
+                // Cabled: the base value is shadowed. Recorded above; nothing to patch.
+                return false;
+            }
+
+            // Compiled and current: patch the plan in place. `module_slot` is the node's
+            // execution index after a successful compile (modules are permuted into
+            // execution order), so this is a direct index, not a search.
+            if !self.dirty && self.routing.nodes.len() == self.modules.len() {
+                if let Some(exec) = self.routing.nodes.get_mut(exec_idx) {
+                    if let Some(plan) = exec.inputs.iter_mut().find(|p| p.port_id == port_id) {
+                        plan.default = value;
+                    }
+                    if let Some(pending) = exec
+                        .normalled_pending
+                        .iter_mut()
+                        .find(|p| p.port_id == port_id)
+                    {
+                        pending.default = value;
+                    }
+                }
+            }
+            // Otherwise the next compile bakes the override in (build_routing).
             return true;
         }
 
@@ -2596,6 +2651,90 @@ mod tests {
         // not freeze at the stale 1.0.
         let (l1, _) = patch.tick();
         assert!((l1 - 3.0).abs() < 1e-9, "expected 3.0, got {}", l1);
+    }
+
+    // Q-N3: `set_param_by_id` on a control input patches the compiled plan in place.
+    #[test]
+    fn test_set_param_by_id_after_compile_does_not_recompile_or_blank_buffers() {
+        use crate::modules::{DelayLine, Vca};
+        let mut patch = Patch::new(44100.0);
+        let src = patch.add("src", ConstSource::new(1.0));
+        let cv = patch.add("cv", ConstSource::new(10.0));
+        let vca = patch.add("vca", Vca::new());
+        let delay = patch.add("delay", DelayLine::new(44100.0));
+        let out = patch.add("out", Passthrough::new());
+        patch.connect(src.out("out"), vca.in_("in")).unwrap();
+        patch.connect(cv.out("out"), vca.in_("cv")).unwrap();
+        patch.connect(vca.out("out"), delay.in_("in")).unwrap();
+        patch.connect(delay.out("out"), out.in_("in")).unwrap();
+        patch.set_output(out.id());
+        patch.compile().unwrap();
+        for _ in 0..64 {
+            patch.tick();
+        }
+        assert!(!patch.dirty);
+        let order_before = patch.execution_order().to_vec();
+        let vca_before = patch.get_output_value(vca.id(), 10).unwrap();
+        assert!(vca_before.abs() > 0.5, "vca should be passing the source");
+
+        // Set the (unpatched) gain: takes effect on the next tick, with no recompile.
+        assert!(patch.set_param_by_id(vca.id(), "gain", 0.5));
+        assert!(
+            !patch.dirty,
+            "set_param_by_id must not dirty a compiled patch"
+        );
+        // The routing buffers were not reset: the delay's last output is still there.
+        assert_eq!(patch.get_output_value(vca.id(), 10), Some(vca_before));
+        patch.tick();
+        assert_eq!(patch.execution_order(), order_before.as_slice());
+        let vca_after = patch.get_output_value(vca.id(), 10).unwrap();
+        assert!(
+            (vca_after - vca_before * 0.5).abs() < 1e-9,
+            "gain override not applied in place: {vca_before} -> {vca_after}"
+        );
+        assert_eq!(patch.get_param_by_id(vca.id(), "gain"), Some(0.5));
+
+        // A cabled control input reports `false` (its base value is shadowed by the cable)
+        // and nothing changes on the next tick, but the value is remembered for when the
+        // cable goes away.
+        assert!(!patch.set_param_by_id(vca.id(), "cv", 2.5));
+        assert!(!patch.dirty);
+        patch.tick();
+        assert!((patch.get_output_value(vca.id(), 10).unwrap() - vca_after).abs() < 1e-9);
+        let cv_cable = patch
+            .cables()
+            .iter()
+            .find(|c| c.to == vca.in_("cv"))
+            .map(|c| c.id)
+            .unwrap();
+        patch.disconnect(cv_cable).unwrap();
+        patch.compile().unwrap();
+        patch.tick();
+        let uncabled = patch.get_output_value(vca.id(), 10).unwrap();
+        // 1.0 in × (2.5 V / 10 V) × gain 0.5
+        assert!(
+            (uncabled - 0.125).abs() < 1e-9,
+            "recorded override not applied once uncabled: {uncabled}"
+        );
+
+        // Unknown ids, and audio inputs (not knobs), are `false` and record nothing.
+        assert!(!patch.set_param_by_id(vca.id(), "no_such_port", 1.0));
+        assert!(!patch.set_param_by_id(vca.id(), "in", 1.0));
+        assert_eq!(patch.get_param_by_id(vca.id(), "in"), None);
+    }
+
+    // Q-N3: before the first compile the override is simply baked in by `compile`.
+    #[test]
+    fn test_set_param_by_id_before_compile_is_baked_in() {
+        use crate::modules::Vca;
+        let mut patch = Patch::new(44100.0);
+        let src = patch.add("src", ConstSource::new(1.0));
+        let vca = patch.add("vca", Vca::new());
+        patch.connect(src.out("out"), vca.in_("in")).unwrap();
+        patch.set_output(vca.id());
+        assert!(patch.set_param_by_id(vca.id(), "gain", 0.25));
+        let (l, _) = patch.tick();
+        assert!((l - 0.25).abs() < 1e-9, "got {l}");
     }
 
     // Q076/Q181: a cycle-creating mutation surfaces via last_compile_error and ticks silent.

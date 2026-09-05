@@ -121,4 +121,26 @@ fn graph_tick_paths_are_allocation_free() {
         black_box((&left, &right));
     });
     assert_eq!(block, 0, "tick_block() allocated {} time(s)", block);
+
+    // Q-N3: `set_param_by_id` on a compiled patch patches the routing plan in place —
+    // no recompile, no `String` key, no growth — so a UI (or the WASM worklet's
+    // `process()`) can turn knobs from the audio thread. Both a first-time set and a
+    // repeat set of an unpatched control input, and a set on a cabled input (a recorded
+    // no-op), must allocate nothing; nor may the ticks that follow (which would if the
+    // patch had been invalidated and lazily recompiled).
+    let svf = patch.get_node_id_by_name("svf").unwrap();
+    let set_param = count_allocs(|| {
+        black_box(patch.set_param_by_id(svf, "res", 0.7));
+        black_box(patch.set_param_by_id(svf, "res", 0.2));
+        // `cutoff` has the LFO cable on it: shadowed, returns false, still no allocation.
+        black_box(patch.set_param_by_id(svf, "cutoff", 0.4));
+        for _ in 0..64 {
+            black_box(patch.tick());
+        }
+    });
+    assert_eq!(
+        set_param, 0,
+        "set_param_by_id() + ticks allocated {} time(s)",
+        set_param
+    );
 }
