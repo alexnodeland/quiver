@@ -84,7 +84,7 @@ packages/@quiver-dsp/       # TypeScript/React packages for WASM
 |---------|---------|-------------|
 | `std`   | Yes     | Full functionality including OSC, visualization (implies `alloc`) |
 | `alloc` | No      | Serialization, presets, I/O for `no_std` + heap environments |
-| `simd`  | No      | SIMD vectorization for block processing |
+| `simd`  | No      | Vectorized `AudioBlock` / `RingBuffer` helpers (`wide`); modules and the patch engine stay scalar |
 | `wasm`  | No      | WebAssembly bindings with wasm-bindgen and TypeScript types |
 
 Testing and building should use `--all-features` to ensure all code paths are covered.

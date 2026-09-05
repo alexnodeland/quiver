@@ -1034,7 +1034,16 @@ pub struct Wavetable {
     /// 8 wavetables, each a mip pyramid of `NUM_MIPS` bandlimited levels of 256
     /// samples. Level 0 has the most harmonics (for low pitches); each higher
     /// level halves the maximum harmonic number for the next octave up.
-    tables: [[[f64; 256]; 8]; 8],
+    ///
+    /// The bank is identical for every instance (it depends on nothing but the
+    /// constants below), so under `std` it is built once per process and shared
+    /// (`OnceLock`): a search constructing thousands of patches no longer pays
+    /// ~6×10⁵ sines and 131 KB per instance. Under `no_std` there is no
+    /// once-cell to share through, so each instance keeps its own copy.
+    #[cfg(feature = "std")]
+    tables: &'static WavetableBank,
+    #[cfg(not(feature = "std"))]
+    tables: WavetableBank,
     /// Current phase (0.0 to 1.0)
     phase: f64,
     /// Previous sync input for edge detection
@@ -1044,6 +1053,10 @@ pub struct Wavetable {
     freq_memo: Memo<1, f64>,
     spec: PortSpec,
 }
+
+/// The full wavetable bank: `NUM_TABLES` waveforms × `NUM_MIPS` levels × `TABLE_SIZE`
+/// samples (131 KB of `f64`).
+type WavetableBank = [[[f64; 256]; 8]; 8];
 
 impl Wavetable {
     /// Number of samples per wavetable
@@ -1069,16 +1082,37 @@ impl Wavetable {
             outputs: vec![PortDef::new(10, "out", SignalKind::Audio)],
         };
 
-        let mut osc = Self {
-            tables: [[[0.0; 256]; 8]; 8],
+        #[cfg(feature = "std")]
+        let tables = Self::shared_tables();
+        #[cfg(not(feature = "std"))]
+        let tables = {
+            let mut bank: WavetableBank = [[[0.0; 256]; 8]; 8];
+            Self::generate_tables(&mut bank);
+            bank
+        };
+
+        Self {
+            tables,
             phase: 0.0,
             prev_sync: 0.0,
             sample_rate,
             freq_memo: Memo::new(0.0),
             spec,
-        };
-        osc.generate_tables();
-        osc
+        }
+    }
+
+    /// The process-wide bank, generated on first use. Boxed so the 131 KB lives on
+    /// the heap rather than in static memory of every binary that links the crate.
+    #[cfg(feature = "std")]
+    fn shared_tables() -> &'static WavetableBank {
+        static TABLES: std::sync::OnceLock<alloc::boxed::Box<WavetableBank>> =
+            std::sync::OnceLock::new();
+        TABLES.get_or_init(|| {
+            let mut bank: alloc::boxed::Box<WavetableBank> =
+                alloc::boxed::Box::new([[[0.0; 256]; 8]; 8]);
+            Self::generate_tables(&mut bank);
+            bank
+        })
     }
 
     /// Maximum harmonic number to synthesize for waveform `table` at mip
@@ -1088,7 +1122,10 @@ impl Wavetable {
     }
 
     /// Generate all wavetables as mip pyramids with bandlimiting.
-    fn generate_tables(&mut self) {
+    // `level`/`i` index all eight tables at `[k][level][i]`, so iterating any one of
+    // them is not a rewrite of this loop.
+    #[allow(clippy::needless_range_loop)]
+    fn generate_tables(tables: &mut WavetableBank) {
         let n = Self::TABLE_SIZE;
         let pi = core::f64::consts::PI;
 
@@ -1098,7 +1135,7 @@ impl Wavetable {
                 let partial = |harmonic: f64| Libm::<f64>::sin(phase * harmonic * 2.0 * pi);
 
                 // Sine wave (pure) — always a single harmonic.
-                self.tables[0][level][i] = partial(1.0);
+                tables[0][level][i] = partial(1.0);
 
                 // Triangle: odd harmonics, alternating sign, 1/h^2 rolloff.
                 let mut tri = 0.0;
@@ -1111,7 +1148,7 @@ impl Wavetable {
                     sign = -sign;
                     h += 2;
                 }
-                self.tables[1][level][i] = tri * (8.0 / (pi * pi));
+                tables[1][level][i] = tri * (8.0 / (pi * pi));
 
                 // Saw: all harmonics, alternating sign, 1/h rolloff.
                 let mut saw = 0.0;
@@ -1122,7 +1159,7 @@ impl Wavetable {
                     saw += sign * partial(hf) / hf;
                     sign = -sign;
                 }
-                self.tables[2][level][i] = saw * (2.0 / pi);
+                tables[2][level][i] = saw * (2.0 / pi);
 
                 // Square: odd harmonics, 1/h rolloff.
                 let mut sqr = 0.0;
@@ -1133,7 +1170,7 @@ impl Wavetable {
                     sqr += partial(hf) / hf;
                     h += 2;
                 }
-                self.tables[3][level][i] = sqr * (4.0 / pi);
+                tables[3][level][i] = sqr * (4.0 / pi);
 
                 // Pulse 25% / 12.5%: Fourier series of a rectangular pulse.
                 for (table_idx, duty) in [(4usize, 0.25f64), (5usize, 0.125f64)] {
@@ -1144,7 +1181,7 @@ impl Wavetable {
                         let coef = Libm::<f64>::sin(pi * hf * duty) / hf;
                         pulse += coef * partial(hf);
                     }
-                    self.tables[table_idx][level][i] = pulse * 2.0;
+                    tables[table_idx][level][i] = pulse * 2.0;
                 }
 
                 // Formant "ah"/"oh": fundamental plus resonant partials, each
@@ -1155,7 +1192,7 @@ impl Wavetable {
                     .filter(|(mult, _)| *mult <= mh_a)
                     .map(|(mult, amp)| partial(*mult) * amp)
                     .sum::<f64>();
-                self.tables[6][level][i] = formant_a * 0.5;
+                tables[6][level][i] = formant_a * 0.5;
 
                 let mh_o = Self::max_harmonic(7, level) as f64;
                 let formant_o = [(1.0, 1.0), (1.5, 0.6), (3.0, 0.4), (10.0, 0.15)]
@@ -1163,7 +1200,7 @@ impl Wavetable {
                     .filter(|(mult, _)| *mult <= mh_o)
                     .map(|(mult, amp)| partial(*mult) * amp)
                     .sum::<f64>();
-                self.tables[7][level][i] = formant_o * 0.5;
+                tables[7][level][i] = formant_o * 0.5;
             }
         }
     }

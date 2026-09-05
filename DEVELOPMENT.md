@@ -71,7 +71,7 @@ src/
 |---------|---------|-------------|
 | `std`   | Yes     | Full functionality including OSC, plugins, visualization (implies `alloc`) |
 | `alloc` | No      | Serialization, presets, I/O for `no_std` + heap environments |
-| `simd`  | No      | SIMD vectorization for block processing |
+| `simd`  | No      | Vectorized `AudioBlock` / `RingBuffer` helpers (`wide`); modules and the patch engine stay scalar |
 | `wasm`  | No      | WebAssembly bindings (`wasm-bindgen`) + TypeScript types (`tsify`); implies `alloc` |
 
 Build and test with `--all-features` so every code path is exercised. The crate also
