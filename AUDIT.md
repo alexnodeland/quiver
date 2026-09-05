@@ -705,7 +705,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q093 — process_block allocates a Float32Array every render quantum (violates zero-alloc guarantee)
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `correct-wasm`  |  **Location:** `src/wasm/engine.rs:469`
-- **Remediation:** **Fixed** — process_block writes into a preallocated block output with a zero-copy Float32Array view (tick_block + decimated observer), ending the per-quantum allocation (wave-e/wasm-ts, wasm/engine.rs).
+- **Remediation:** **Fixed** — process_block writes into a preallocated block output with a zero-copy Float32Array view (tick_block + decimated observer), ending the per-quantum allocation (wave-e/wasm-ts, wasm/engine.rs). *Revised in 0.4.0 (Q-N7):* the decimation counter is gone — while any port is subscribed the block is rendered per sample and `collect_sample` (hash- and allocation-free, cached routing slot per subscription) runs after every sample; the formatting/cloning/FFT work (`flush_ready`, `collect_params`) moved out of `process_block` into `poll_updates`. `set_observer_interval` is a retained no-op.
 
 **Finding.** process_block does `js_sys::Float32Array::new_with_length((num_samples*2) as u32)` (line 469) on every call. The worklet calls this once per 128-sample quantum (worklet.ts:264), i.e. ~344 times/sec at 44.1kHz, each allocating a fresh JS-heap typed array on the audio thread. Plus observer.collect_from_patch(&patch) runs every block (line 481). CLAUDE.md and the wasm/CLAUDE.md both promise 'zero allocation in the audio path'; this breaks it and creates GC pressure that can cause audible xruns.
 
@@ -716,7 +716,7 @@ Ground truth: cargo fmt --check passed clean (no diff). cargo clippy --all-featu
 ### Q099 — Observer decimates scope/spectrum to one sample per block, aliasing all audio-rate signals
 
 - **Severity:** medium  |  **Status:** confirmed  |  **Dimension:** `correct-rtio`  |  **Location:** `src/observer.rs:426`
-- **Remediation:** **Fixed** — Observer no longer decimates to one sample per block; it captures the full block so Scope/Spectrum stop aliasing audio-rate signals (wave-b/rtio, observer.rs).
+- **Remediation:** **Fixed** — Observer no longer decimates to one sample per block; it captures the full block so Scope/Spectrum stop aliasing audio-rate signals (wave-b/rtio, observer.rs). *Note (0.4.0, Q-N7):* the WASM engine had re-introduced the decimation by calling `collect_from_patch` once per `observer_interval` blocks (one sample in 1024 at 8 × 128); it now calls `collect_sample` after every rendered sample.
 
 **Finding.** collect_from_patch reads each subscribed port exactly ONCE per call via get_output_value (lines 478-480, 565-567, 601-603). In the worklet path it is invoked once per process_block (wasm/engine.rs:481), after the whole num_samples loop — never per sample. So Scope/Spectrum accumulate 1 sample every block (typically 128), i.e. an effective capture rate of sample_rate/block_size (~344 Hz at 44.1k/128) with NO anti-alias filtering. Any signal above ~172 Hz folds into garbage. Worse, collect_spectrum sets freq_range=(0, sample_rate/2)=(0,22050) (line 614) which is off by the block-size factor and mislabels every bin. Level RMS is likewise computed over decimated samples.
 

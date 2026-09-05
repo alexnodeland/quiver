@@ -680,6 +680,9 @@ pub struct Patch {
     execution_order: Vec<NodeId>,
     // Compiled, preallocated routing (dense buffers + adjacency). Rebuilt by compile().
     routing: Routing,
+    // Bumped every time `routing` is replaced (compile or invalidate), so a cached
+    // output slot (see `output_slot`) can be validated with one integer compare.
+    routing_generation: u64,
 
     // True when the graph has been mutated since the last successful compile().
     // tick() checks this and recompiles lazily.
@@ -717,6 +720,7 @@ impl Patch {
             next_cable_id: 0,
             execution_order: Vec::new(),
             routing: Routing::default(),
+            routing_generation: 0,
             // A fresh patch is "dirty" so the first tick() compiles automatically even if
             // the caller forgets to call compile().
             dirty: true,
@@ -1250,6 +1254,7 @@ impl Patch {
     fn invalidate(&mut self) {
         self.execution_order.clear();
         self.routing = Routing::default();
+        self.routing_generation = self.routing_generation.wrapping_add(1);
         self.dirty = true;
     }
 
@@ -1528,6 +1533,7 @@ impl Patch {
         });
 
         self.routing = routing;
+        self.routing_generation = self.routing_generation.wrapping_add(1);
     }
 
     /// Whether the module at `node` is a feedback cycle-breaker (delay-style).
@@ -1647,7 +1653,8 @@ impl Patch {
         successors: &StdMap<NodeId, Vec<NodeId>>,
         in_degree: &StdMap<NodeId, usize>,
     ) -> bool {
-        let mut stack = vec![start];
+        let mut stack: Vec<NodeId> = Vec::with_capacity(8);
+        stack.push(start);
         let mut visited: Vec<NodeId> = Vec::new();
         while let Some(n) = stack.pop() {
             for &s in successors.get(&n).into_iter().flatten() {
@@ -1847,10 +1854,36 @@ impl Patch {
     /// `StateObserver::sync_output_keepalive` (with the `alloc` feature) does the pinning
     /// for a whole subscription bus in one call.
     pub fn get_output_value(&self, node: NodeId, port: PortId) -> Option<f64> {
+        self.output_slot(node, port)
+            .and_then(|slot| self.output_value_at(slot))
+    }
+
+    /// The dense routing slot of an output port, for repeated per-sample reads.
+    ///
+    /// [`get_output_value`](Self::get_output_value) hashes a `(node, port)` key on every
+    /// call; a meter that reads the same port every sample can instead resolve the slot
+    /// once and read [`output_value_at`](Self::output_value_at). A slot is valid only for
+    /// the routing it was resolved against: remember
+    /// [`routing_generation`](Self::routing_generation) alongside it and re-resolve when
+    /// the generation changes (every compile, and every structural edit, bumps it).
+    /// `None` until the patch is compiled or if the port does not exist.
+    pub fn output_slot(&self, node: NodeId, port: PortId) -> Option<usize> {
         self.routing
             .out_slot_index
             .get(&PortRef { node, port })
-            .map(|&slot| self.routing.out_buf[slot])
+            .copied()
+    }
+
+    /// The current value in a routing slot from [`output_slot`](Self::output_slot).
+    /// Bounds-checked, so a stale slot yields `None` rather than a panic.
+    pub fn output_value_at(&self, slot: usize) -> Option<f64> {
+        self.routing.out_buf.get(slot).copied()
+    }
+
+    /// A counter that changes whenever the compiled routing is rebuilt or dropped; see
+    /// [`output_slot`](Self::output_slot).
+    pub fn routing_generation(&self) -> u64 {
+        self.routing_generation
     }
 
     /// Get the signal kind for an output port by node ID and port ID

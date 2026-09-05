@@ -72,12 +72,6 @@ pub struct QuiverEngine {
     block_right: Vec<f64>,
     block_interleaved: Vec<f32>,
 
-    // Observer decimation (Q093): collect observer state once every `observer_interval`
-    // blocks instead of on every render quantum. `observer_countdown` counts blocks
-    // down to the next collection (0 = collect on this block).
-    observer_interval: u32,
-    observer_countdown: u32,
-
     // Engine-owned MIDI CV source handles, shared with in-patch ExternalInput
     // modules created by `add_midi_inputs` (Q096).
     midi: MidiInputs,
@@ -120,11 +114,6 @@ impl QuiverEngine {
             block_left: Vec::new(),
             block_right: Vec::new(),
             block_interleaved: Vec::new(),
-            // Default: collect observer state every 8th block. UIs poll at ~display
-            // rate, so per-block collection is wasted work; raise/lower with
-            // `set_observer_interval`.
-            observer_interval: 8,
-            observer_countdown: 0,
             midi: MidiInputs::new(),
             audio_in: Arc::new(AtomicF64::new(0.0)),
             midi_note: None,
@@ -533,8 +522,15 @@ impl QuiverEngine {
         self.sync_metering_keepalive();
     }
 
-    /// Poll for pending updates (called from requestAnimationFrame)
+    /// Poll for pending updates (called from requestAnimationFrame).
+    ///
+    /// This is where the observer does its formatting work: control-rate `Param`
+    /// values are read here, and capture buffers that filled during
+    /// [`process_block`](Self::process_block) are turned into `Scope` / `Spectrum` /
+    /// `Level` updates (cloning and FFT included). None of that happens in the
+    /// render path any more (Q-N7).
     pub fn poll_updates(&mut self) -> Result<JsValue, JsValue> {
+        self.observer.collect_params(&self.patch);
         let updates = self.observer.drain_updates();
         serde_wasm_bindgen::to_value(&updates).map_err(|e| JsValue::from_str(&e.to_string()))
     }
@@ -586,11 +582,24 @@ impl QuiverEngine {
             self.block_interleaved.resize(interleaved_len, 0.0);
         }
 
-        // Allocation-free block render into the reused L/R slices.
-        self.patch.tick_block(
-            &mut self.block_left[..num_samples],
-            &mut self.block_right[..num_samples],
-        );
+        // Allocation-free block render into the reused L/R slices. With metering
+        // subscriptions active, render per sample so the observer captures EVERY
+        // sample (Q-N7) — `tick` and `tick_block` are the same engine bit for bit
+        // (pinned by tests/golden_vectors.rs), and `collect_sample` is hash- and
+        // allocation-free. Formatting of filled buffers is deferred to `poll_updates`.
+        if self.observer_meters_ports() {
+            for i in 0..num_samples {
+                let (left, right) = self.patch.tick();
+                self.block_left[i] = left;
+                self.block_right[i] = right;
+                self.observer.collect_sample(&self.patch);
+            }
+        } else {
+            self.patch.tick_block(
+                &mut self.block_left[..num_samples],
+                &mut self.block_right[..num_samples],
+            );
+        }
 
         // Interleave + safety-clamp into the reused f32 buffer.
         for i in 0..num_samples {
@@ -598,16 +607,6 @@ impl QuiverEngine {
             let right = self.block_right[i].clamp(-SAFETY_LIMIT, SAFETY_LIMIT) as f32;
             self.block_interleaved[i * 2] = left;
             self.block_interleaved[i * 2 + 1] = right;
-        }
-
-        // Decimated observer collection (Q093): collect only every `observer_interval`
-        // blocks via a countdown (avoids per-sample work; cheap no-op with no
-        // subscriptions). Countdown-based rather than modulo to stay MSRV-friendly.
-        if self.observer_interval <= 1 || self.observer_countdown == 0 {
-            self.observer.collect_from_patch(&self.patch);
-            self.observer_countdown = self.observer_interval.saturating_sub(1);
-        } else {
-            self.observer_countdown -= 1;
         }
 
         // SAFETY: `Float32Array::view` returns a view into WASM memory backed by
@@ -645,18 +644,15 @@ impl QuiverEngine {
             self.block_interleaved.resize(interleaved_len, 0.0);
         }
 
+        let metering = self.observer_meters_ports();
         for (i, &sample) in input.iter().enumerate() {
             let (left, right) = self.tick_with_input(f64::from(sample));
             self.block_interleaved[i * 2] = left.clamp(-SAFETY_LIMIT, SAFETY_LIMIT) as f32;
             self.block_interleaved[i * 2 + 1] = right.clamp(-SAFETY_LIMIT, SAFETY_LIMIT) as f32;
-        }
-
-        // Same decimated observer collection as `process_block` (Q093).
-        if self.observer_interval <= 1 || self.observer_countdown == 0 {
-            self.observer.collect_from_patch(&self.patch);
-            self.observer_countdown = self.observer_interval.saturating_sub(1);
-        } else {
-            self.observer_countdown -= 1;
+            // Per-sample capture, as in `process_block` (Q-N7).
+            if metering {
+                self.observer.collect_sample(&self.patch);
+            }
         }
 
         // SAFETY: view into `block_interleaved`, valid until the next engine call
@@ -664,15 +660,22 @@ impl QuiverEngine {
         unsafe { js_sys::Float32Array::view(&self.block_interleaved[..interleaved_len]) }
     }
 
-    /// Set how often the state observer collects values, in blocks.
-    ///
-    /// `1` collects on every [`process_block`](Self::process_block); higher values
-    /// decimate collection (default `8`). Clamped to a minimum of 1.
-    pub fn set_observer_interval(&mut self, blocks: u32) {
-        self.observer_interval = blocks.max(1);
-        // Collect promptly under the new cadence.
-        self.observer_countdown = 0;
+    /// Whether any subscription reads a port (Level/Gate/Scope/Spectrum), i.e.
+    /// whether the render loop needs to feed the observer per sample.
+    fn observer_meters_ports(&self) -> bool {
+        self.observer.metered_ports().next().is_some()
     }
+
+    /// Retained for API compatibility; a no-op since 0.4.0.
+    ///
+    /// Until 0.3.x this decimated observer *capture* to one sample every `blocks`
+    /// render quanta (one in 1024 samples at the default 8 × 128), which aliased
+    /// every Scope/Spectrum/Level subscription. Capture now happens on every
+    /// sample while any port is subscribed and costs an indexed load per
+    /// subscription; the formatting work moved to [`poll_updates`](Self::poll_updates),
+    /// whose cadence the caller already controls. There is nothing left to
+    /// decimate here.
+    pub fn set_observer_interval(&mut self, _blocks: u32) {}
 
     /// Reset all module state
     pub fn reset(&mut self) {
