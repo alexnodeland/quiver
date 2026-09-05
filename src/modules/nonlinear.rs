@@ -446,7 +446,9 @@ impl GraphModule for PitchShifter {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q-N6: a non-finite input must never reach the grain buffer (it would be read
+        // back for as long as the window lasts); treat it as silence.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
 
         // Map inputs
         // Shift: bipolar CV ±5V maps to ±24 semitones
@@ -956,7 +958,9 @@ impl GraphModule for Granular {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q-N6: sanitize before the circular buffer. With `freeze` engaged the buffer is
+        // never overwritten, so a NaN written into it would otherwise play back forever.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let position = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let size_cv = inputs.get_or(2, 0.3).clamp(0.0, 1.0);
         let density_cv = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
@@ -1135,7 +1139,8 @@ impl GraphModule for Wavefolder {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
+        // Q-N6: the oversampler's half-band filters are stateful; keep NaN/Inf out.
+        let input = sanitize_audio(inputs.get_or(0, 0.0));
         let threshold = inputs.get_or(1, self.threshold).max(0.1);
 
         // Fold through the opt-in oversampler; `Oversample::Off` is exactly the
