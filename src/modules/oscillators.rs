@@ -520,7 +520,30 @@ impl GraphModule for Supersaw {
 ///
 /// Physical modeling plucked string synthesis.
 /// Creates realistic plucked string and percussion sounds.
+///
+/// # Loop structure and stability
+///
+/// The recirculating loop is `delay line → one-pole lowpass → first-order
+/// allpass → leak`. Every stage has magnitude ≤ 1 at every frequency (the
+/// linear-interpolated tap, the lowpass with `0 < c ≤ 1`, the allpass by
+/// construction, and the `LOOP_LEAK` < 1), so the loop gain is strictly below
+/// unity for **any** pitch, damping and stretch — the string always decays.
+///
+/// `stretch` is the allpass coefficient (`a = −stretch/2`, so `|a| ≤ 0.5`):
+/// positive values delay low partials more than high ones (a stiff-string,
+/// piano-like sharpening of the upper partials), negative values the reverse.
+/// The allpass' low-frequency phase delay is folded into the tap position so
+/// the fundamental stays in tune while the partials stretch.
+///
+/// A previous implementation applied `stretch` as a first-order *difference*
+/// (`(1+s)·x − s·y[n−1]`), whose gain at Nyquist reached 2.9 at `s = 0.5`;
+/// whether the whole loop stayed stable then depended on the fractional part
+/// of the period (i.e. on pitch), and an overflow left the module silent until
+/// `reset()`. See the stretch-sweep test.
 pub struct KarplusStrong {
+    /// Delay line. Its **capacity** is `max_len + 2`, enough for the longest
+    /// period plus the two-tap margin, so the per-pluck `resize` never
+    /// reallocates on the audio thread.
     buffer: Vec<f64>,
     /// Maximum delay-line length (samples), sized for the lowest supported note.
     /// The per-pluck period is clamped against this, not the current buffer
@@ -529,7 +552,12 @@ pub struct KarplusStrong {
     max_len: usize,
     write_pos: usize,
     sample_rate: f64,
-    last_output: f64,
+    /// One-pole loop-filter state (the previous filtered sample).
+    lp_state: f64,
+    /// Stretch allpass state: previous allpass input.
+    ap_x1: f64,
+    /// Stretch allpass state: previous allpass output.
+    ap_y1: f64,
     /// Rising-edge detector for the trigger (excite once per pluck).
     trigger_edge: EdgeDetector,
     /// Memoized `voct_to_hz` (one `pow` per sample while the pitch is static).
@@ -542,15 +570,25 @@ impl KarplusStrong {
     /// any residual excitation offset decays instead of circulating forever.
     const LOOP_LEAK: f64 = 0.9995;
 
+    /// Delay-line length for the lowest supported note (~20 Hz) at `sample_rate`.
+    fn max_len_for(sample_rate: f64) -> usize {
+        (sample_rate / 20.0) as usize + 10
+    }
+
     pub fn new(sample_rate: f64) -> Self {
-        // Buffer for lowest frequency (around 20Hz)
-        let buffer_size = (sample_rate / 20.0) as usize + 10;
+        // Buffer for lowest frequency (around 20Hz), with the two-tap margin the
+        // per-pluck resize needs already reserved.
+        let max_len = Self::max_len_for(sample_rate);
+        let mut buffer = Vec::with_capacity(max_len + 2);
+        buffer.resize(max_len, 0.0);
         Self {
-            buffer: vec![0.0; buffer_size],
-            max_len: buffer_size,
+            buffer,
+            max_len,
             write_pos: 0,
             sample_rate,
-            last_output: 0.0,
+            lp_state: 0.0,
+            ap_x1: 0.0,
+            ap_y1: 0.0,
             trigger_edge: EdgeDetector::new(),
             freq_memo: Memo::new(0.0),
             spec: PortSpec {
@@ -572,6 +610,16 @@ impl KarplusStrong {
         }
     }
 
+    /// Clear the recirculating state (delay line, loop filter, allpass) without
+    /// touching the trigger edge detector or the pitch memo.
+    fn clear_loop_state(&mut self) {
+        self.buffer.fill(0.0);
+        self.write_pos = 0;
+        self.lp_state = 0.0;
+        self.ap_x1 = 0.0;
+        self.ap_y1 = 0.0;
+    }
+
     fn excite(&mut self, brightness: f64) {
         // Fill buffer with noise (excitation)
         let period = self.buffer.len();
@@ -589,6 +637,23 @@ impl KarplusStrong {
         for sample in self.buffer.iter_mut() {
             *sample -= mean;
         }
+        // A pluck starts the loop filters from rest as well as the delay line:
+        // whatever the previous note (or a previous overflow) left in them must
+        // not colour — or silence — the new one.
+        self.lp_state = 0.0;
+        self.ap_x1 = 0.0;
+        self.ap_y1 = 0.0;
+    }
+}
+
+/// `x` if it is finite, else `default` — a CV-input fallback that, unlike
+/// `f64::clamp`, does not let a NaN through.
+#[inline]
+fn finite_or(x: f64, default: f64) -> f64 {
+    if x.is_finite() {
+        x
+    } else {
+        default
     }
 }
 
@@ -604,11 +669,13 @@ impl GraphModule for KarplusStrong {
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let voct = inputs.get_or(0, 0.0);
+        // Non-finite CVs fall back to the port default rather than poisoning
+        // the coefficients (`f64::clamp` passes NaN through).
+        let voct = finite_or(inputs.get_or(0, 0.0), 0.0);
         let trigger = inputs.get_or(1, 0.0);
-        let damping = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
-        let brightness = inputs.get_or(3, 0.5).clamp(0.0, 1.0);
-        let stretch = inputs.get_or(4, 0.0).clamp(-1.0, 1.0);
+        let damping = finite_or(inputs.get_or(2, 0.5), 0.5).clamp(0.0, 1.0);
+        let brightness = finite_or(inputs.get_or(3, 0.5), 0.5).clamp(0.0, 1.0);
+        let stretch = finite_or(inputs.get_or(4, 0.0), 0.0).clamp(-1.0, 1.0);
 
         // Calculate period from frequency. Clamp against the FULL delay-line
         // capacity (`max_len`), not the current buffer length: a prior high-note
@@ -624,7 +691,8 @@ impl GraphModule for KarplusStrong {
         // string exactly once (and lets it ring) instead of re-filling the
         // buffer with noise every sample.
         if self.trigger_edge.rising(trigger) {
-            // Resize buffer for this frequency
+            // Resize buffer for this frequency (within the reserved capacity, so
+            // this never reallocates).
             self.buffer.truncate(period_int + 2);
             self.buffer.resize(period_int + 2, 0.0);
             self.excite(brightness);
@@ -634,12 +702,18 @@ impl GraphModule for KarplusStrong {
         // Loop-filter coefficient (one-pole lowpass), higher damping = brighter.
         let filter_coef = 0.5 + damping * 0.49; // 0.5 to 0.99
 
+        // Stretch allpass `H(z) = (a + z⁻¹) / (1 + a z⁻¹)`: unity magnitude at
+        // every frequency, phase delay `(1 − a)/(1 + a)` samples at DC falling to
+        // one sample at Nyquist. `a = −stretch/2` keeps `|a| ≤ 0.5`.
+        let ap_coef = -0.5 * stretch;
+        let ap_gd = (1.0 - ap_coef) / (1.0 + ap_coef);
+
         // Q003: place the fractional-delay taps so the *total* loop delay equals
         // the target period. The one-pole loop filter contributes a group delay
-        // of (1-c)/c samples at DC, so the delay line must supply
-        // `period - filter_group_delay`.
+        // of (1-c)/c samples at DC and the allpass `ap_gd`, so the delay line
+        // must supply `period - filter_gd - ap_gd`.
         let filter_gd = (1.0 - filter_coef) / filter_coef;
-        let target_delay = (period - filter_gd).max(1.0);
+        let target_delay = (period - filter_gd - ap_gd).max(1.0);
         let delay_int = target_delay as usize;
         let delay_frac = target_delay - delay_int as f64;
 
@@ -653,17 +727,28 @@ impl GraphModule for KarplusStrong {
             self.buffer[read_pos] * (1.0 - delay_frac) + self.buffer[read_pos2] * delay_frac;
 
         // Lowpass filter (one-pole averaging with damping control).
-        let filtered = sample * filter_coef + self.last_output * (1.0 - filter_coef);
+        let filtered = sample * filter_coef + self.lp_state * (1.0 - filter_coef);
+        self.lp_state = filtered;
 
-        // All-pass filter for stretch factor (inharmonicity)
-        let stretch_coef = stretch * 0.5;
-        let stretched = filtered + stretch_coef * (filtered - self.last_output);
+        // First-order allpass for stretch (inharmonicity).
+        let stretched = ap_coef * filtered + self.ap_x1 - ap_coef * self.ap_y1;
+        self.ap_x1 = filtered;
+        self.ap_y1 = stretched;
 
         // Q004: leak the loop slightly so its DC gain is below unity and any
         // residual offset decays toward zero rather than circulating forever.
         let leaked = stretched * Self::LOOP_LEAK;
 
-        self.last_output = leaked;
+        // Finite guard: the loop is provably stable, so a non-finite value here
+        // can only have come from outside (a poisoned buffer or state). Rather
+        // than let it recirculate — which used to leave the module silent until
+        // `reset()` — clear the loop and output silence for this sample; the
+        // next pluck sounds normally.
+        if !leaked.is_finite() {
+            self.clear_loop_state();
+            outputs.set(10, 0.0);
+            return;
+        }
 
         // Write back to buffer
         self.buffer[self.write_pos] = leaked;
@@ -673,17 +758,19 @@ impl GraphModule for KarplusStrong {
     }
 
     fn reset(&mut self) {
-        self.buffer.fill(0.0);
-        self.write_pos = 0;
-        self.last_output = 0.0;
+        self.clear_loop_state();
         self.trigger_edge.reset();
     }
 
     fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
-        let buffer_size = (sample_rate / 20.0) as usize + 10;
-        self.max_len = buffer_size;
-        self.buffer.resize(buffer_size, 0.0);
+        let max_len = Self::max_len_for(sample_rate);
+        self.max_len = max_len;
+        // Keep the two-tap margin reserved so the pluck-time resize stays
+        // allocation-free at the new rate too.
+        self.buffer
+            .reserve_exact((max_len + 2).saturating_sub(self.buffer.len()));
+        self.buffer.resize(max_len, 0.0);
     }
 
     fn type_id(&self) -> &'static str {
@@ -2664,7 +2751,8 @@ mod tests {
         assert!(ks.write_pos != 0);
         ks.reset();
         assert_eq!(ks.write_pos, 0);
-        assert_eq!(ks.last_output, 0.0);
+        assert_eq!(ks.lp_state, 0.0);
+        assert_eq!((ks.ap_x1, ks.ap_y1), (0.0, 0.0));
         assert!(ks.buffer.iter().all(|&x| x == 0.0));
         // Reallocation on sample-rate change must not panic and stays finite.
         ks.set_sample_rate(48000.0);
@@ -2672,6 +2760,202 @@ mod tests {
         for _ in 0..100 {
             ks.tick(&inputs, &mut outputs);
             assert!(outputs.get(10).unwrap().is_finite());
+        }
+    }
+
+    // ---- Q-N1: KarplusStrong stretch stability ----
+
+    /// V/Oct values whose loop periods put the fractional part of the tap
+    /// position near 0, near 1 and near 0.5, plus C4. The old difference-based
+    /// stretch stage only blew up for some fractional parts (the linear
+    /// interpolator's Nyquist attenuation depends on it), so a sweep at one
+    /// pitch proves nothing.
+    fn ks_sweep_vocts() -> Vec<f64> {
+        let mut vocts = vec![0.0];
+        for &period in &[
+            21.02, 21.5, 21.97, 40.03, 40.5, 40.98, 168.02, 168.5, 168.97, 1000.02, 1000.98,
+        ] {
+            let hz = 44100.0 / period;
+            vocts.push(Libm::<f64>::log2(hz / super::super::common::C4_HZ));
+        }
+        vocts
+    }
+
+    /// Two seconds at every combination of pitch, damping and stretch stays
+    /// bounded and finite. Before the allpass restructure, 41 of 300 such
+    /// combinations overflowed to `inf` within two seconds.
+    #[test]
+    fn test_ks_stretch_sweep_stays_bounded() {
+        for voct in ks_sweep_vocts() {
+            for &damping in &[0.5, 0.95, 1.0] {
+                for &stretch in &[-1.0, -0.5, 0.25, 0.5, 1.0] {
+                    let mut ks = KarplusStrong::new(44100.0);
+                    let mut inputs = PortValues::new();
+                    let mut outputs = PortValues::new();
+                    inputs.set(0, voct);
+                    inputs.set(2, damping);
+                    inputs.set(3, 0.5);
+                    inputs.set(4, stretch);
+                    inputs.set(1, 5.0);
+                    ks.tick(&inputs, &mut outputs);
+                    inputs.set(1, 0.0);
+                    let mut peak = 0.0f64;
+                    for _ in 0..(2 * 44100) {
+                        ks.tick(&inputs, &mut outputs);
+                        let y = outputs.get(10).unwrap();
+                        assert!(
+                            y.is_finite(),
+                            "KS non-finite at voct={voct} damping={damping} stretch={stretch}"
+                        );
+                        peak = peak.max(y.abs());
+                    }
+                    assert!(
+                        peak < 2.0,
+                        "KS unbounded ({peak}) at voct={voct} damping={damping} stretch={stretch}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The stretch allpass is unity-magnitude, so a stretched string still
+    /// decays — the loop gain is below one at every frequency.
+    #[test]
+    fn test_ks_stretched_string_decays() {
+        let mut ks = KarplusStrong::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, -1.0);
+        inputs.set(2, 0.9);
+        inputs.set(4, 1.0);
+        inputs.set(1, 5.0);
+        ks.tick(&inputs, &mut outputs);
+        inputs.set(1, 0.0);
+        let mut early = 0.0f64;
+        let mut late = 0.0f64;
+        for n in 0..88200 {
+            ks.tick(&inputs, &mut outputs);
+            let y = outputs.get(10).unwrap().abs();
+            if n < 4410 {
+                early = early.max(y);
+            } else if n >= 88200 - 4410 {
+                late = late.max(y);
+            }
+        }
+        assert!(early > 0.05, "stretched string did not ring: {early}");
+        assert!(
+            late < early * 0.5,
+            "stretched string did not decay: {early} -> {late}"
+        );
+    }
+
+    /// A pluck restarts the loop filters, so state left by a previous note (or
+    /// an externally poisoned state) cannot silence or colour the new one.
+    #[test]
+    fn test_ks_excite_resets_loop_filter_state() {
+        let mut ks = KarplusStrong::new(44100.0);
+        ks.lp_state = f64::INFINITY;
+        ks.ap_y1 = f64::NAN;
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.0);
+        inputs.set(2, 0.9);
+        inputs.set(1, 5.0);
+        ks.tick(&inputs, &mut outputs);
+        inputs.set(1, 0.0);
+        let mut rms = 0.0;
+        for _ in 0..2000 {
+            ks.tick(&inputs, &mut outputs);
+            let y = outputs.get(10).unwrap();
+            assert!(y.is_finite());
+            rms += y * y;
+        }
+        assert!((rms / 2000.0).sqrt() > 0.05, "string silent after pluck");
+    }
+
+    /// A non-finite value that somehow reaches the loop is cleared, not
+    /// latched: output is silent for that sample and the string plucks again.
+    #[test]
+    fn test_ks_finite_guard_recovers() {
+        let mut ks = KarplusStrong::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, 0.0);
+        inputs.set(2, 0.9);
+        inputs.set(1, 5.0);
+        ks.tick(&inputs, &mut outputs);
+        inputs.set(1, 0.0);
+        for _ in 0..100 {
+            ks.tick(&inputs, &mut outputs);
+        }
+        // Poison the delay line directly (the loop itself cannot produce this).
+        let len = ks.buffer.len();
+        for v in ks.buffer.iter_mut() {
+            *v = f64::NAN;
+        }
+        for _ in 0..len {
+            ks.tick(&inputs, &mut outputs);
+            assert!(outputs.get(10).unwrap().is_finite());
+        }
+        assert!(ks.buffer.iter().all(|v| v.is_finite()));
+        // Re-pluck: rings normally.
+        inputs.set(1, 5.0);
+        ks.tick(&inputs, &mut outputs);
+        inputs.set(1, 0.0);
+        let mut rms = 0.0;
+        for _ in 0..2000 {
+            ks.tick(&inputs, &mut outputs);
+            let y = outputs.get(10).unwrap();
+            assert!(y.is_finite());
+            rms += y * y;
+        }
+        assert!((rms / 2000.0).sqrt() > 0.05, "string silent after guard");
+    }
+
+    /// Non-finite control voltages fall back to defaults instead of poisoning
+    /// the coefficients.
+    #[test]
+    fn test_ks_non_finite_cv_falls_back_to_defaults() {
+        let mut ks = KarplusStrong::new(44100.0);
+        let mut inputs = PortValues::new();
+        let mut outputs = PortValues::new();
+        inputs.set(0, f64::NAN);
+        inputs.set(2, f64::INFINITY);
+        inputs.set(3, f64::NEG_INFINITY);
+        inputs.set(4, f64::NAN);
+        inputs.set(1, 5.0);
+        ks.tick(&inputs, &mut outputs);
+        inputs.set(1, 0.0);
+        for _ in 0..1000 {
+            ks.tick(&inputs, &mut outputs);
+            assert!(outputs.get(10).unwrap().is_finite());
+        }
+    }
+
+    /// The pluck-time `resize` fits inside the reserved capacity even at the
+    /// lowest pitch, so it never reallocates on the audio thread.
+    #[test]
+    fn test_ks_pluck_never_reallocates() {
+        for &sr in &[44100.0, 48000.0, 96000.0] {
+            let mut ks = KarplusStrong::new(sr);
+            let cap = ks.buffer.capacity();
+            let mut inputs = PortValues::new();
+            let mut outputs = PortValues::new();
+            inputs.set(0, -20.0); // clamps to the longest period
+            inputs.set(1, 5.0);
+            ks.tick(&inputs, &mut outputs);
+            assert_eq!(ks.buffer.capacity(), cap, "pluck reallocated at {sr} Hz");
+            ks.set_sample_rate(sr * 2.0);
+            let cap = ks.buffer.capacity();
+            inputs.set(1, 0.0);
+            ks.tick(&inputs, &mut outputs);
+            inputs.set(1, 5.0);
+            ks.tick(&inputs, &mut outputs);
+            assert_eq!(
+                ks.buffer.capacity(),
+                cap,
+                "pluck reallocated after SR change"
+            );
         }
     }
 
