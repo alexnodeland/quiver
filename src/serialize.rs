@@ -5,6 +5,7 @@
 
 use crate::analog::{AnalogVco, Saturator, Wavefolder};
 use crate::graph::{NodeHandle, Patch, PatchError};
+use crate::io::{AudioInput, AudioInputStream};
 use crate::modules::*;
 use crate::port::{GraphModule, PortSpec};
 use crate::StdMap;
@@ -12,6 +13,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
@@ -859,6 +861,10 @@ impl ModuleRegistry {
             |_| Box::new(StereoOutput::new()),
         );
 
+        // No host stream yet: built-in `audio_input`s are silent until a host calls
+        // `register_audio_input` with the stream it writes.
+        self.register_audio_input(Arc::new(AudioInputStream::new(2, 0)));
+
         // =====================================================================
         // Effects
         // =====================================================================
@@ -1109,6 +1115,51 @@ impl ModuleRegistry {
             ],
             &[],
             |sr| Box::new(Arpeggiator::new(sr)),
+        );
+    }
+
+    /// Bind `audio_input` to the host's input stream.
+    ///
+    /// Every `audio_input` this registry instantiates afterwards — through
+    /// [`instantiate`](Self::instantiate), [`Patch::from_def`], or the WASM engine's
+    /// `add_module` / `load_patch` — reads `stream`. Without this call an `audio_input` is
+    /// [`AudioInput::unbound`] and silent. Re-registering replaces the binding; the catalog
+    /// entry is the same either way.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use quiver::prelude::*;
+    ///
+    /// let input = Arc::new(AudioInputStream::new(2, 128));
+    /// let mut registry = ModuleRegistry::new();
+    /// registry.register_audio_input(Arc::clone(&input));
+    ///
+    /// let mut def = PatchDef::new("through");
+    /// def.modules.push(ModuleDef::new("mic", "audio_input"));
+    /// def.modules.push(ModuleDef::new("output", "stereo_output"));
+    /// def.cables.push(CableDef::new("mic.out", "output.left"));
+    /// let mut patch = Patch::from_def(&def, &registry, 48_000.0).unwrap();
+    ///
+    /// input.write(&[&[0.5f32][..]]);
+    /// assert_eq!(patch.tick().0, 0.5 * AudioInput::FULL_SCALE_VOLTS);
+    /// ```
+    pub fn register_audio_input(&mut self, stream: Arc<AudioInputStream>) {
+        self.register_factory_with_keywords(
+            "audio_input",
+            "Audio Input",
+            "I/O",
+            "Host audio in: a block-fed, multichannel input (left, right, or both)",
+            &[
+                "input",
+                "audio",
+                "microphone",
+                "mic",
+                "line",
+                "external",
+                "capture",
+            ],
+            &[],
+            move |_| Box::new(AudioInput::new(Arc::clone(&stream))),
         );
     }
 
@@ -2063,6 +2114,90 @@ mod tests {
                 .unwrap_or_else(|| panic!("module '{id}' not registered"));
             assert_eq!(module.type_id(), id, "type_id mismatch for '{id}'");
         }
+    }
+
+    /// `audio_input` is in the catalog whether or not a host stream is bound; an unbound one
+    /// is silent; a bound registry's `audio_input`s — from `instantiate` or `from_def` — all
+    /// read the host's stream; and `channel` + `gain` survive a `to_def`/`from_def` round trip.
+    #[test]
+    fn test_audio_input_registry_binding_and_round_trip() {
+        use crate::io::InputChannel;
+        use crate::port::PortValues;
+
+        let mut registry = ModuleRegistry::new();
+        let unbound = registry.get_metadata("audio_input").unwrap().clone();
+        assert_eq!(unbound.category, "I/O");
+        assert_eq!(
+            unbound
+                .port_spec
+                .outputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["out", "left", "right"]
+        );
+        let mut silent = registry.instantiate("audio_input", 48_000.0).unwrap();
+        let (inputs, mut outputs) = (PortValues::new(), PortValues::new());
+        silent.tick(&inputs, &mut outputs);
+        assert_eq!(outputs.get(10), Some(0.0));
+
+        let stream = Arc::new(AudioInputStream::new(2, 64));
+        registry.register_audio_input(Arc::clone(&stream));
+        let bound = registry.get_metadata("audio_input").unwrap();
+        assert_eq!(
+            (
+                &bound.name,
+                &bound.category,
+                &bound.description,
+                &bound.keywords
+            ),
+            (
+                &unbound.name,
+                &unbound.category,
+                &unbound.description,
+                &unbound.keywords
+            ),
+            "binding a stream must not change the catalog entry"
+        );
+        assert_eq!(
+            registry
+                .catalog()
+                .modules
+                .iter()
+                .filter(|m| m.type_id == "audio_input")
+                .count(),
+            1
+        );
+
+        // Build a patch around a bound input, set its knobs, save and reload it.
+        let mut patch = Patch::new(48_000.0);
+        let mic = patch.add_boxed(
+            "mic",
+            registry.instantiate("audio_input", 48_000.0).unwrap(),
+        );
+        let out = patch.add("output", StereoOutput::new());
+        patch.connect(mic.out("out"), out.in_("left")).unwrap();
+        patch.connect(mic.out("right"), out.in_("right")).unwrap();
+        patch.set_output(out.id());
+        assert!(patch.set_param_by_id(mic.id(), "channel", InputChannel::Left.index() as f64));
+        assert!(patch.set_param_by_id(mic.id(), "gain", 2.0));
+        patch.compile().unwrap();
+
+        stream.write(&[[0.5f32], [-0.25]]);
+        assert_eq!(patch.tick(), (5.0, -2.5));
+
+        let json = patch.to_def("through").to_json().unwrap();
+        let def = PatchDef::from_json(&json).unwrap();
+        assert_eq!(def.parameters.get("mic.channel"), Some(&0.0));
+        assert_eq!(def.parameters.get("mic.gain"), Some(&2.0));
+        let mut reloaded = Patch::from_def(&def, &registry, 48_000.0).unwrap();
+        let id = reloaded.get_node_id_by_name("mic").unwrap();
+        assert_eq!(reloaded.get_param_by_id(id, "channel"), Some(0.0));
+
+        // The reloaded input reads the same host stream as the original.
+        stream.write(&[[0.25f32], [0.75]]);
+        assert_eq!(reloaded.tick(), (2.5, 7.5));
+        assert_eq!(patch.tick(), (2.5, 7.5));
     }
 
     #[test]

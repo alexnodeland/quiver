@@ -49,6 +49,23 @@ or opt-in.
 
 ### Added
 
+- **Audio in: `AudioInput` and `AudioInputStream`** (`io`, alloc tier). The host writes a
+  block of samples per channel into an `Arc<AudioInputStream>` before each process call —
+  `write(&[&[f32]])` planar, like `PluginProcessor::process`, or
+  `write_interleaved(&[f32], channels)` — and each `AudioInput` on the stream plays it back
+  one frame per tick, on `out` (the `channel` select: left, right, or both mixed at equal
+  gain), `left` and `right`, with a bounded `gain` input. Host `±1.0` becomes `±5 V`
+  (`AudioInput::FULL_SCALE_VOLTS`); the WASM engine's older `audio_in` `ExternalInput`
+  stays unscaled. Any number of inputs may read one stream: each keeps its own cursor into
+  the shared, double-buffered block, so voices rendered one after another over a block, or
+  a voice that sat blocks out, hear identical frames. Underrun is silence, overrun drops the
+  unread frames (latency ≤ one block), a new or reset input starts with the next block, and
+  non-finite samples are written as silence. Lock-free and allocation-free on both sides
+  (`tests/zero_alloc.rs` now feeds its patch through one); a writer on another thread is
+  sound, and a reader it laps outputs silence rather than a torn frame. Registered as
+  `audio_input` (category `I/O`); `ModuleRegistry::register_audio_input(stream)` binds every
+  `audio_input` the registry builds — `from_def` included — to the host's stream, and an
+  unbound one is silent.
 - **Per-module random streams.** `GraphModule::seed(&mut self, seed: u64)` (default
   no-op) and `Patch::seed(u64)`, which derives a distinct seed per node
   (`rng::derive_seed`) and re-applies it on `Patch::reset()` and to nodes added later;

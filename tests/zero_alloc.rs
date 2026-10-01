@@ -2,9 +2,10 @@
 //!
 //! This integration test installs a counting global allocator (a wrapper around the system
 //! allocator that increments an atomic on every `alloc`/`realloc` while armed). It builds a
-//! representative patch (VCO -> SVF -> VCA -> StereoOutput, plus an LFO modulation cable and
-//! a normalled input), warms it up, then asserts that a burst of `tick()` calls and a
-//! `tick_block()` call perform **zero** heap allocations.
+//! representative patch (VCO -> SVF -> VCA -> StereoOutput, plus an LFO modulation cable, a
+//! normalled input, and a host `AudioInput` summed into the filter), warms it up, then asserts
+//! that a burst of `tick()` calls and a `tick_block()` call — each preceded by the host writing
+//! its input block — perform **zero** heap allocations.
 //!
 //! It lives in its own integration-test binary (not a unit test) so the `#[global_allocator]`
 //! only governs this process and does not perturb the main unit-test binary. It is std-only
@@ -14,6 +15,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use quiver::prelude::*;
 
@@ -60,11 +62,13 @@ fn count_allocs<F: FnOnce()>(f: F) -> usize {
 }
 
 /// A representative patch exercising the routing engine end to end:
-/// VCO -> SVF -> VCA -> StereoOutput, an LFO modulation cable into the filter cutoff, and a
-/// normalled input (StereoOutput's `right` normals to `left`).
-fn build_patch() -> Patch {
+/// VCO -> SVF -> VCA -> StereoOutput, an LFO modulation cable into the filter cutoff, a
+/// normalled input (StereoOutput's `right` normals to `left`), and host audio from an
+/// `AudioInput` summed into the filter input. Returns the patch and the input's stream.
+fn build_patch() -> (Patch, Arc<AudioInputStream>) {
     let sr = 44_100.0;
     let mut patch = Patch::new(sr);
+    let input = Arc::new(AudioInputStream::new(2, 512));
 
     let vco = patch.add("vco", Vco::new(sr));
     let lfo = patch.add("lfo", Lfo::new(sr));
@@ -73,6 +77,9 @@ fn build_patch() -> Patch {
     let out = patch.add("out", StereoOutput::new());
 
     patch.connect(vco.out("saw"), svf.in_("in")).unwrap();
+    // Host audio summed into the filter input alongside the VCO.
+    let mic = patch.add("mic", AudioInput::new(Arc::clone(&input)));
+    patch.connect(mic.out("out"), svf.in_("in")).unwrap();
     // LFO modulation cable into the filter cutoff (CvBipolar -> CvUnipolar; allowed).
     patch.connect(lfo.out("sin"), svf.in_("cutoff")).unwrap();
     patch.connect(svf.out("lp"), vca.in_("in")).unwrap();
@@ -82,7 +89,7 @@ fn build_patch() -> Patch {
 
     patch.set_output(out.id());
     patch.compile().unwrap();
-    patch
+    (patch, input)
 }
 
 /// Both the per-sample `tick()` and the block `tick_block()` paths must allocate nothing
@@ -93,17 +100,32 @@ fn build_patch() -> Patch {
 /// another's allocations to the measured window.
 #[test]
 fn graph_tick_paths_are_allocation_free() {
-    let mut patch = build_patch();
+    let (mut patch, input) = build_patch();
+    // The host's input block (planar and interleaved), written before each render.
+    let host_l: Vec<f32> = (0..512).map(|i| (i as f32 * 0.01).sin()).collect();
+    let host_r: Vec<f32> = host_l.iter().map(|s| -s).collect();
+    let interleaved: Vec<f32> = host_l
+        .iter()
+        .zip(&host_r)
+        .flat_map(|(&l, &r)| [l, r])
+        .collect();
 
     // Warm up so every reusable buffer has reached steady-state capacity.
+    input.write(&[&host_l[..256], &host_r[..256]]);
     for _ in 0..256 {
         black_box(patch.tick());
     }
 
-    // 1000 per-sample ticks must not allocate.
+    // 1000 per-sample ticks, fed by host input blocks, must not allocate.
     let per_sample = count_allocs(|| {
-        for _ in 0..1000 {
-            black_box(patch.tick());
+        for chunk in 0..4 {
+            input.write(&[&host_l[..250], &host_r[..250]]);
+            if chunk == 3 {
+                input.write_interleaved(&interleaved[..500], 2);
+            }
+            for _ in 0..250 {
+                black_box(patch.tick());
+            }
         }
     });
     assert_eq!(
@@ -117,6 +139,7 @@ fn graph_tick_paths_are_allocation_free() {
     let mut right = [0.0_f64; 512];
     patch.tick_block(&mut left, &mut right); // warm the block path once
     let block = count_allocs(|| {
+        input.write(&[&host_l[..], &host_r[..]]);
         patch.tick_block(&mut left, &mut right);
         black_box((&left, &right));
     });

@@ -199,7 +199,10 @@ pub mod prelude {
     // External I/O (works with alloc via core::sync::atomic + alloc::sync::Arc)
     #[cfg(feature = "alloc")]
     #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
-    pub use crate::io::{AtomicF64, ExternalInput, ExternalOutput, MidiState};
+    pub use crate::io::{
+        AtomicF64, AudioInput, AudioInputStream, ExternalInput, ExternalOutput, InputChannel,
+        MidiState,
+    };
 
     // Introspection API (GUI parameter discovery)
     #[cfg(feature = "alloc")]

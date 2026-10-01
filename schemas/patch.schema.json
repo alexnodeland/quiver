@@ -77,6 +77,7 @@
             "analog_vco",
             "arpeggiator",
             "attenuverter",
+            "audio_input",
             "bernoulli_gate",
             "bitcrusher",
             "chord_memory",

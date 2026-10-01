@@ -78,6 +78,94 @@ let input_module = ExternalInput::cv(Arc::clone(&cv));
 
 ---
 
+## AudioInput
+
+Brings the host's audio (a microphone, a line input, an `AudioWorklet`'s input,
+a plugin's input bus) into the patch. `type_id`: `audio_input`.
+
+The host owns an `Arc<AudioInputStream>` and, **before each process call**,
+writes the block of input it has for that call. Every `AudioInput` built on the
+stream then plays that block back, one frame per tick.
+
+```rust,ignore
+use std::sync::Arc;
+
+let input = Arc::new(AudioInputStream::new(2, 512)); // stereo, ≤ 512 frames a block
+let mic = patch.add("mic", AudioInput::new(Arc::clone(&input)));
+patch.connect(mic.out("out"), vcf.in_("in"))?;
+
+// Audio callback: write this call's input, then render the same frames.
+input.write(&[&in_left[..n], &in_right[..n]]);   // planar, like PluginProcessor
+// or: input.write_interleaved(&interleaved, 2); // interleaved, like Web Audio
+patch.tick_block(&mut out_left[..n], &mut out_right[..n]);
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `gain` | Unipolar CV | 0–4 | Linear gain, default 1.0 (+12 dB max) |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `out` | Audio | The channel chosen by the `channel` parameter |
+| `left` | Audio | Channel 0 |
+| `right` | Audio | Channel 1 (channel 0 on a mono stream) |
+
+### Parameters
+
+| Id | Type | Values |
+|----|------|--------|
+| `channel` | select | `0` left, `1` right, `2` both (default): `(left + right) / 2` |
+
+### Level
+
+Host audio is full-scale ±1.0; quiver audio is ±5 V. `AudioInput` scales by
+`AudioInput::FULL_SCALE_VOLTS` (5.0), so a full-scale input drives followers,
+gates and filters the way a full-scale oscillator does. (The WASM engine's
+older `audio_in` module, an `ExternalInput`, passes samples through unscaled.)
+
+### Timing
+
+- **One capture fans out.** Any number of `AudioInput`s may read one stream,
+  in one patch or in many (one per polyphonic voice). Each keeps its own
+  cursor and starts each new block at its first frame, so voices rendered one
+  after another over the same block, or a voice that sat a block out, all hear
+  the same frames. A single-consumer ring buffer could not do this.
+- **Mismatched block sizes.** An engine that renders a host block in smaller
+  pieces continues through it; one that renders more frames than the host
+  wrote gets silence for the rest.
+- **Underrun** (block used up, or none yet) gives silence, never a repeat.
+- **Overrun** (a new block before the old one is finished) drops the unread
+  frames: latency never grows past one block. Writes longer than the stream's
+  capacity keep the first `capacity` frames.
+- **New and reset inputs** start with the next block written, so they never
+  replay stale input or join a block out of step. Build the patch first, then
+  write each block just before rendering it.
+- `clear()` publishes an empty block: every reader falls silent at once.
+
+Writing and reading are lock-free and allocation-free. Writing from another
+thread is sound (blocks are double-buffered and published with
+release/acquire; a reader lapped mid-read outputs silence instead of a torn
+sample), but there must be one writer.
+
+### Saving and loading
+
+`channel` and `gain` serialize like any parameter. The stream cannot, so bind
+it in the registry before loading:
+
+```rust,ignore
+let mut registry = ModuleRegistry::new();
+registry.register_audio_input(Arc::clone(&input)); // every audio_input reads `input`
+let patch = Patch::from_def(&def, &registry, sample_rate)?;
+```
+
+Without that call a loaded `audio_input` is silent.
+
+---
+
 ## MidiState
 
 Comprehensive MIDI state tracking. Feed it raw 3-byte MIDI messages with
