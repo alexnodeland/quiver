@@ -1,7 +1,7 @@
 //! QuiverEngine - Main WASM interface for Quiver audio engine
 
 use crate::graph::{CableId, NodeId, Patch};
-use crate::io::{AtomicF64, ExternalInput};
+use crate::io::{AtomicF64, AudioInputStream, ExternalInput};
 use crate::observer::{StateObserver, SubscriptionTarget};
 use crate::port::{ports_compatible, SignalColors, SignalKind};
 use crate::serialize::{ModuleRegistry, PatchDef};
@@ -24,6 +24,14 @@ pub const MIDI_BEND_MODULE: &str = "midi_bend";
 /// [`QuiverEngine::add_audio_input`]). Cable from `audio_in.out` to run
 /// external audio (a worklet input, a microphone) through the patch.
 pub const AUDIO_IN_MODULE: &str = "audio_in";
+
+/// Channels of the engine's [`AudioInputStream`] (see [`QuiverEngine::write_input`]): a
+/// stereo input. A mono input fills both; channels past the second are ignored.
+pub const AUDIO_INPUT_CHANNELS: usize = 2;
+
+/// Most frames one [`QuiverEngine::write_input`] call takes (32 Web Audio render quanta);
+/// longer blocks are truncated.
+pub const AUDIO_INPUT_MAX_FRAMES: usize = 4096;
 
 /// Shared atomic handles for the engine-owned MIDI CV sources.
 ///
@@ -82,6 +90,15 @@ pub struct QuiverEngine {
     // makes effect-style patches possible from the worklet.
     audio_in: Arc<AtomicF64>,
 
+    // Engine-owned host input stream. The registry is bound to it, so every
+    // `audio_input` module — from `add_module` or `load_patch` — reads the blocks
+    // `write_input` publishes. Survives `clear_patch` and `load_patch`.
+    input: Arc<AudioInputStream>,
+    // Preallocated planar staging for `write_input` (AUDIO_INPUT_CHANNELS blocks of
+    // AUDIO_INPUT_MAX_FRAMES): JS arrays are copied here, then published, so writing
+    // a block allocates nothing.
+    input_scratch: Vec<f32>,
+
     // MIDI state mirrored for the scalar getters (`midi_note`, `midi_velocity`, ...).
     midi_note: Option<f64>,
     midi_velocity: Option<f64>,
@@ -106,9 +123,16 @@ impl QuiverEngine {
         // Initialize panic hook for better error messages
         console_error_panic_hook::set_once();
 
+        let input = Arc::new(AudioInputStream::new(
+            AUDIO_INPUT_CHANNELS,
+            AUDIO_INPUT_MAX_FRAMES,
+        ));
+        let mut registry = ModuleRegistry::new();
+        registry.register_audio_input(Arc::clone(&input));
+
         Self {
             patch: Patch::new(sample_rate),
-            registry: ModuleRegistry::new(),
+            registry,
             observer: StateObserver::new(),
             sample_rate,
             block_left: Vec::new(),
@@ -116,6 +140,8 @@ impl QuiverEngine {
             block_interleaved: Vec::new(),
             midi: MidiInputs::new(),
             audio_in: Arc::new(AtomicF64::new(0.0)),
+            input,
+            input_scratch: alloc::vec![0.0; AUDIO_INPUT_CHANNELS * AUDIO_INPUT_MAX_FRAMES],
             midi_note: None,
             midi_velocity: None,
             midi_gate: false,
@@ -615,6 +641,52 @@ impl QuiverEngine {
         unsafe { js_sys::Float32Array::view(&self.block_interleaved[..interleaved_len]) }
     }
 
+    /// Write the host's input block for the next render: one `Float32Array` per
+    /// channel — exactly an `AudioWorkletProcessor`'s `inputs[0]`. Returns the frames
+    /// written.
+    ///
+    /// Every `audio_input` module in the patch (add one with
+    /// `add_module("audio_input", name)`; `load_patch` binds them too) plays this block
+    /// back, one frame per tick, during the following `process_block` /
+    /// `process_block_with_input` calls. Call it once per render quantum, *before*
+    /// rendering. A single channel is mono and fills both; channels past
+    /// `AUDIO_INPUT_CHANNELS` (2) are ignored; the block length is the shortest channel,
+    /// capped at `AUDIO_INPUT_MAX_FRAMES` (4096). An empty array publishes an empty block
+    /// (silence). Rendering more frames than were written gives silence for the rest.
+    ///
+    /// The samples are copied into preallocated memory; nothing is allocated. The older
+    /// `audio_in` path ([`process_block_with_input`](Self::process_block_with_input)) is
+    /// separate and unchanged; `audio_input` scales full-scale `±1.0` to `±5 V`,
+    /// `audio_in` does not.
+    pub fn write_input(&mut self, channels: &js_sys::Array) -> Result<usize, JsValue> {
+        use wasm_bindgen::JsCast;
+
+        let count = (channels.length() as usize).min(AUDIO_INPUT_CHANNELS);
+        let mut frames = AUDIO_INPUT_MAX_FRAMES;
+        for ch in 0..count {
+            let data: js_sys::Float32Array = channels.get(ch as u32).dyn_into().map_err(|_| {
+                JsValue::from_str(&format!("write_input: channel {ch} is not a Float32Array"))
+            })?;
+            let n = (data.length() as usize).min(AUDIO_INPUT_MAX_FRAMES);
+            let at = ch * AUDIO_INPUT_MAX_FRAMES;
+            // `copy_to` requires equal lengths, hence the subarray.
+            data.subarray(0, n as u32)
+                .copy_to(&mut self.input_scratch[at..at + n]);
+            frames = frames.min(n);
+        }
+        Ok(self.publish_input(count, frames))
+    }
+
+    /// Publish the first `frames` frames of the first `count` staged channels.
+    fn publish_input(&self, count: usize, frames: usize) -> usize {
+        let (first, second) = self.input_scratch.split_at(AUDIO_INPUT_MAX_FRAMES);
+        match count {
+            0 => self.input.write::<&[f32]>(&[]),
+            1 => self.input.write(&[&first[..frames]]),
+            _ => self.input.write(&[&first[..frames], &second[..frames]]),
+        }
+    }
+
     /// One tick with an external audio sample: publish the sample to the shared
     /// `audio_in` handle, then advance the patch. Kept separate so the input
     /// semantics are natively testable (the block wrapper returns a JS view).
@@ -1065,6 +1137,72 @@ mod native_tests {
         assert!((left - 0.7).abs() < 1e-12);
         let (left, _right) = engine.tick_with_input(-0.25);
         assert!((left + 0.25).abs() < 1e-12);
+    }
+
+    /// Stage a block as `write_input` would (its JS half needs a JS runtime) and publish it.
+    fn stage_input(engine: &mut QuiverEngine, channels: &[&[f32]]) -> usize {
+        let frames = channels.iter().map(|c| c.len()).min().unwrap_or(0);
+        for (ch, data) in channels.iter().enumerate().take(AUDIO_INPUT_CHANNELS) {
+            let at = ch * AUDIO_INPUT_MAX_FRAMES;
+            engine.input_scratch[at..at + data.len()].copy_from_slice(data);
+        }
+        engine.publish_input(channels.len().min(AUDIO_INPUT_CHANNELS), frames)
+    }
+
+    /// `audio_input` modules — added by name, reloaded from a saved patch, or added after
+    /// `clear_patch` — all read the engine's stream, and render the staged block scaled to
+    /// volts; the older `audio_in` path is untouched and still unscaled.
+    #[test]
+    fn audio_input_modules_read_the_engines_stream() {
+        let v = crate::io::AudioInput::FULL_SCALE_VOLTS;
+        let mut engine = QuiverEngine::new(48_000.0);
+        let build = |engine: &mut QuiverEngine| {
+            assert!(engine.add_module("audio_input", "mic").is_ok());
+            assert!(engine.add_module("stereo_output", "out").is_ok());
+            assert!(engine.connect("mic.left", "out.left").is_ok());
+            assert!(engine.connect("mic.right", "out.right").is_ok());
+            assert!(engine.set_output("out").is_ok());
+            assert!(engine.compile().is_ok());
+        };
+        build(&mut engine);
+
+        assert_eq!(stage_input(&mut engine, &[&[0.5, 0.25], &[-0.5, -0.25]]), 2);
+        assert_eq!(engine.patch.tick(), (0.5 * v, -0.5 * v));
+        assert_eq!(engine.patch.tick(), (0.25 * v, -0.25 * v));
+        assert_eq!(
+            engine.patch.tick(),
+            (0.0, 0.0),
+            "rendering past the block is silence"
+        );
+
+        // A mono block fills both channels; no channels is an empty block.
+        stage_input(&mut engine, &[&[0.5]]);
+        assert_eq!(engine.patch.tick(), (0.5 * v, 0.5 * v));
+        assert_eq!(stage_input(&mut engine, &[]), 0);
+
+        // A saved patch reloaded through the engine's registry reads the same stream.
+        let def = engine.patch.to_def("through");
+        let mut reloaded = Patch::from_def(&def, &engine.registry, 48_000.0).unwrap();
+        stage_input(&mut engine, &[&[0.75], &[0.125]]);
+        assert_eq!(reloaded.tick(), (0.75 * v, 0.125 * v));
+
+        // clear_patch keeps the stream and the registry binding.
+        engine.clear_patch();
+        build(&mut engine);
+        stage_input(&mut engine, &[&[-1.0], &[1.0]]);
+        assert_eq!(engine.patch.tick(), (-v, v));
+
+        // The legacy `audio_in` path is separate and still passes samples unscaled.
+        engine.add_audio_input();
+        assert!(engine.connect("audio_in.out", "out.left").is_ok());
+        assert!(engine.compile().is_ok());
+        stage_input(&mut engine, &[&[0.5], &[0.0]]);
+        let (left, right) = engine.tick_with_input(0.25);
+        assert_eq!((left, right), (0.5 * v + 0.25, 0.0));
+
+        // Blocks longer than the engine's capacity are truncated.
+        let long = alloc::vec![0.1f32; AUDIO_INPUT_MAX_FRAMES + 10];
+        assert_eq!(engine.input.write(&[&long]), AUDIO_INPUT_MAX_FRAMES);
     }
 
     #[test]

@@ -148,6 +148,31 @@ quiver.midiPitchBend(0.5);
 
 Cable those `midi_*` module outputs into your patch to play it from MIDI.
 
+### Audio Input
+
+The worklet node has one input. Connect any Web Audio source to it — a
+microphone, a file player, another node — and add an `audio_input` module to
+run that signal through the patch:
+
+```typescript
+const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+ctx.createMediaStreamSource(mic).connect(quiver.node);
+
+quiver.addModule('audio_input', 'mic');      // reads the node's input
+quiver.connect('mic.out', 'filter.in');      // or mic.left / mic.right
+quiver.setParamByName('mic', 'channel', 2);  // 0 left, 1 right, 2 both (default)
+```
+
+Each render quantum, the worklet writes every channel of its input to the
+engine (`QuiverEngine.write_input`) before rendering, and every `audio_input`
+module plays that block back: any number of them can read the one input. A mono
+source fills both channels. Input is scaled from Web Audio's ±1.0 to quiver's
+±5 V, and saved patches keep their `audio_input` modules (they rebind to the
+node's input on `loadPatch`). The older `addAudioInput()` / `audio_in` module
+still works and feeds channel 0 unscaled.
+
+Monitoring a microphone through speakers is a feedback loop; use headphones.
+
 ### Architecture
 
 ```

@@ -66,6 +66,15 @@ or opt-in.
   `audio_input` (category `I/O`); `ModuleRegistry::register_audio_input(stream)` binds every
   `audio_input` the registry builds — `from_def` included — to the host's stream, and an
   unbound one is silent.
+- **WASM / npm: the worklet's input reaches `audio_input` modules.** `QuiverEngine` owns a
+  stereo `AudioInputStream` (`AUDIO_INPUT_MAX_FRAMES` = 4096) bound into its registry, so
+  `add_module("audio_input", …)` and `load_patch` both read it; `write_input(channels)`
+  takes an `AudioWorkletProcessor`'s `inputs[0]` (one `Float32Array` per channel) and copies
+  it into preallocated memory. The worklet calls it every quantum its input is connected,
+  before rendering; `addModule('audio_input', name)` on the main-thread handle is all a page
+  needs. The 0.3.1 `audio_in` / `process_block_with_input` path is unchanged. Covered by a
+  native engine test and a real-worklet Playwright test (`worklet-integration.spec.ts`,
+  `OfflineAudioContext`, sample-exact).
 - **Per-module random streams.** `GraphModule::seed(&mut self, seed: u64)` (default
   no-op) and `Patch::seed(u64)`, which derives a distinct seed per node
   (`rng::derive_seed`) and re-applies it on `Patch::reset()` and to nodes added later;

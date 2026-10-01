@@ -62,7 +62,10 @@ export interface QuiverAudioNode {
   /** Inject the engine-owned MIDI CV source modules (midi_voct, midi_gate, ...). */
   addMidiInputs: () => void;
   /** Inject the engine-owned external audio input module (`audio_in`). Cable
-   * from `audio_in.out` to run the node's Web Audio input through the patch. */
+   * from `audio_in.out` to run channel 0 of the node's Web Audio input through
+   * the patch, unscaled. For stereo input scaled to quiver's ±5 V, add an
+   * `audio_input` module instead: `addModule('audio_input', 'mic')`, then cable
+   * `mic.out` (or `mic.left` / `mic.right`). */
   addAudioInput: () => void;
   /** Set a parameter by its port name (e.g. `('tape', 'time', 4.2)`). */
   setParamByName: (nodeId: string, paramName: string, value: number) => void;
@@ -110,9 +113,12 @@ export async function createQuiverAudioNode(
   await audioContext.audioWorklet.addModule(String(workletUrl));
 
   const node = new AudioWorkletNode(audioContext, 'quiver-processor', {
-    // One input, so effect-style patches can be fed (the processor forwards
-    // a connected input through `audio_in` — see add_audio_input). A node
-    // with nothing connected still renders as a pure generator.
+    // One input, so effect-style patches can be fed: the processor writes every
+    // channel of a connected input to the engine's stream, which each
+    // `audio_input` module plays back (add one with `addModule('audio_input',
+    // name)`), and also feeds channel 0 to the older `audio_in` module (see
+    // add_audio_input). A node with nothing connected still renders as a pure
+    // generator.
     numberOfInputs: 1,
     numberOfOutputs: 1,
     outputChannelCount: [outputChannels],
