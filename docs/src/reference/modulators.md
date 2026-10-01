@@ -151,7 +151,9 @@ Measured at 48 kHz and pinned by the module's tests:
   release) for notes two semitones or more above the band's floor. In a band's
   bottom two semitones a stop can leave it further off: up to ~40 cents after
   an abrupt stop (low band), ~25 after a fast release (high band).
-- Noise alone never opens the gate.
+- Broadband (white) noise alone does not open the gate. Brown or heavily
+  low-passed noise, whose slow wander can look periodic within one frame,
+  occasionally can.
 
 The analysis is decimated and spread across ticks: about 100–300 ns per tick
 (0.5–1.4% of a core at 48 kHz), constant, with no allocation in `tick` or when

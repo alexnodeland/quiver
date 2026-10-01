@@ -351,6 +351,16 @@ impl AudioInputStream {
     /// the host names with [`advance`](Self::advance) or [`set_frame`](Self::set_frame),
     /// whenever it joined. See [Two ways to read](Self#two-ways-to-read).
     ///
+    /// Two rules come with the clock:
+    ///
+    /// - **Render frame by frame**, with `Patch::tick` / `PolyPatch::tick`, and call
+    ///   `advance` between frames. `Patch::tick_block` renders a whole block without
+    ///   returning to the host, so the clock stays put and every sample of it reads the
+    ///   same frame.
+    /// - **Keep `write`, `advance` and `set_frame` on the rendering thread.** The clock is
+    ///   a plain position, not a queue; moved from another thread it would race the
+    ///   readers (memory-safe, but they would read whichever frame they happened to see).
+    ///
     /// ```
     /// use std::sync::Arc;
     /// use quiver::prelude::*;

@@ -149,6 +149,13 @@ older `audio_in` module, an `ExternalInput`, passes samples through unscaled.)
     offline render that compiles voices at note onsets), and for clips: write a
     whole clip as one block, then `advance()` once per sample.
 
+    Two rules come with the clock. Render frame by frame (`tick()`, or
+    `PolyPatch::tick`) and call `advance()` between frames: `tick_block`
+    renders a whole block without returning to you, so the clock stays put and
+    every sample of the block reads the same frame. And keep `write`,
+    `advance` and `set_frame` on the rendering thread: the clock is a plain
+    position, not a queue.
+
     ```rust,ignore
     let input = Arc::new(AudioInputStream::with_host_clock(1, clip.len()));
     input.write(&[&clip[..]]);

@@ -230,7 +230,9 @@ impl Biquad {
 ///   estimate whose frame is at or above `threshold`, so `voct` already holds the new note
 ///   when it rises. It closes when the frame falls below half the threshold, or after a
 ///   frame's worth of unpitched estimates (long enough that a legato pitch change, whose
-///   frames are briefly aperiodic, keeps it open). Noise does not open it.
+///   frames are briefly aperiodic, keeps it open). Broadband (white) noise does not open
+///   it; brown or heavily low-passed noise, whose slow wander can look periodic within one
+///   frame, now and then can.
 /// - **Latency**: the gate opens within a frame and three hops of an onset (63.4, 48.0 and
 ///   40.8 ms in the low, mid and high bands) and closes within a window and three hops of
 ///   the end (28.4, 28.0 and 25.8 ms); a legato change lands within a frame and three hops
@@ -771,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn tracker_ignores_noise_alone() {
+    fn tracker_ignores_white_noise() {
         for range in PitchRange::ALL {
             let mut track = PitchTracker::new(SR).with_range(range);
             let mut rng = Rng::from_seed(11);

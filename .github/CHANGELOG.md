@@ -39,7 +39,11 @@ What can stop compiling, or sound different, for code written against 0.3.3:
   sample while a port is subscribed; formatting happens in `poll_updates`.
 - **Rendered audio changes** (see *Numerics* below): `KarplusStrong` at every `stretch`;
   a `DelayLine` or `UnitDelay` fed by an acyclic path no longer adds a sample of latency;
-  non-finite input to `PitchShifter`, `Granular` and `Wavefolder` now renders as silence.
+  non-finite input to `PitchShifter`, `Granular` and `Wavefolder` now renders as silence;
+  and `Patch::set_param_by_id` during a render no longer recompiles the patch, whose
+  recompile used to reset the routing buffers, so a patch with a feedback cycle whose
+  parameters change mid-render sounds different (its cycle-breaker's feedback path is
+  no longer blanked for a sample).
 - **`Arpeggiator::reset` and `Granular::reset` rewind their random streams**, so a reset
   module repeats its sequence instead of continuing it.
 - **`DelayLine::with_max_delay` clamps** its argument to `0.001..=60` s (a non-finite
@@ -115,7 +119,7 @@ What can stop compiling, or sound different, for code written against 0.3.3:
   (measured against the frame before, so steady decays and swells pass while stops do not),
   so the pitch is right when the gate rises and when it falls. Tested on sines in every
   band (±1 cent), white noise 20 dB down (±10 cents), harmonic-rich tones (±6 cents), a
-  missing fundamental mid-band, noise alone (gate stays shut), tone bursts (gate timing
+  missing fundamental mid-band, white noise alone (gate stays shut), tone bursts (gate timing
   bounded per band), plucks (decays from 20 ms), swells, legato changes and note edges
   across alignments and releases. Near a band's top a weak fundamental can read an octave
   low; the bottom two semitones of a band keep a documented residual after stops. Registered as `pitch_tracker` (category `Utilities`).
