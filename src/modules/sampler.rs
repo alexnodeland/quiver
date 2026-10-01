@@ -335,8 +335,10 @@ impl GraphModule for SamplePlayer {
 ///
 /// The recording is saved with the patch (`ModuleDef.state`): its samples as
 /// little-endian `f32` bytes in base64 — lossless, so a reloaded patch renders
-/// bit-identically — with its sample rate, length and the buffer's capacity. Loading
-/// validates every field. An empty capture saves no state.
+/// bit-identically — with its sample rate, length and the buffer's capacity. Every state
+/// a `Capture` can save loads back; the saved capacity is clamped so a file cannot make
+/// the loader allocate more than its data backs (see `deserialize_state`). An empty
+/// capture saves no state.
 ///
 /// [`AudioInput`]: crate::io::AudioInput
 pub struct Capture {
@@ -366,15 +368,11 @@ impl Capture {
     /// Buffer length [`new`](Self::new) allocates, in seconds.
     pub const DEFAULT_SECONDS: f64 = 4.0;
 
-    /// Longest recording, in seconds: [`with_seconds`](Self::with_seconds) allocates at
-    /// most this at the graph's rate, [`set_recording`](Self::set_recording) keeps at most
-    /// this at the take's rate, and a saved state's `length` and `capacity` may not
-    /// exceed it at the state's rate.
+    /// Longest buffer [`with_seconds`](Self::with_seconds) allocates, in seconds at the
+    /// rate it is given. A take can still be longer (recorded into a buffer built for a
+    /// higher rate than the graph now runs at, or set by the host); the state loader
+    /// accepts any take its data backs.
     pub const MAX_SECONDS: f64 = 60.0;
-
-    /// Highest sample rate the state loader accepts.
-    #[cfg(feature = "alloc")]
-    const MAX_RATE: f64 = 384_000.0;
 
     /// A capture holding up to [`DEFAULT_SECONDS`](Self::DEFAULT_SECONDS) at `sample_rate`.
     pub fn new(sample_rate: f64) -> Self {
@@ -454,14 +452,12 @@ impl Capture {
     }
 
     /// Replace the recording with `samples` made at `sample_rate` (not real-time: grows
-    /// the buffer if they do not fit). Keeps at most [`MAX_SECONDS`](Self::MAX_SECONDS)
-    /// of them. Stops recording and playback; non-finite samples become silence.
+    /// the buffer if they do not fit). Stops recording and playback; non-finite samples
+    /// become silence; a rate that is not positive and finite keeps the previous one.
     pub fn set_recording(&mut self, samples: &[f32], sample_rate: f64) {
         if sample_rate > 0.0 && sample_rate.is_finite() {
             self.recorded_rate = sample_rate;
         }
-        let most = (Self::MAX_SECONDS * self.recorded_rate) as usize;
-        let samples = &samples[..samples.len().min(most)];
         if samples.len() > self.buffer.len() {
             self.buffer.resize(samples.len(), 0.0);
         }
@@ -607,15 +603,17 @@ impl GraphModule for Capture {
         }))
     }
 
-    /// Restore a recording saved by [`serialize_state`](Self::serialize_state),
-    /// validating every field.
+    /// Restore a recording saved by [`serialize_state`](Self::serialize_state).
     ///
-    /// Patch JSON is untrusted, so the saved `capacity` cannot make the loader allocate
-    /// memory the file does not back: the buffer becomes
-    /// `min(capacity, max(length, the buffer it already has))`. Beyond the buffer the
-    /// module was built with, allocation is proportional to the decoded samples. A
-    /// capture built with more headroom than the default keeps only the default after
-    /// a reload through the registry.
+    /// Accepts every state a `Capture` can save: any positive, finite `sample_rate` (the
+    /// rates `set_recording` and `set_sample_rate` accept), any `length` the data backs,
+    /// and any `capacity`. Patch JSON is untrusted, so `capacity` is a request, clamped
+    /// to `[length, max(length, the buffer the module already has)]`: beyond the buffer
+    /// the module was built with, allocation is proportional to the decoded samples. A
+    /// capture built with more headroom than the default keeps only the default after a
+    /// reload through the registry; its take is never cut. Rejected: another format, a
+    /// rate that is not positive and finite, `data` that is not base64, a `length` that
+    /// disagrees with the data, and non-finite samples.
     #[cfg(feature = "alloc")]
     fn deserialize_state(
         &mut self,
@@ -629,36 +627,27 @@ impl GraphModule for Capture {
         let rate = state
             .get("sample_rate")
             .and_then(|v| v.as_f64())
-            .filter(|r| *r > 0.0 && *r <= Self::MAX_RATE)
-            .ok_or_else(|| err("sample_rate must be in (0, 384000]"))?;
-        let max_len = (Self::MAX_SECONDS * rate) as u64;
-        let field = |name: &str| {
+            .filter(|r| *r > 0.0 && r.is_finite())
+            .ok_or_else(|| err("sample_rate must be positive and finite"))?;
+        let count = |name: &str| {
             state
                 .get(name)
                 .and_then(|v| v.as_u64())
-                .filter(|n| *n <= max_len)
-                .ok_or_else(|| {
-                    err(&format!(
-                        "{name} must be a count of at most {max_len} ({} s at {rate} Hz)",
-                        Self::MAX_SECONDS
-                    ))
-                })
+                .ok_or_else(|| err(&format!("{name} must be a non-negative integer")))
         };
-        let length = field("length")? as usize;
-        let capacity = field("capacity")? as usize;
-        if length > capacity {
-            return Err(err("length exceeds capacity"));
-        }
+        let saved_length = count("length")?;
+        let saved_capacity = count("capacity")?;
         let data = state
             .get("data")
             .and_then(|v| v.as_str())
             .ok_or_else(|| err("data must be a base64 string"))?;
         let bytes = base64::decode(data).ok_or_else(|| err("data is not valid base64"))?;
-        if bytes.len() != length * 4 {
+        // The data decides the length; `length` must agree with it.
+        let length = bytes.len() / 4;
+        if bytes.len() % 4 != 0 || saved_length != length as u64 {
             return Err(err(&format!(
-                "data holds {} bytes, length {length} needs {}",
-                bytes.len(),
-                length * 4
+                "length {saved_length} disagrees with data of {} bytes",
+                bytes.len()
             )));
         }
         let mut samples = Vec::with_capacity(length);
@@ -669,7 +658,9 @@ impl GraphModule for Capture {
             }
             samples.push(s);
         }
-        let capacity = capacity.min(length.max(self.buffer.len()));
+        // `capacity` may exceed what this platform can address; it is a request anyway.
+        let requested = usize::try_from(saved_capacity).unwrap_or(usize::MAX);
+        let capacity = requested.clamp(length, length.max(self.buffer.len()));
         if self.buffer.len() != capacity {
             self.buffer = vec![0.0; capacity];
         }
@@ -1130,9 +1121,10 @@ mod tests {
         };
         assert!(broken(&|s| s["format"] = "wav".into()).contains("format"));
         assert!(broken(&|s| s["sample_rate"] = (-1.0).into()).contains("sample_rate"));
-        assert!(broken(&|s| s["length"] = 1001.into()).contains("needs"));
-        assert!(broken(&|s| s["capacity"] = 10.into()).contains("exceeds"));
-        assert!(broken(&|s| s["capacity"] = u64::MAX.into()).contains("at most"));
+        assert!(broken(&|s| s["length"] = 1001.into()).contains("disagrees"));
+        assert!(broken(&|s| s["length"] = u64::MAX.into()).contains("disagrees"));
+        assert!(broken(&|s| s["capacity"] = (-3).into()).contains("capacity"));
+        assert!(broken(&|s| s["sample_rate"] = 0.0.into()).contains("sample_rate"));
         assert!(broken(&|s| s["data"] = "not base64!".into()).contains("base64"));
         let nan = base64::encode(&f32::NAN.to_le_bytes());
         assert!(broken(&|s| {
@@ -1142,8 +1134,8 @@ mod tests {
         .contains("non-finite"));
     }
 
-    /// Patch JSON is untrusted: a saved capacity cannot allocate memory the file's data
-    /// does not back, and the counts and rate are bounded.
+    /// Patch JSON is untrusted: a saved capacity is a request the loader clamps, so it
+    /// cannot allocate memory the file's data does not back.
     #[test]
     #[cfg(feature = "alloc")]
     fn capture_state_cannot_allocate_beyond_its_data() {
@@ -1157,50 +1149,90 @@ mod tests {
         };
 
         // A huge capacity with a tiny take: the buffer stays at what the module had.
-        let huge = with(&|s| s["capacity"] = ((Capture::MAX_SECONDS * 44_100.0) as u64).into());
+        for capacity in [(Capture::MAX_SECONDS * 44_100.0) as u64 + 1, u64::MAX] {
+            let huge = with(&|s| s["capacity"] = capacity.into());
+            let mut loaded = Capture::new(48_000.0);
+            loaded.deserialize_state(&huge).unwrap();
+            assert_eq!(
+                loaded.capacity(),
+                4 * 48_000,
+                "no growth past the default buffer"
+            );
+            assert_eq!(loaded.len(), 300);
+            // ...and a module built smaller grows only to the data.
+            let mut tiny = Capture::with_seconds(48_000.0, 0.001); // 48 samples
+            tiny.deserialize_state(&huge).unwrap();
+            assert_eq!(tiny.capacity(), 300);
+        }
+        // A capacity below the take is raised to it.
         let mut loaded = Capture::new(48_000.0);
-        loaded.deserialize_state(&huge).unwrap();
-        assert_eq!(
-            loaded.capacity(),
-            4 * 48_000,
-            "no growth past the default buffer"
-        );
-        assert_eq!(loaded.len(), 300);
-        // ...and a module built smaller grows only to the data.
-        let mut tiny = Capture::with_seconds(48_000.0, 0.001); // 48 samples
-        tiny.deserialize_state(&huge).unwrap();
-        assert_eq!(tiny.capacity(), 300);
+        loaded
+            .deserialize_state(&with(&|s| s["capacity"] = 10.into()))
+            .unwrap();
+        assert_eq!((loaded.capacity(), loaded.len()), (300, 300));
 
-        // The highest accepted rate does not unlock a bigger buffer either.
+        // A huge rate does not unlock a bigger buffer either.
         let fast = with(&|s| {
-            s["sample_rate"] = 384_000.0.into();
-            s["capacity"] = ((Capture::MAX_SECONDS * 384_000.0) as u64).into();
+            s["sample_rate"] = 1e12.into();
+            s["capacity"] = u64::MAX.into();
         });
         let mut loaded = Capture::new(48_000.0);
         loaded.deserialize_state(&fast).unwrap();
         assert_eq!(loaded.capacity(), 4 * 48_000);
+        assert_eq!(loaded.recorded_sample_rate(), 1e12);
+    }
 
-        // Out of bounds: a capacity past MAX_SECONDS at the state's rate, a huge rate.
-        let too_long =
-            with(&|s| s["capacity"] = ((Capture::MAX_SECONDS * 44_100.0) as u64 + 1).into());
-        let e = Capture::new(48_000.0)
-            .deserialize_state(&too_long)
-            .unwrap_err();
-        assert!(e.contains("at most"), "{e}");
-        let absurd = with(&|s| s["sample_rate"] = 1e12.into());
-        let e = Capture::new(48_000.0)
-            .deserialize_state(&absurd)
-            .unwrap_err();
-        assert!(e.contains("sample_rate"), "{e}");
+    /// Every state a Capture can save loads back, bit-exact: the reviewer's three cases.
+    #[test]
+    #[cfg(feature = "alloc")]
+    fn capture_loads_every_state_it_can_save() {
+        let round_trip = |capture: &Capture| {
+            let state = capture.serialize_state().unwrap();
+            // Through JSON text, as a saved patch is.
+            let text = serde_json::to_string(&state).unwrap();
+            let state: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let mut loaded = Capture::new(48_000.0);
+            loaded.deserialize_state(&state).unwrap();
+            assert_eq!(loaded.recording(), capture.recording(), "bit-exact");
+            assert_eq!(
+                loaded.recorded_sample_rate(),
+                capture.recorded_sample_rate()
+            );
+            loaded
+        };
 
-        // A host-set take keeps at most MAX_SECONDS, so every save reloads.
-        let mut capture = Capture::with_seconds(100.0, 1.0);
-        capture.set_recording(&[0.5; 10_000], 100.0);
-        assert_eq!(capture.len(), (Capture::MAX_SECONDS * 100.0) as usize);
-        let mut back = Capture::with_seconds(100.0, 1.0);
-        back.deserialize_state(&capture.serialize_state().unwrap())
-            .unwrap();
-        assert_eq!(back.recording(), capture.recording());
+        // A: 60 s built at 96 kHz (5.76 M samples), run in a 48 kHz graph, a 0.1 s take.
+        // Its saved capacity is 120 s at the take's rate.
+        let mut a = Capture::with_seconds(96_000.0, 60.0);
+        a.set_sample_rate(48_000.0);
+        let mut inputs = PortValues::new();
+        let take: Vec<f64> = (0..4_800).map(|i| (i as f64 * 0.01).sin()).collect();
+        record(&mut a, &mut inputs, &take);
+        assert_eq!((a.len(), a.recorded_sample_rate()), (4_800, 48_000.0));
+        assert_eq!(a.serialize_state().unwrap()["capacity"], 5_760_000);
+        let loaded = round_trip(&a);
+        assert_eq!(
+            loaded.capacity(),
+            4 * 48_000,
+            "the default buffer, not 5.76 M"
+        );
+
+        // B: a 70 s take at 48 kHz, longer than MAX_SECONDS.
+        let mut b = Capture::new(48_000.0);
+        let long: Vec<f32> = (0..70 * 48_000)
+            .map(|i| ((i % 997) as f32) / 997.0)
+            .collect();
+        b.set_recording(&long, 48_000.0);
+        assert_eq!(b.len(), 70 * 48_000);
+        assert_eq!(round_trip(&b).len(), 70 * 48_000);
+
+        // C: 768 kHz, from the host and from recording in a 768 kHz graph.
+        let mut c = Capture::new(48_000.0);
+        c.set_recording(&[0.5, -0.25, 0.125], 768_000.0);
+        round_trip(&c);
+        let mut c = Capture::with_seconds(768_000.0, 0.01);
+        record(&mut c, &mut inputs, &[0.75, -0.75]);
+        assert_eq!(round_trip(&c).recorded_sample_rate(), 768_000.0);
     }
 
     #[test]

@@ -126,9 +126,9 @@ What can stop compiling, or sound different, for code written against 0.3.3:
   whatever the graph's rate. Recording and playback never allocate (`tests/zero_alloc.rs`
   records and plays inside the counted window). The take serializes with the patch in
   `ModuleDef.state` as lossless little-endian `f32` base64 with its rate, length and
-  capacity; `from_def` validates every field and allocates no more than the data backs
-  (the buffer is `min(capacity, max(length, its own))`), and a reloaded patch plays
-  bit-identically.
+  capacity. `from_def` loads every state a `Capture` can save, and clamps the saved
+  capacity to `[length, max(length, its own buffer)]`, so a file cannot allocate more
+  than its data backs. A reloaded patch plays bit-identically.
   `reset()` keeps the take. Registered as `capture` (category `Oscillators`).
   `SamplePlayer`'s cubic read moved to a shared helper (same arithmetic, bit-identical).
 - **WASM / npm: the worklet's input reaches `audio_input` modules.** `QuiverEngine` owns a

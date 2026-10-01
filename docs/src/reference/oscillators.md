@@ -336,11 +336,13 @@ The take is saved with the patch, in `ModuleDef.state`:
 ```
 
 The samples are little-endian `f32` in base64: lossless, so a reloaded patch
-plays bit-identically. Loading validates the format, rate, counts, data length
-and that every sample is finite. Patch JSON is untrusted, so the saved
-`capacity` never allocates memory the data does not back: the buffer becomes
-`min(capacity, max(length, the buffer the module already has))`. A take is at
-most `Capture::MAX_SECONDS` (60 s) long. An empty capture saves no state.
+plays bit-identically. Every state a `Capture` can save loads back, whatever its
+rate or length. Patch JSON is untrusted, so the saved `capacity` is only a
+request: the buffer becomes `capacity` clamped to
+`[length, max(length, the buffer the module already has)]`, and never allocates
+memory the data does not back. Loading rejects another format, a rate that is
+not positive and finite, data that is not base64, a `length` that disagrees with
+the data, and non-finite samples. An empty capture saves no state.
 
 ---
 
