@@ -20,7 +20,7 @@ use crate::modules::{
     Mixer, Multiple, NoiseGate, NoiseGenerator, Offset, Oversample, ParametricEq, Phaser,
     PitchShifter, PrecisionAdder, Quantizer, Rectifier, Reverb, RingModulator, SampleAndHold,
     SamplePlayer, Scale, ScaleQuantizer, SlewLimiter, StepSequencer, StereoOutput, Supersaw, Svf,
-    Tremolo, UnitDelay, VcSwitch, Vca, Vco, Vibrato, Vocoder, Wavetable,
+    Track, TrackRange, Tremolo, UnitDelay, VcSwitch, Vca, Vco, Vibrato, Vocoder, Wavetable,
 };
 
 // =============================================================================
@@ -408,6 +408,26 @@ impl ModuleIntrospection for Ducker {
             }
             "thresh" => {
                 self.set_threshold(value);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl ModuleIntrospection for Track {
+    fn param_infos(&self) -> Vec<ParamInfo> {
+        // `threshold` is a CV port (discovered through the port system); the band is the
+        // one internal, discrete choice.
+        vec![ParamInfo::select("range", "Range", 3)
+            .with_default(TrackRange::default().index() as f64)
+            .with_value(self.range().index() as f64)]
+    }
+
+    fn set_param_by_id(&mut self, id: &str, value: f64) -> bool {
+        match (id, TrackRange::from_index(value)) {
+            ("range", Some(range)) => {
+                self.set_range(range);
                 true
             }
             _ => false,

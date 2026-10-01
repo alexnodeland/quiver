@@ -66,6 +66,16 @@ or opt-in.
   `audio_input` (category `I/O`); `ModuleRegistry::register_audio_input(stream)` binds every
   `audio_input` the registry builds — `from_def` included — to the host's stream, and an
   unbound one is silent.
+- **`Track`: pitch, gate and level from an audio signal** (`modules`, no_std). YIN on a
+  decimated copy of the input, one of three bands (`range`: 40–500, 70–1000, 140–2000 Hz),
+  with the difference function spread across ticks so the cost is flat (100–300 ns a tick
+  at 48 kHz, no allocation in `tick` or on a band change). Outputs `voct`, `gate` and an RMS
+  `level`; a `threshold` input sets the gate. An estimate only moves the pitch when its
+  frame holds no pre-onset silence, its amplitude is steady, and the next frame confirms the
+  sound carried on, so the pitch is right when the gate rises and when it falls. Tested on
+  sines in every band (±1 cent), white noise 20 dB down (±10 cents), noise alone (gate
+  stays shut), tone bursts (gate timing bounded per band), legato changes and note edges
+  across alignments and releases. Registered as `track` (category `Utilities`).
 - **WASM / npm: the worklet's input reaches `audio_input` modules.** `QuiverEngine` owns a
   stereo `AudioInputStream` (`AUDIO_INPUT_MAX_FRAMES` = 4096) bound into its registry, so
   `add_module("audio_input", …)` and `load_patch` both read it; `write_input(channels)`

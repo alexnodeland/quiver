@@ -588,6 +588,18 @@ impl ModuleRegistry {
         );
 
         self.register_factory_with_keywords(
+            "track",
+            "Track",
+            "Utilities",
+            "Pitch (YIN), gate and level from an audio signal: play a patch with a voice",
+            &[
+                "track", "pitch", "tracker", "yin", "detect", "follow", "voice", "gate",
+            ],
+            &[],
+            |sr| Box::new(Track::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
             "ducker",
             "Ducker",
             "Dynamics",

@@ -64,7 +64,8 @@ fn count_allocs<F: FnOnce()>(f: F) -> usize {
 /// A representative patch exercising the routing engine end to end:
 /// VCO -> SVF -> VCA -> StereoOutput, an LFO modulation cable into the filter cutoff, a
 /// normalled input (StereoOutput's `right` normals to `left`), and host audio from an
-/// `AudioInput` summed into the filter input. Returns the patch and the input's stream.
+/// `AudioInput` summed into the filter input and tracked by a `Track` that plays the VCO.
+/// Returns the patch and the input's stream.
 fn build_patch() -> (Patch, Arc<AudioInputStream>) {
     let sr = 44_100.0;
     let mut patch = Patch::new(sr);
@@ -80,6 +81,10 @@ fn build_patch() -> (Patch, Arc<AudioInputStream>) {
     // Host audio summed into the filter input alongside the VCO.
     let mic = patch.add("mic", AudioInput::new(Arc::clone(&input)));
     patch.connect(mic.out("out"), svf.in_("in")).unwrap();
+    // ...and pitch-tracked: the input plays the VCO.
+    let track = patch.add("track", Track::new(sr));
+    patch.connect(mic.out("out"), track.in_("in")).unwrap();
+    patch.connect(track.out("voct"), vco.in_("voct")).unwrap();
     // LFO modulation cable into the filter cutoff (CvBipolar -> CvUnipolar; allowed).
     patch.connect(lfo.out("sin"), svf.in_("cutoff")).unwrap();
     patch.connect(svf.out("lp"), vca.in_("in")).unwrap();
@@ -101,24 +106,38 @@ fn build_patch() -> (Patch, Arc<AudioInputStream>) {
 #[test]
 fn graph_tick_paths_are_allocation_free() {
     let (mut patch, input) = build_patch();
-    // The host's input block (planar and interleaved), written before each render.
-    let host_l: Vec<f32> = (0..512).map(|i| (i as f32 * 0.01).sin()).collect();
-    let host_r: Vec<f32> = host_l.iter().map(|s| -s).collect();
-    let interleaved: Vec<f32> = host_l
-        .iter()
-        .zip(&host_r)
-        .flat_map(|(&l, &r)| [l, r])
-        .collect();
+    // The host's input: a continuous 220 Hz tone, refilled block by block into
+    // preallocated buffers (planar and interleaved) before each render.
+    let mut host_l = vec![0.0f32; 512];
+    let mut host_r = vec![0.0f32; 512];
+    let mut interleaved = vec![0.0f32; 1024];
+    let mut phase = 0.0f32;
+    let mut refill = |l: &mut [f32], r: &mut [f32], inter: &mut [f32]| {
+        for i in 0..l.len() {
+            let s = 0.5 * (phase * std::f32::consts::TAU).sin();
+            phase = (phase + 220.0 / 44_100.0).fract();
+            l[i] = s;
+            r[i] = -s;
+            inter[2 * i] = s;
+            inter[2 * i + 1] = -s;
+        }
+    };
 
-    // Warm up so every reusable buffer has reached steady-state capacity.
-    input.write(&[&host_l[..256], &host_r[..256]]);
-    for _ in 0..256 {
-        black_box(patch.tick());
+    // Warm up so every reusable buffer has reached steady-state capacity, and the
+    // tracker is past its first frames (snapshots, estimates and gate changes all happen
+    // inside the measured windows below).
+    for _ in 0..16 {
+        refill(&mut host_l, &mut host_r, &mut interleaved);
+        input.write(&[&host_l[..], &host_r[..]]);
+        for _ in 0..512 {
+            black_box(patch.tick());
+        }
     }
 
     // 1000 per-sample ticks, fed by host input blocks, must not allocate.
     let per_sample = count_allocs(|| {
         for chunk in 0..4 {
+            refill(&mut host_l, &mut host_r, &mut interleaved);
             input.write(&[&host_l[..250], &host_r[..250]]);
             if chunk == 3 {
                 input.write_interleaved(&interleaved[..500], 2);
@@ -139,6 +158,7 @@ fn graph_tick_paths_are_allocation_free() {
     let mut right = [0.0_f64; 512];
     patch.tick_block(&mut left, &mut right); // warm the block path once
     let block = count_allocs(|| {
+        refill(&mut host_l, &mut host_r, &mut interleaved);
         input.write(&[&host_l[..], &host_r[..]]);
         patch.tick_block(&mut left, &mut right);
         black_box((&left, &right));
@@ -152,11 +172,21 @@ fn graph_tick_paths_are_allocation_free() {
     // no-op), must allocate nothing; nor may the ticks that follow (which would if the
     // patch had been invalidated and lazily recompiled).
     let svf = patch.get_node_id_by_name("svf").unwrap();
+    let track = patch.get_node_id_by_name("track").unwrap();
+    let mic = patch.get_node_id_by_name("mic").unwrap();
     let set_param = count_allocs(|| {
         black_box(patch.set_param_by_id(svf, "res", 0.7));
         black_box(patch.set_param_by_id(svf, "res", 0.2));
         // `cutoff` has the LFO cable on it: shadowed, returns false, still no allocation.
         black_box(patch.set_param_by_id(svf, "cutoff", 0.4));
+        // Internal (introspection) selects: the tracker's band and the input's channel.
+        // `range` re-plans the tracker's analysis in buffers sized for every band.
+        black_box(patch.set_param_by_id(track, "range", 2.0));
+        black_box(patch.set_param_by_id(mic, "channel", 0.0));
+        for _ in 0..64 {
+            black_box(patch.tick());
+        }
+        black_box(patch.set_param_by_id(track, "range", 0.0));
         for _ in 0..64 {
             black_box(patch.tick());
         }

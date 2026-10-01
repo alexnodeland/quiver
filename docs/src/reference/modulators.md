@@ -94,6 +94,62 @@ let follower = patch.add("follow", EnvelopeFollower::new(44100.0));
 
 ---
 
+## Track
+
+Pitch, gate and level from an audio signal: play a patch with a voice or an
+instrument. Pitch is estimated with YIN. `type_id`: `track`.
+
+```rust,ignore
+let mic = patch.add("mic", AudioInput::new(Arc::clone(&input)));
+let track = patch.add("track", Track::new(44100.0));
+patch.connect(mic.out("out"), track.in_("in"))?;
+patch.connect(track.out("voct"), vco.in_("voct"))?;
+patch.connect(track.out("gate"), env.in_("gate"))?;
+patch.connect(track.out("level"), vca.in_("cv"))?;
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `in` | Audio | ±5V | Monophonic signal to track |
+| `threshold` | Unipolar CV | 0-10V | Gate threshold on the `level` scale, default 0.25 |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `voct` | V/Oct | Pitch (0V = C4); holds the last note while the gate is low |
+| `gate` | Gate | High while the input is pitched and above `threshold` |
+| `level` | Unipolar CV | RMS level; a full-scale ±5V sine reads 10V |
+
+### Parameters
+
+| Id | Type | Values |
+|----|------|--------|
+| `range` | select | `0` low (40–500 Hz), `1` mid (70–1000 Hz, default), `2` high (140–2000 Hz) |
+
+### Accuracy and timing
+
+Measured at 48 kHz and pinned by the module's tests:
+
+- A steady sine reads within ±1 cent anywhere in its band; with white noise
+  20 dB below it, within ±10 cents.
+- The gate opens on the first estimate whose analysis frame holds no silence
+  before the onset, its amplitude steady, confirmed by the next frame, so the
+  pitch is already right (±1 cent) when the gate rises. Opening takes 63, 44 and
+  37 ms (low, mid, high); closing after the sound ends, 28, 23 and 23 ms.
+- After the gate falls the pitch holds within ±5 cents for notes two semitones
+  or more above the band's floor. In a band's bottom two semitones an abrupt
+  stop can leave it up to ~40 cents (low) or ~15 (high) off.
+- Noise alone never opens the gate.
+
+The analysis is decimated and spread across ticks: about 100–300 ns per tick
+(0.5–1.4% of a core at 48 kHz), constant, with no allocation in `tick` or when
+the band changes.
+
+---
+
 ## LFO (Low-Frequency Oscillator)
 
 See [Oscillators](./oscillators.md#lfo-low-frequency-oscillator) for full documentation.
