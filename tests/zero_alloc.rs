@@ -64,12 +64,14 @@ fn count_allocs<F: FnOnce()>(f: F) -> usize {
 /// A representative patch exercising the routing engine end to end:
 /// VCO -> SVF -> VCA -> StereoOutput, an LFO modulation cable into the filter cutoff, a
 /// normalled input (StereoOutput's `right` normals to `left`), and host audio from an
-/// `AudioInput` summed into the filter input and tracked by a `Track` that plays the VCO.
-/// Returns the patch and the input's stream.
-fn build_patch() -> (Patch, Arc<AudioInputStream>) {
+/// `AudioInput` summed into the filter input, tracked by a `Track` that plays the VCO and
+/// recorded by a `Capture` whose playback joins the filter input too.
+fn build_patch() -> Rig {
     let sr = 44_100.0;
     let mut patch = Patch::new(sr);
     let input = Arc::new(AudioInputStream::new(2, 512));
+    let record = Arc::new(AtomicF64::new(0.0));
+    let play = Arc::new(AtomicF64::new(0.0));
 
     let vco = patch.add("vco", Vco::new(sr));
     let lfo = patch.add("lfo", Lfo::new(sr));
@@ -85,6 +87,16 @@ fn build_patch() -> (Patch, Arc<AudioInputStream>) {
     let track = patch.add("track", Track::new(sr));
     patch.connect(mic.out("out"), track.in_("in")).unwrap();
     patch.connect(track.out("voct"), vco.in_("voct")).unwrap();
+    // ...and resampled: record and play gates come from the host.
+    let capture = patch.add("capture", Capture::new(sr));
+    let rec = patch.add("rec", ExternalInput::gate(Arc::clone(&record)));
+    let gate = patch.add("play", ExternalInput::gate(Arc::clone(&play)));
+    patch.connect(mic.out("out"), capture.in_("in")).unwrap();
+    patch
+        .connect(rec.out("out"), capture.in_("record"))
+        .unwrap();
+    patch.connect(gate.out("out"), capture.in_("gate")).unwrap();
+    patch.connect(capture.out("out"), svf.in_("in")).unwrap();
     // LFO modulation cable into the filter cutoff (CvBipolar -> CvUnipolar; allowed).
     patch.connect(lfo.out("sin"), svf.in_("cutoff")).unwrap();
     patch.connect(svf.out("lp"), vca.in_("in")).unwrap();
@@ -94,7 +106,20 @@ fn build_patch() -> (Patch, Arc<AudioInputStream>) {
 
     patch.set_output(out.id());
     patch.compile().unwrap();
-    (patch, input)
+    Rig {
+        patch,
+        input,
+        record,
+        play,
+    }
+}
+
+/// The patch and the host-side handles that feed it.
+struct Rig {
+    patch: Patch,
+    input: Arc<AudioInputStream>,
+    record: Arc<AtomicF64>,
+    play: Arc<AtomicF64>,
 }
 
 /// Both the per-sample `tick()` and the block `tick_block()` paths must allocate nothing
@@ -105,7 +130,12 @@ fn build_patch() -> (Patch, Arc<AudioInputStream>) {
 /// another's allocations to the measured window.
 #[test]
 fn graph_tick_paths_are_allocation_free() {
-    let (mut patch, input) = build_patch();
+    let Rig {
+        mut patch,
+        input,
+        record,
+        play,
+    } = build_patch();
     // The host's input: a continuous 220 Hz tone, refilled block by block into
     // preallocated buffers (planar and interleaved) before each render.
     let mut host_l = vec![0.0f32; 512];
@@ -134,7 +164,8 @@ fn graph_tick_paths_are_allocation_free() {
         }
     }
 
-    // 1000 per-sample ticks, fed by host input blocks, must not allocate.
+    // 1000 per-sample ticks, fed by host input blocks, must not allocate — while the
+    // capture records (chunks 0-1), then plays its take back (chunks 2-3).
     let per_sample = count_allocs(|| {
         for chunk in 0..4 {
             refill(&mut host_l, &mut host_r, &mut interleaved);
@@ -142,6 +173,8 @@ fn graph_tick_paths_are_allocation_free() {
             if chunk == 3 {
                 input.write_interleaved(&interleaved[..500], 2);
             }
+            record.set(if chunk < 2 { 5.0 } else { 0.0 });
+            play.set(if chunk >= 2 { 5.0 } else { 0.0 });
             for _ in 0..250 {
                 black_box(patch.tick());
             }

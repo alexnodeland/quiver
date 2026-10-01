@@ -80,6 +80,7 @@
             "audio_input",
             "bernoulli_gate",
             "bitcrusher",
+            "capture",
             "chord_memory",
             "chorus",
             "clock",

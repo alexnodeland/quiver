@@ -288,6 +288,7 @@ On main branch only (expensive checks):
 - `FormantOsc` - Formant oscillator for vocal sounds
 - `KarplusStrong` - Physical modeling string synthesis
 - `SamplePlayer` - Mono sample playback with V/Oct pitch, start position, and looping
+- `Capture` - Records its input into a fixed buffer and plays it back (record, play, loop, V/Oct); the take serializes with the patch
 
 ### Filters
 - `Svf` - State-variable filter (LP, HP, BP, Notch)

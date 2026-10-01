@@ -13,8 +13,8 @@ use crate::introspection::{ControlType, ModuleIntrospection, ParamCurve, ParamIn
 
 use crate::analog::{AnalogVco, Saturator, Wavefolder};
 use crate::modules::{
-    Adsr, Arpeggiator, Attenuverter, BernoulliGate, Bitcrusher, ChordMemory, Chorus, Clock,
-    Comparator, Compressor, Crossfader, Crosstalk, DelayLine, DiodeLadderFilter, Distortion,
+    Adsr, Arpeggiator, Attenuverter, BernoulliGate, Bitcrusher, Capture, ChordMemory, Chorus,
+    Clock, Comparator, Compressor, Crossfader, Crosstalk, DelayLine, DiodeLadderFilter, Distortion,
     Ducker, EnvelopeFollower, Euclidean, Flanger, FormantOsc, Granular, GroundLoop, KarplusStrong,
     Lfo, Limiter, LogicAnd, LogicNot, LogicOr, LogicXor, Max, MidSideDecode, MidSideEncode, Min,
     Mixer, Multiple, NoiseGate, NoiseGenerator, Offset, Oversample, ParametricEq, Phaser,
@@ -105,6 +105,9 @@ impl ModuleIntrospection for Vibrato {}
 // state is an optional custom-scale table (a `&[cents]` list, not a scalar value), which is
 // intentionally excluded from the value-typed parameter surface.
 impl ModuleIntrospection for ScaleQuantizer {}
+// Capture's controls (record, play, loop, pitch) are ports; its recording is not a scalar
+// parameter and travels in `ModuleDef.state` instead.
+impl ModuleIntrospection for Capture {}
 
 /// Map an [`Oversample`] factor (1/2/4) to a select index (0/1/2) and back. Shared by the
 /// waveshaping modules whose only non-port parameter is their opt-in oversampling factor.

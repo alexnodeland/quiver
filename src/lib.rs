@@ -170,8 +170,8 @@ pub mod prelude {
     pub use crate::modules::{
         Ducker, MidSideDecode, MidSideEncode, Oversample, Oversampler, SamplePlayer, Wavefolder,
     };
-    // Audio in (RFC-008 in Auracle): pitch/gate/level tracking.
-    pub use crate::modules::{Track, TrackRange};
+    // Audio in (RFC-008 in Auracle): pitch/gate/level tracking and resampling.
+    pub use crate::modules::{Capture, Track, TrackRange};
 
     // Analog Modeling
     pub use crate::analog::{noise, saturation, AnalogVco, ComponentModel, ThermalModel};

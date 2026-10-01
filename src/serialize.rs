@@ -622,6 +622,19 @@ impl ModuleRegistry {
         );
 
         self.register_factory_with_keywords(
+            "capture",
+            "Capture",
+            "Oscillators",
+            "Records its input into a buffer and plays it back: resample a signal",
+            &[
+                "capture", "record", "recorder", "resample", "sampler", "looper", "loop",
+            ],
+            &[],
+            // A 4 s buffer; a saved recording (ModuleDef.state) restores its own capacity.
+            |sr| Box::new(Capture::new(sr)),
+        );
+
+        self.register_factory_with_keywords(
             "mid_side_encode",
             "Mid/Side Encode",
             "Utilities",
@@ -2210,6 +2223,53 @@ mod tests {
         stream.write(&[[0.25f32], [0.75]]);
         assert_eq!(reloaded.tick(), (2.5, 7.5));
         assert_eq!(patch.tick(), (2.5, 7.5));
+    }
+
+    /// A Capture's recording is a sound's content: it survives `to_def` → JSON →
+    /// `from_def` bit for bit, and the reloaded patch plays it identically.
+    #[test]
+    fn test_capture_recording_round_trips_through_a_patch() {
+        let mut capture = Capture::with_seconds(48_000.0, 1.0);
+        let take: Vec<f32> = (0..4800).map(|i| (i as f32 * 0.05).sin()).collect();
+        capture.set_recording(&take, 48_000.0);
+        let mut patch = Patch::new(48_000.0);
+        let cap = patch.add("cap", capture);
+        // A held gate plays the take from the first tick.
+        let hold = patch.add("hold", Offset::new(5.0));
+        let out = patch.add("output", StereoOutput::new());
+        patch.connect(hold.out("out"), cap.in_("gate")).unwrap();
+        patch.connect(cap.out("out"), out.in_("left")).unwrap();
+        patch.set_output(out.id());
+        patch.compile().unwrap();
+
+        let json = patch.to_def("resampled").to_json().unwrap();
+        let def = PatchDef::from_json(&json).unwrap();
+        let saved = def.modules.iter().find(|m| m.name == "cap").unwrap();
+        assert_eq!(saved.state.as_ref().unwrap()["length"], 4800);
+
+        let registry = ModuleRegistry::new();
+        let mut reloaded = Patch::from_def(&def, &registry, 48_000.0).unwrap();
+        assert_eq!(reloaded.to_def("resampled").to_json().unwrap(), json);
+
+        let render = |patch: &mut Patch| {
+            let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+            patch.tick_block(&mut l, &mut r);
+            l
+        };
+        let played = render(&mut reloaded);
+        assert_eq!(
+            played,
+            render(&mut patch),
+            "the reload plays like the original"
+        );
+        let expected: Vec<f64> = take.iter().map(|&s| s as f64).collect();
+        assert_eq!(played, expected);
+
+        // Malformed state surfaces as an error through the patch API.
+        let id = reloaded.get_node_id_by_name("cap").unwrap();
+        assert!(reloaded
+            .deserialize_module_state(id, &serde_json::json!({"format": "wav"}))
+            .is_err());
     }
 
     #[test]

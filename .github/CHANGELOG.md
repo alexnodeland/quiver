@@ -10,7 +10,11 @@ Sections above the auto-generated marker are hand-written and are preserved.
 
 ## [0.4.0] - unreleased
 
-A correctness pass driven by the September 2026 stack audit (findings Q-N1 … Q-N8).
+A correctness pass driven by the September 2026 stack audit (findings Q-N1 … Q-N8), and
+audio in: `AudioInput` (a block-fed host input that fans out to any number of nodes),
+`Track` (pitch, gate and level from a signal) and `Capture` (record and play back), plus
+the WASM worklet input that feeds them. The new modules are additive; the numeric notes
+below concern the audit fixes.
 Unlike 0.2.0, this release is **not bit-exact** for every patch: two DSP fixes change
 rendered samples, and `tests/golden_vectors.rs` was rebaselined for exactly one of its
 five existing patches, deliberately and with the reason recorded in the file. Everything
@@ -76,6 +80,16 @@ or opt-in.
   sines in every band (±1 cent), white noise 20 dB down (±10 cents), noise alone (gate
   stays shut), tone bursts (gate timing bounded per band), legato changes and note edges
   across alignments and releases. Registered as `track` (category `Utilities`).
+- **`Capture`: record an input, play it back as a source** (`modules`, no_std). A
+  fixed-size `f32` buffer (`Capture::new`: 4 s; `with_seconds`, up to 60 s) recorded by a
+  `record` gate (each take starts at the top; a full buffer stops it) and played like
+  `SamplePlayer` (`trig`, `gate`, `loop`, `voct`, `eos`), at the speed it was recorded
+  whatever the graph's rate. Recording and playback never allocate (`tests/zero_alloc.rs`
+  records and plays inside the counted window). The take serializes with the patch in
+  `ModuleDef.state` as lossless little-endian `f32` base64 with its rate, length and
+  capacity; `from_def` validates every field, and a reloaded patch plays bit-identically.
+  `reset()` keeps the take. Registered as `capture` (category `Oscillators`).
+  `SamplePlayer`'s cubic read moved to a shared helper (same arithmetic, bit-identical).
 - **WASM / npm: the worklet's input reaches `audio_input` modules.** `QuiverEngine` owns a
   stereo `AudioInputStream` (`AUDIO_INPUT_MAX_FRAMES` = 4096) bound into its registry, so
   `add_module("audio_input", …)` and `load_patch` both read it; `write_input(channels)`
