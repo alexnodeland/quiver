@@ -337,7 +337,10 @@ The take is saved with the patch, in `ModuleDef.state`:
 
 The samples are little-endian `f32` in base64: lossless, so a reloaded patch
 plays bit-identically. Loading validates the format, rate, counts, data length
-and that every sample is finite. An empty capture saves no state.
+and that every sample is finite. Patch JSON is untrusted, so the saved
+`capacity` never allocates memory the data does not back: the buffer becomes
+`min(capacity, max(length, the buffer the module already has))`. A take is at
+most `Capture::MAX_SECONDS` (60 s) long. An empty capture saves no state.
 
 ---
 
