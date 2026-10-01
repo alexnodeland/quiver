@@ -195,29 +195,39 @@ impl Biquad {
 ///
 /// # Behaviour
 ///
+/// Measured at 48 kHz and pinned by the tests:
+///
 /// - **Pitch** is a YIN estimate (absolute threshold [`YIN_THRESHOLD`](Self::YIN_THRESHOLD),
-///   parabolic interpolation on the raw difference), updated every 5 ms. Measured, and
-///   pinned by the tests: a steady sine anywhere in its band within ±1 cent; full-band
-///   white noise 20 dB below the tone within ±10 cents; 10 dB below (mid band) under
-///   10 cents RMS.
+///   parabolic interpolation on the raw difference), updated every 5 ms. A steady sine
+///   anywhere in its band reads within ±1 cent; with full-band white noise 20 dB below it,
+///   within ±10 cents; 10 dB below (mid band), under 10 cents RMS. A harmonic-rich tone (a
+///   band-limited sawtooth) reads within ±6 cents, worst near the band's top. A tone with
+///   no fundamental at all reads right mid-band, but in the top third of an octave of a
+///   band a weak or missing fundamental can read **an octave low**: pick the band so the
+///   notes sit below its top.
+/// - **Decays and swells.** Plucked and struck notes, which decay from their first sample,
+///   open the gate as promptly as held ones and read within 5 cents. A decay faster than
+///   about three periods per e-fold reads a little sharp (about `(P/T)²/4π²`: 11–13 cents
+///   for a 55 Hz pluck with a 50 ms decay). A swelling onset opens the gate at most 25 ms
+///   after an abrupt one (a 100 ms linear attack: 20, 5 and 5 ms later).
 /// - **Edges.** YIN's dip shifts once a frame holds the start or end of a sound, so an
 ///   estimate is used only when its frame held no silence before the onset (the level
-///   clock), its amplitude was steady across the frame, and the next frame shows the
-///   sound carried on past it. The pitch is therefore
-///   right (±1 cent) when the gate rises, and holds within ±5 cents after it falls, for
-///   notes two semitones or more above the band's floor, with abrupt or natural
-///   releases. Within the bottom two semitones an *abrupt* stop can leave the held pitch
-///   up to ~40 cents off (Low) or ~15 (High); a natural release stays within ~10.
+///   clock) and the next frame shows the sound carried on past it (see `conclude`). The
+///   pitch is therefore right (±1 cent) when the gate rises, and holds within ±5 cents
+///   after it falls (±10 after a slow release, which is itself a fast decay), for notes
+///   two semitones or more above the band's floor. Within the bottom two semitones a stop
+///   can leave the held pitch further off: up to ~40 cents after an abrupt stop in the low
+///   band, ~25 after a fast release in the high band.
 /// - **Gate** is decided at each estimate from the analysis frame's RMS (on the `level`
 ///   scale, so it does not ripple with the waveform). It opens with the first confirmed
 ///   estimate whose frame is at or above `threshold`, so `voct` already holds the new note
 ///   when it rises. It closes when the frame falls below half the threshold, or after a
 ///   frame's worth of unpitched estimates (long enough that a legato pitch change, whose
 ///   frames are briefly aperiodic, keeps it open). Noise does not open it.
-/// - **Latency**: the gate opens within a frame and three hops of an onset (measured 63,
-///   44 and 37 ms in the low, mid and high bands at 48 kHz) and closes within a window and
-///   three hops of the end (28, 23 and 23 ms); a legato change lands within a frame and
-///   three hops (43 ms, mid band).
+/// - **Latency**: the gate opens within a frame and three hops of an onset (63.4, 48.0 and
+///   40.8 ms in the low, mid and high bands) and closes within a window and three hops of
+///   the end (28.4, 28.0 and 25.8 ms); a legato change lands within a frame and three hops
+///   (43 ms, mid band).
 /// - **Cost**: 100, 160 and 300 ns per tick on average (low, mid, high; 0.5–1.4 % of one
 ///   core at 48 kHz, release build, Apple M-series). There is deliberately no
 ///   `tick_masked` shortcut: the analysis feeds every output (the gate needs the pitch
@@ -246,7 +256,10 @@ pub struct PitchTracker {
     frame_level: f64,
     /// The newest pitched estimate (V/Oct, Hz), waiting for the next frame to show the
     /// sound carried on past its frame (see [`conclude`](Self::conclude)).
-    pending: Option<(f64, f64)>,
+    pending: Option<(f64, f64, f64)>,
+    /// Whole-period power ratio of the last settled, pitched frame: the reference a
+    /// pending estimate's confirmation is measured against.
+    last_ratio: Option<f64>,
     /// Engine samples since the level last rose out of silence (a tenth of the gate
     /// threshold); saturates.
     sounding_for: usize,
@@ -281,8 +294,11 @@ impl PitchTracker {
     const MIN_WINDOW_SECONDS: f64 = 0.020;
 
     /// An estimate is used only if its frame's newest whole periods hold between these
-    /// multiples of its oldest periods' power: the amplitude was steady across the frame.
-    const STEADY: (f64, f64) = (0.7, 1.4);
+    /// multiples of its oldest periods' power. Wide on purpose: plucks (a power ratio of
+    /// 0.3–0.5 across a frame) and swells must pass, and YIN reads a decay only slightly
+    /// sharp. What it rejects is a release or attack of a few milliseconds, where the
+    /// bias reaches tens of cents.
+    const STEADY: (f64, f64) = (0.25, 4.0);
 
     /// RMS → `level` scale: a full-scale (5 V peak) sine reads 10 V.
     const LEVEL_PER_RMS: f64 = 2.0 * core::f64::consts::SQRT_2;
@@ -308,6 +324,7 @@ impl PitchTracker {
             frame: Vec::new(),
             frame_level: 0.0,
             pending: None,
+            last_ratio: None,
             sounding_for: 0,
             raw: Vec::new(),
             diff: Vec::new(),
@@ -400,6 +417,7 @@ impl PitchTracker {
         self.diff_sum = 0.0;
         self.frame_level = 0.0;
         self.pending = None;
+        self.last_ratio = None;
         self.sounding_for = 0;
         for stage in &mut self.lowpass {
             stage.z1 = 0.0;
@@ -497,20 +515,25 @@ impl PitchTracker {
     ///
     /// - **Onsets**: a frame is used only once its oldest sample postdates the moment
     ///   the level rose out of silence (`sounding_for`), so it holds no leading silence.
-    ///   This keys on the level, not the waveform, so slow swells are not penalised.
+    ///   This keys on the level, not the waveform; a swell's rising frames also have to
+    ///   pass [`STEADY`](Self::STEADY), so it opens the gate up to 25 ms later than an
+    ///   abrupt onset.
     /// - **Stops** cannot be seen in the frame that straddles them, but the next frame
     ///   holds exactly one hop more of whatever followed. So a pitched estimate waits one
-    ///   hop and is used only if the next frame's newest whole periods kept at least
-    ///   `1 − hop/span` of its oldest periods' power (less 1 %): the sound carried on past
-    ///   the end of the estimate's frame.
+    ///   hop and is used only if the next frame's power ratio (newest whole periods over
+    ///   oldest) is at least `1 − hop/span` (less 1 %) of the ratio of the frame *before*
+    ///   the estimate's, capped at 1. Measuring against the earlier frame lets a steady
+    ///   decay or swell, whose ratio repeats frame to frame, through, while a stop, which
+    ///   costs the ratio one more hop of silence each frame, is caught even when the
+    ///   estimate's own frame already straddles it.
     ///
     /// Costs one hop (5 ms) of latency; buys a pitch that is right when the gate rises
     /// and right after it falls.
     fn conclude(&mut self, threshold: f64) {
         let g = self.geometry;
-        if let Some((voct, hz)) = self.pending.take() {
+        if let Some((voct, hz, reference)) = self.pending.take() {
             let (ratio, span) = self.period_ratio(hz);
-            if ratio >= 1.0 - g.hop as f64 / span as f64 - 0.01 {
+            if ratio >= reference * (1.0 - g.hop as f64 / span as f64) - 0.01 {
                 self.voct = voct;
                 self.unpitched_run = 0;
                 if self.frame_level >= threshold {
@@ -525,11 +548,16 @@ impl PitchTracker {
             Some(hz) if settled => {
                 let (ratio, _) = self.period_ratio(hz);
                 if (Self::STEADY.0..=Self::STEADY.1).contains(&ratio) {
-                    self.pending = Some((Libm::<f64>::log2(hz / C4_HZ), hz));
+                    let reference = self.last_ratio.unwrap_or(ratio).min(1.0);
+                    self.pending = Some((Libm::<f64>::log2(hz / C4_HZ), hz, reference));
                 }
+                self.last_ratio = Some(ratio);
             }
-            Some(_) => {}
-            None => self.unpitched_run += 1,
+            Some(_) => self.last_ratio = None,
+            None => {
+                self.unpitched_run += 1;
+                self.last_ratio = None;
+            }
         }
         if self.gate
             && (self.frame_level < 0.5 * threshold || self.unpitched_run >= g.unpitched_hold)
@@ -758,10 +786,11 @@ mod tests {
     #[test]
     fn tracker_gate_follows_a_tone_burst() {
         // 100 ms silence, 500 ms tone, 300 ms silence, in every band.
-        for (range, hz) in [
-            (PitchRange::Low, 82.4),
-            (PitchRange::Mid, 330.0),
-            (PitchRange::High, 880.0),
+        // (band, Hz, documented open ms, documented close ms): the numbers in the docs.
+        for (range, hz, doc_on, doc_off) in [
+            (PitchRange::Low, 82.4, 63.4, 28.4),
+            (PitchRange::Mid, 330.0, 48.0, 28.0),
+            (PitchRange::High, 880.0, 40.8, 25.8),
         ] {
             let mut track = PitchTracker::new(SR).with_range(range);
             let frames = run(
@@ -779,7 +808,8 @@ mod tests {
             );
             // Opens within a frame and three hops of the onset (the frame must hold no
             // silence, then one hop to compute and one to confirm); closes within a
-            // window and three hops of the end. 63/44/37 ms open, 28/23/23 ms close.
+            // window and three hops of the end. And matches the documented figures, so
+            // the docs cannot go stale.
             let g = track.geometry;
             let ms = |samples: usize| samples as f64 / g.rate * 1000.0;
             let hop_ms = PitchTracker::HOP_SECONDS * 1000.0;
@@ -792,6 +822,10 @@ mod tests {
             assert!(
                 (0.0..=ms(g.window) + 3.0 * hop_ms).contains(&off_ms),
                 "{range:?}: closed {off_ms:.1} ms after offset"
+            );
+            assert!(
+                (on_ms - doc_on).abs() < 1.0 && (off_ms - doc_off).abs() < 1.0,
+                "{range:?}: {on_ms:.1}/{off_ms:.1} ms; the docs say {doc_on}/{doc_off}"
             );
             // The pitch is right when the gate rises, and held after it falls.
             let at_rise = cents(frames[edges[0]][0], hz);
@@ -806,6 +840,9 @@ mod tests {
         }
     }
 
+    /// Documented legato settling time, mid band (milliseconds).
+    const LEGATO_MS: f64 = 43.0;
+
     #[test]
     fn tracker_follows_a_legato_pitch_change() {
         // 220 Hz into 330 Hz with no gap: the gate stays high and the pitch moves.
@@ -819,17 +856,18 @@ mod tests {
             second.iter().all(|f| f[1] == GATE_HIGH_V),
             "gate dropped on a legato change"
         );
-        // The new pitch lands within a frame and three hops (43 ms measured, mid band).
+        // The new pitch lands within a frame and three hops (and as documented, ±1 ms).
         let g = track.geometry;
         let bound = g.frame_len() as f64 / g.rate + 3.0 * PitchTracker::HOP_SECONDS;
         let settled = second
             .iter()
             .position(|f| cents(f[0], 330.0).abs() < 5.0)
             .unwrap();
+        let settled_ms = settled as f64 / SR * 1000.0;
+        assert!(settled_ms < bound * 1000.0, "took {settled_ms} ms");
         assert!(
-            (settled as f64 / SR) < bound,
-            "took {} ms",
-            settled as f64 / SR * 1000.0
+            (settled_ms - LEGATO_MS).abs() < 1.0,
+            "{settled_ms} ms; the docs say {LEGATO_MS}"
         );
         assert!(cents(second.last().unwrap()[0], 330.0).abs() < 1.0);
     }
@@ -918,8 +956,8 @@ mod tests {
 
     /// Edges are where YIN goes wrong: once a frame holds a start or a stop, its dip
     /// shifts. Across stop alignments, abrupt and natural releases, and notes from two
-    /// semitones above each band's floor, the pitch is right when the gate rises and
-    /// right after it falls.
+    /// semitones above each band's floor, the pitch is right when the gate rises (±1
+    /// cent) and after it falls (±5 cents; ±10 after a 30 ms release).
     #[test]
     fn tracker_pitch_is_clean_at_note_edges() {
         for range in PitchRange::ALL {
@@ -956,11 +994,146 @@ mod tests {
                             at_rise.abs() < 1.0,
                             "{case}: {at_rise:.2} cents at the gate"
                         );
-                        assert!(held.abs() < 5.0, "{case}: held {held:.2} cents");
+                        // A slow release is a fast decay, and YIN reads a fast decay a
+                        // little sharp ((P/T)^2 / 4 pi^2): 6.8 cents measured at 78.6 Hz.
+                        let tolerance = if release > 0.02 { 10.0 } else { 5.0 };
+                        assert!(held.abs() < tolerance, "{case}: held {held:.2} cents");
                         assert_eq!(frames.last().unwrap()[1], 0.0, "{case}: gate closed");
                     }
                 }
             }
+        }
+    }
+
+    /// Render a tone with amplitude envelope `env(t)` (0 before `t = 0`) after 50 ms of
+    /// silence; return the gate-open time (ms after the onset), the cents at the gate's
+    /// rise, and the worst cents while the gate is high.
+    fn envelope_probe(range: PitchRange, hz: f64, env: &dyn Fn(f64) -> f64) -> (f64, f64, f64) {
+        let pad = 0.05 * SR;
+        let signal = (0..(0.65 * SR) as usize).map(|i| {
+            let t = (i as f64 - pad) / SR;
+            if t < 0.0 {
+                0.0
+            } else {
+                env(t) * Libm::<f64>::sin(2.0 * core::f64::consts::PI * hz * t)
+            }
+        });
+        let frames = run(&mut PitchTracker::new(SR).with_range(range), signal);
+        let rise = frames
+            .windows(2)
+            .position(|w| w[1][1] > w[0][1])
+            .expect("the gate opened")
+            + 1;
+        let open_ms = (rise as f64 - pad) / SR * 1000.0;
+        let worst = frames
+            .iter()
+            .filter(|f| f[1] > 0.0)
+            .map(|f| cents(f[0], hz).abs())
+            .fold(0.0, f64::max);
+        (open_ms, cents(frames[rise][0], hz), worst)
+    }
+
+    /// Plucked and struck notes decay from their first sample. They open the gate as
+    /// promptly as a held note, read within 5 cents, and a fast low pluck stays within
+    /// the documented decay bias.
+    #[test]
+    fn tracker_gates_decaying_plucks() {
+        for (range, hz, tau) in [
+            (PitchRange::Low, 110.0, 0.05),
+            (PitchRange::Low, 110.0, 0.15),
+            (PitchRange::Mid, 220.0, 0.03),
+            (PitchRange::Mid, 220.0, 0.05),
+            (PitchRange::High, 440.0, 0.02),
+            (PitchRange::High, 440.0, 0.05),
+        ] {
+            let g = PitchTracker::new(SR).with_range(range).geometry;
+            let bound = (g.frame_len() as f64 / g.rate + 3.0 * PitchTracker::HOP_SECONDS) * 1000.0;
+            let (open, rise, worst) =
+                envelope_probe(range, hz, &|t| 2.5 * Libm::<f64>::exp(-t / tau));
+            let case = format!("{range:?} {hz} Hz, tau {tau} s");
+            assert!(open <= bound, "{case}: opened at {open:.1} ms");
+            assert!(
+                rise.abs() < 5.0 && worst < 5.0,
+                "{case}: {rise:.2} / {worst:.2} cents"
+            );
+        }
+        // A fast decay near a band's floor reads sharp by about (P/T)^2 / 4 pi^2.
+        let (_, _, worst) = envelope_probe(PitchRange::Low, 55.0, &|t| {
+            2.5 * Libm::<f64>::exp(-t / 0.05)
+        });
+        assert!(worst < 15.0, "55 Hz, tau 50 ms: {worst:.2} cents");
+    }
+
+    /// A swelling onset opens the gate at most 25 ms after an abrupt one, on a pitch
+    /// within 5 cents.
+    #[test]
+    fn tracker_swells_open_promptly() {
+        for (range, hz) in [
+            (PitchRange::Low, 110.0),
+            (PitchRange::Mid, 220.0),
+            (PitchRange::High, 440.0),
+        ] {
+            let (abrupt, _, _) = envelope_probe(range, hz, &|_| 2.5);
+            for attack in [0.05, 0.1, 0.2] {
+                let (open, rise, _) = envelope_probe(range, hz, &|t| 2.5 * (t / attack).min(1.0));
+                let case = format!("{range:?} {hz} Hz, {attack} s attack");
+                assert!(
+                    open - abrupt <= 25.0,
+                    "{case}: {open:.1} ms against {abrupt:.1}"
+                );
+                assert!(rise.abs() < 5.0, "{case}: {rise:.2} cents");
+            }
+        }
+    }
+
+    /// Harmonic-rich tones (a band-limited sawtooth) read within 6 cents across each band,
+    /// worst near its top; a tone with no fundamental at all reads right mid-band.
+    #[test]
+    fn tracker_reads_harmonic_rich_tones() {
+        use core::f64::consts::PI;
+        for (range, freqs) in [
+            (PitchRange::Low, &[41.2, 110.0, 250.0, 480.0][..]),
+            (PitchRange::Mid, &[73.4, 220.0, 500.0, 950.0][..]),
+            (PitchRange::High, &[146.8, 440.0, 1000.0, 1900.0][..]),
+        ] {
+            for &hz in freqs {
+                let saw = (0..(0.4 * SR) as usize).map(|i| {
+                    let t = i as f64 / SR;
+                    let mut s = 0.0;
+                    let mut n = 1.0;
+                    while n * hz < 8_000.0 {
+                        s += Libm::<f64>::sin(2.0 * PI * n * hz * t) / n;
+                        n += 1.0;
+                    }
+                    1.6 * s
+                });
+                let frames = run(&mut PitchTracker::new(SR).with_range(range), saw);
+                let tail = &frames[frames.len() - (0.2 * SR) as usize..];
+                assert!(
+                    tail.iter().all(|f| f[1] == GATE_HIGH_V),
+                    "{range:?} {hz} Hz"
+                );
+                let worst = tail
+                    .iter()
+                    .map(|f| cents(f[0], hz).abs())
+                    .fold(0.0, f64::max);
+                assert!(worst < 6.0, "{range:?} {hz} Hz sawtooth: {worst:.2} cents");
+            }
+        }
+        for hz in [110.0, 220.0, 500.0] {
+            let missing = (0..(0.4 * SR) as usize).map(|i| {
+                let t = i as f64 / SR;
+                (2..=6)
+                    .map(|n| Libm::<f64>::sin(2.0 * PI * n as f64 * hz * t))
+                    .sum::<f64>()
+                    * 0.8
+            });
+            let frames = run(&mut PitchTracker::new(SR), missing);
+            let c = cents(frames.last().unwrap()[0], hz);
+            assert!(
+                c.abs() < 5.0,
+                "{hz} Hz without its fundamental: {c:.1} cents"
+            );
         }
     }
 }

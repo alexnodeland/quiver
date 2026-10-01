@@ -134,14 +134,23 @@ patch.connect(track.out("level"), vca.in_("cv"))?;
 Measured at 48 kHz and pinned by the module's tests:
 
 - A steady sine reads within ±1 cent anywhere in its band; with white noise
-  20 dB below it, within ±10 cents.
+  20 dB below it, within ±10 cents. A harmonic-rich tone (a band-limited
+  sawtooth) reads within ±6 cents, worst near the band's top. A tone with no
+  fundamental reads right mid-band, but **near a band's top a weak or missing
+  fundamental can read an octave low**: pick the band so the notes sit below
+  its top.
+- Plucked and struck notes open the gate as promptly as held ones and read
+  within 5 cents; a very fast decay at a low pitch reads a little sharp (11–13
+  cents for a 55 Hz pluck decaying in 50 ms). A swelling onset opens the gate
+  at most 25 ms after an abrupt one.
 - The gate opens on the first estimate whose analysis frame holds no silence
-  before the onset, its amplitude steady, confirmed by the next frame, so the
-  pitch is already right (±1 cent) when the gate rises. Opening takes 63, 44 and
-  37 ms (low, mid, high); closing after the sound ends, 28, 23 and 23 ms.
-- After the gate falls the pitch holds within ±5 cents for notes two semitones
-  or more above the band's floor. In a band's bottom two semitones an abrupt
-  stop can leave it up to ~40 cents (low) or ~15 (high) off.
+  before the onset, confirmed by the next frame, so the pitch is already right
+  (±1 cent) when the gate rises. Opening takes 63.4, 48.0 and 40.8 ms (low,
+  mid, high); closing after the sound ends, 28.4, 28.0 and 25.8 ms.
+- After the gate falls the pitch holds within ±5 cents (±10 after a slow
+  release) for notes two semitones or more above the band's floor. In a band's
+  bottom two semitones a stop can leave it further off: up to ~40 cents after
+  an abrupt stop (low band), ~25 after a fast release (high band).
 - Noise alone never opens the gate.
 
 The analysis is decimated and spread across ticks: about 100–300 ns per tick

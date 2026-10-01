@@ -79,11 +79,14 @@ or opt-in.
   with the difference function spread across ticks so the cost is flat (100–300 ns a tick
   at 48 kHz, no allocation in `tick` or on a band change). Outputs `voct`, `gate` and an RMS
   `level`; a `threshold` input sets the gate. An estimate only moves the pitch when its
-  frame holds no pre-onset silence, its amplitude is steady, and the next frame confirms the
-  sound carried on, so the pitch is right when the gate rises and when it falls. Tested on
-  sines in every band (±1 cent), white noise 20 dB down (±10 cents), noise alone (gate
-  stays shut), tone bursts (gate timing bounded per band), legato changes and note edges
-  across alignments and releases. Registered as `pitch_tracker` (category `Utilities`).
+  frame holds no pre-onset silence and the next frame confirms the sound carried on
+  (measured against the frame before, so steady decays and swells pass while stops do not),
+  so the pitch is right when the gate rises and when it falls. Tested on sines in every
+  band (±1 cent), white noise 20 dB down (±10 cents), harmonic-rich tones (±6 cents), a
+  missing fundamental mid-band, noise alone (gate stays shut), tone bursts (gate timing
+  bounded per band), plucks (decays from 20 ms), swells, legato changes and note edges
+  across alignments and releases. Near a band's top a weak fundamental can read an octave
+  low; the bottom two semitones of a band keep a documented residual after stops. Registered as `pitch_tracker` (category `Utilities`).
 - **`Capture`: record an input, play it back as a source** (`modules`, no_std). A
   fixed-size `f32` buffer (`Capture::new`: 4 s; `with_seconds`, up to 60 s) recorded by a
   `record` gate (each take starts at the top; a full buffer stops it) and played like
