@@ -29,7 +29,7 @@ src/
 ├── polyphony.rs        # Voice allocation, PolyPatch, unison
 ├── simd.rs             # SIMD block processing, AudioBlock, RingBuffer
 ├── rng.rs              # no_std compatible RNG
-├── io.rs               # External I/O (AtomicF64, ExternalInput) [alloc]
+├── io.rs               # External I/O (AtomicF64, ExternalInput, AudioInput) [alloc]
 ├── observer.rs         # Real-time state bridge for GUIs [alloc]
 ├── introspection.rs    # GUI parameter discovery [alloc]
 ├── introspection_impls.rs  # ModuleIntrospection implementations [alloc]
@@ -288,6 +288,7 @@ On main branch only (expensive checks):
 - `FormantOsc` - Formant oscillator for vocal sounds
 - `KarplusStrong` - Physical modeling string synthesis
 - `SamplePlayer` - Mono sample playback with V/Oct pitch, start position, and looping
+- `Capture` - Records its input into a fixed buffer and plays it back (record, play, loop, V/Oct); the take serializes with the patch
 
 ### Filters
 - `Svf` - State-variable filter (LP, HP, BP, Notch)
@@ -296,6 +297,7 @@ On main branch only (expensive checks):
 ### Envelopes & Dynamics
 - `Adsr` - Attack-Decay-Sustain-Release envelope
 - `EnvelopeFollower` - Amplitude follower
+- `PitchTracker` - Pitch (YIN), gate and level from an audio signal (play a patch with a voice)
 - `Compressor` - Dynamic range compressor (sidechain input)
 - `Limiter` - Brick-wall limiter (sidechain input)
 - `NoiseGate` - Noise gate (sidechain input)
@@ -358,7 +360,8 @@ On main branch only (expensive checks):
 - `Crosstalk` - Channel crosstalk simulation
 - `GroundLoop` - Ground loop hum simulation
 
-### Output
+### Input & Output
+- `AudioInput` - Host audio in, block-fed from an `AudioInputStream` (left, right, or both; fans out to any number of nodes)
 - `StereoOutput` - Stereo output module
 
 ## Patch Serialization

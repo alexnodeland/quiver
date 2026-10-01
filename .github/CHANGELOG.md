@@ -10,12 +10,52 @@ Sections above the auto-generated marker are hand-written and are preserved.
 
 ## [0.4.0] - unreleased
 
-A correctness pass driven by the September 2026 stack audit (findings Q-N1 … Q-N8).
+A correctness pass driven by the September 2026 stack audit (findings Q-N1 … Q-N8), and
+audio in: `AudioInput` (a block-fed host input that fans out to any number of nodes),
+`PitchTracker` (pitch, gate and level from a signal) and `Capture` (record and play
+back), plus the WASM worklet input that feeds them. The audio-in modules add API without
+changing any (their prelude names aside, see *Breaking*); the numeric notes below concern
+the audit fixes.
+
 Unlike 0.2.0, this release is **not bit-exact** for every patch: two DSP fixes change
 rendered samples, and `tests/golden_vectors.rs` was rebaselined for exactly one of its
 five existing patches, deliberately and with the reason recorded in the file. Everything
 else that touches audio is either bit-identical (verified by the unchanged golden hashes)
 or opt-in.
+
+### Breaking
+
+What can stop compiling, or sound different, for code written against 0.3.3:
+
+- **The `rand` feature is gone.** It was the implicit feature of an optional `rand`
+  dependency nothing used. *Migration:* drop `features = ["rand"]`.
+- **`PatchDef.parameters` is a `BTreeMap<String, f64>`** (was a `HashMap` under `std`).
+  *Migration:* code that names the type or uses `HashMap`-only methods changes type;
+  iteration is now sorted.
+- **`Patch::set_param_by_id` returns `false` for a cabled control input.** The value is
+  still recorded and applies once the cable is removed. *Migration:* do not read `false`
+  as "no such parameter" for a port that has a cable on it.
+- **WASM: `QuiverEngine::set_observer_interval` is a no-op.** The observer captures every
+  sample while a port is subscribed; formatting happens in `poll_updates`.
+- **Rendered audio changes** (see *Numerics* below): `KarplusStrong` at every `stretch`;
+  a `DelayLine` or `UnitDelay` fed by an acyclic path no longer adds a sample of latency;
+  non-finite input to `PitchShifter`, `Granular` and `Wavefolder` now renders as silence;
+  and `Patch::set_param_by_id` during a render no longer recompiles the patch, whose
+  recompile used to reset the routing buffers, so a patch with a feedback cycle whose
+  parameters change mid-render sounds different (its cycle-breaker's feedback path is
+  no longer blanked for a sample).
+- **`Arpeggiator::reset` and `Granular::reset` rewind their random streams**, so a reset
+  module repeats its sequence instead of continuing it.
+- **`DelayLine::with_max_delay` clamps** its argument to `0.001..=60` s (a non-finite
+  value means the 2 s default); it was unbounded.
+- **The MDK harness is stricter.** `ModuleTestHarness::new` seeds the module under test,
+  and the stability, output-range and NaN-recovery checks drive Gate/Trigger/Clock inputs
+  with a pulse train, so a trigger-driven module is actually exercised and can fail checks
+  it used to pass untouched.
+- **The prelude has new names** that can clash with your own in code that
+  glob-imports `quiver::prelude::*`: `AudioInput`, `AudioInputStream`, `InputChannel`,
+  `Capture`, `PitchTracker`, `PitchRange`, `ModuleRng` and `derive_seed`. *Migration:*
+  import the clashing name explicitly, or qualify one of them.
 
 ### Numerics — what changed and what did not
 
@@ -49,6 +89,61 @@ or opt-in.
 
 ### Added
 
+- **Audio in: `AudioInput` and `AudioInputStream`** (`io`, alloc tier). The host writes a
+  block of samples per channel into an `Arc<AudioInputStream>` before each process call —
+  `write(&[&[f32]])` planar, like `PluginProcessor::process`, or
+  `write_interleaved(&[f32], channels)` — and each `AudioInput` on the stream plays it back
+  one frame per tick, on `out` (the `channel` select: left, right, or both mixed at equal
+  gain), `left` and `right`, with a bounded `gain` input. Host `±1.0` becomes `±5 V`
+  (`AudioInput::FULL_SCALE_VOLTS`); the WASM engine's older `audio_in` `ExternalInput`
+  stays unscaled. Any number of inputs may read one stream's shared, double-buffered block,
+  in one of two ways chosen when the stream is built: `AudioInputStream::new` gives each
+  reader its own cursor, which keeps **voice-major** hosts in step (each voice renders whole
+  blocks, or sits whole blocks out); `AudioInputStream::with_host_clock` makes every reader
+  read the frame the host names (`advance()` per rendered frame, or `set_frame`), which keeps
+  **frame-by-frame** hosts in step when voices start or resume mid-block (`PolyPatch`, an
+  offline render) and plays whole clips. Underrun is silence, overrun drops the unread frames
+  (latency ≤ one block), a new or reset cursor reader starts with the next block, and
+  non-finite samples are written as silence. Lock-free and allocation-free on both sides
+  (`tests/zero_alloc.rs` now feeds its patch through one); a writer on another thread is
+  sound, and a reader it laps outputs silence rather than a torn frame. Registered as
+  `audio_input` (category `I/O`); `ModuleRegistry::register_audio_input(stream)` binds every
+  `audio_input` the registry builds — `from_def` included — to the host's stream, and an
+  unbound one is silent.
+- **`PitchTracker`: pitch, gate and level from an audio signal** (`modules`, no_std). YIN on a
+  decimated copy of the input, one of three bands (`range`: 40–500, 70–1000, 140–2000 Hz),
+  with the difference function spread across ticks so the cost is flat (100–300 ns a tick
+  at 48 kHz, no allocation in `tick` or on a band change). Outputs `voct`, `gate` and an RMS
+  `level`; a `threshold` input sets the gate. An estimate only moves the pitch when its
+  frame holds no pre-onset silence and the next frame confirms the sound carried on
+  (measured against the frame before, so steady decays and swells pass while stops do not),
+  so the pitch is right when the gate rises and when it falls. Tested on sines in every
+  band (±1 cent), white noise 20 dB down (±10 cents), harmonic-rich tones (±6 cents), a
+  missing fundamental mid-band, white noise alone (gate stays shut), tone bursts (gate timing
+  bounded per band), plucks (decays from 20 ms), swells, legato changes and note edges
+  across alignments and releases. Near a band's top a weak fundamental can read an octave
+  low; the bottom two semitones of a band keep a documented residual after stops. Registered as `pitch_tracker` (category `Utilities`).
+- **`Capture`: record an input, play it back as a source** (`modules`, no_std). A
+  fixed-size `f32` buffer (`Capture::new`: 4 s; `with_seconds`, up to 60 s) recorded by a
+  `record` gate (each take starts at the top; a full buffer stops it) and played like
+  `SamplePlayer` (`trig`, `gate`, `loop`, `voct`, `eos`), at the speed it was recorded
+  whatever the graph's rate. Recording and playback never allocate (`tests/zero_alloc.rs`
+  records and plays inside the counted window). The take serializes with the patch in
+  `ModuleDef.state` as lossless little-endian `f32` base64 with its rate, length and
+  capacity. `from_def` loads every state a `Capture` can save, and clamps the saved
+  capacity to `[length, max(length, its own buffer)]`, so a file cannot allocate more
+  than its data backs. A reloaded patch plays bit-identically.
+  `reset()` keeps the take. Registered as `capture` (category `Oscillators`).
+  `SamplePlayer`'s cubic read moved to a shared helper (same arithmetic, bit-identical).
+- **WASM / npm: the worklet's input reaches `audio_input` modules.** `QuiverEngine` owns a
+  stereo `AudioInputStream` (`AUDIO_INPUT_MAX_FRAMES` = 4096) bound into its registry, so
+  `add_module("audio_input", …)` and `load_patch` both read it; `write_input(channels)`
+  takes an `AudioWorkletProcessor`'s `inputs[0]` (one `Float32Array` per channel) and copies
+  it into preallocated memory. The worklet calls it every quantum its input is connected,
+  before rendering; `addModule('audio_input', name)` on the main-thread handle is all a page
+  needs. The 0.3.1 `audio_in` / `process_block_with_input` path is unchanged. Covered by a
+  native engine test and a real-worklet Playwright test (`worklet-integration.spec.ts`,
+  `OfflineAudioContext`, sample-exact).
 - **Per-module random streams.** `GraphModule::seed(&mut self, seed: u64)` (default
   no-op) and `Patch::seed(u64)`, which derives a distinct seed per node
   (`rng::derive_seed`) and re-applies it on `Patch::reset()` and to nodes added later;

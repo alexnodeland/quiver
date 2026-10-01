@@ -288,6 +288,64 @@ let sp = patch.add("sp", SamplePlayer::empty(44100.0));
 
 ---
 
+## Capture
+
+Records its input into a fixed-size buffer and plays the recording back like a
+`SamplePlayer`: resample a signal (an `AudioInput`, or the patch itself) and
+play it as a source. `type_id`: `capture`.
+
+```rust,ignore
+let cap = patch.add("cap", Capture::new(44100.0));           // 4 s buffer
+let cap = patch.add("cap", Capture::with_seconds(44100.0, 10.0));
+patch.connect(mic.out("out"), cap.in_("in"))?;
+patch.connect(env_gate, cap.in_("gate"))?;                  // play while held
+patch.connect(keyboard_voct, cap.in_("voct"))?;             // pitched playback
+```
+
+### Inputs
+
+| Port | Signal | Range | Description |
+|------|--------|-------|-------------|
+| `in` | Audio | ±5V | Signal to record |
+| `record` | Gate | 0/5V | Rising edge starts a new take from the top of the buffer; falling edge (or a full buffer) stops it |
+| `trig` | Trigger | 0/5V | Rising edge plays the take to its end |
+| `gate` | Gate | 0/5V | Plays while high |
+| `voct` | V/Oct | ±5V | Playback pitch (0V = recorded speed) |
+| `loop` | Gate | 0/5V | Playback wraps while high |
+
+### Outputs
+
+| Port | Signal | Description |
+|------|--------|-------------|
+| `out` | Audio | Playback |
+| `eos` | Trigger | End of a one-shot, or each loop wrap |
+
+### The recording
+
+The buffer is allocated at construction (`f32`); recording and playback never
+allocate. A take remembers the sample rate it was made at and plays at the right
+speed if the graph's rate changes. `reset()` stops recording and playback but
+keeps the take. The host can read it (`recording()`), replace it
+(`set_recording(&samples, rate)`, e.g. with an audition clip) or `clear()` it.
+
+The take is saved with the patch, in `ModuleDef.state`:
+
+```json
+{ "format": "f32le-base64", "sample_rate": 48000.0,
+  "capacity": 192000, "length": 96000, "data": "AAAAAM3MzD0..." }
+```
+
+The samples are little-endian `f32` in base64: lossless, so a reloaded patch
+plays bit-identically. Every state a `Capture` can save loads back, whatever its
+rate or length. Patch JSON is untrusted, so the saved `capacity` is only a
+request: the buffer becomes `capacity` clamped to
+`[length, max(length, the buffer the module already has)]`, and never allocates
+memory the data does not back. Loading rejects another format, a rate that is
+not positive and finite, data that is not base64, a `length` that disagrees with
+the data, and non-finite samples. An empty capture saves no state.
+
+---
+
 ## Common Patterns
 
 ### Detuned Oscillators

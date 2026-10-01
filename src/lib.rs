@@ -170,6 +170,8 @@ pub mod prelude {
     pub use crate::modules::{
         Ducker, MidSideDecode, MidSideEncode, Oversample, Oversampler, SamplePlayer, Wavefolder,
     };
+    // Audio in (RFC-008 in Auracle): pitch/gate/level tracking and resampling.
+    pub use crate::modules::{Capture, PitchRange, PitchTracker};
 
     // Analog Modeling
     pub use crate::analog::{noise, saturation, AnalogVco, ComponentModel, ThermalModel};
@@ -199,7 +201,10 @@ pub mod prelude {
     // External I/O (works with alloc via core::sync::atomic + alloc::sync::Arc)
     #[cfg(feature = "alloc")]
     #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
-    pub use crate::io::{AtomicF64, ExternalInput, ExternalOutput, MidiState};
+    pub use crate::io::{
+        AtomicF64, AudioInput, AudioInputStream, ExternalInput, ExternalOutput, InputChannel,
+        MidiState,
+    };
 
     // Introspection API (GUI parameter discovery)
     #[cfg(feature = "alloc")]

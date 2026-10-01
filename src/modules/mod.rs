@@ -5,6 +5,7 @@
 
 pub(crate) mod common;
 
+mod analysis;
 mod dynamics;
 mod filters;
 mod nonlinear;
@@ -15,6 +16,7 @@ mod stereo;
 mod timefx;
 mod utilities;
 
+pub use analysis::*;
 pub use dynamics::*;
 pub use filters::*;
 pub use nonlinear::*;

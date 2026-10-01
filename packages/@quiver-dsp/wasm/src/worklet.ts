@@ -230,13 +230,19 @@ class QuiverProcessor extends AudioWorkletProcessor {
     const right = output[1];
     const numSamples = left.length;
 
-    // When the node has a connected input, feed channel 0 through the patch's
-    // `audio_in` module (see `add_audio_input`); a mono treatment is deliberate —
-    // effect-style patches decide their own stereo story. With no input, render
-    // as a pure generator.
-    const inputChannel = inputs[0]?.[0];
+    // When the node has a connected input, hand every channel of it to the
+    // engine's input stream first: each `audio_input` module in the patch plays
+    // this quantum's block back during the render below (a mono input fills
+    // both channels). Separately, the older `audio_in` module is fed channel 0
+    // per sample by `process_block_with_input` (see `add_audio_input`). With no
+    // input, render as a pure generator.
+    const input = inputs[0];
+    const inputChannel = input?.[0];
 
     try {
+      if (input && input.length > 0) {
+        this.engine.write_input(input);
+      }
       // View into WASM memory — read it immediately, before any other engine call.
       const stereo =
         inputChannel && inputChannel.length === numSamples

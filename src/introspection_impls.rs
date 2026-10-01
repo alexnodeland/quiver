@@ -13,14 +13,15 @@ use crate::introspection::{ControlType, ModuleIntrospection, ParamCurve, ParamIn
 
 use crate::analog::{AnalogVco, Saturator, Wavefolder};
 use crate::modules::{
-    Adsr, Arpeggiator, Attenuverter, BernoulliGate, Bitcrusher, ChordMemory, Chorus, Clock,
-    Comparator, Compressor, Crossfader, Crosstalk, DelayLine, DiodeLadderFilter, Distortion,
+    Adsr, Arpeggiator, Attenuverter, BernoulliGate, Bitcrusher, Capture, ChordMemory, Chorus,
+    Clock, Comparator, Compressor, Crossfader, Crosstalk, DelayLine, DiodeLadderFilter, Distortion,
     Ducker, EnvelopeFollower, Euclidean, Flanger, FormantOsc, Granular, GroundLoop, KarplusStrong,
     Lfo, Limiter, LogicAnd, LogicNot, LogicOr, LogicXor, Max, MidSideDecode, MidSideEncode, Min,
     Mixer, Multiple, NoiseGate, NoiseGenerator, Offset, Oversample, ParametricEq, Phaser,
-    PitchShifter, PrecisionAdder, Quantizer, Rectifier, Reverb, RingModulator, SampleAndHold,
-    SamplePlayer, Scale, ScaleQuantizer, SlewLimiter, StepSequencer, StereoOutput, Supersaw, Svf,
-    Tremolo, UnitDelay, VcSwitch, Vca, Vco, Vibrato, Vocoder, Wavetable,
+    PitchRange, PitchShifter, PitchTracker, PrecisionAdder, Quantizer, Rectifier, Reverb,
+    RingModulator, SampleAndHold, SamplePlayer, Scale, ScaleQuantizer, SlewLimiter, StepSequencer,
+    StereoOutput, Supersaw, Svf, Tremolo, UnitDelay, VcSwitch, Vca, Vco, Vibrato, Vocoder,
+    Wavetable,
 };
 
 // =============================================================================
@@ -105,6 +106,9 @@ impl ModuleIntrospection for Vibrato {}
 // state is an optional custom-scale table (a `&[cents]` list, not a scalar value), which is
 // intentionally excluded from the value-typed parameter surface.
 impl ModuleIntrospection for ScaleQuantizer {}
+// Capture's controls (record, play, loop, pitch) are ports; its recording is not a scalar
+// parameter and travels in `ModuleDef.state` instead.
+impl ModuleIntrospection for Capture {}
 
 /// Map an [`Oversample`] factor (1/2/4) to a select index (0/1/2) and back. Shared by the
 /// waveshaping modules whose only non-port parameter is their opt-in oversampling factor.
@@ -408,6 +412,26 @@ impl ModuleIntrospection for Ducker {
             }
             "thresh" => {
                 self.set_threshold(value);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl ModuleIntrospection for PitchTracker {
+    fn param_infos(&self) -> Vec<ParamInfo> {
+        // `threshold` is a CV port (discovered through the port system); the band is the
+        // one internal, discrete choice.
+        vec![ParamInfo::select("range", "Range", 3)
+            .with_default(PitchRange::default().index() as f64)
+            .with_value(self.range().index() as f64)]
+    }
+
+    fn set_param_by_id(&mut self, id: &str, value: f64) -> bool {
+        match (id, PitchRange::from_index(value)) {
+            ("range", Some(range)) => {
+                self.set_range(range);
                 true
             }
             _ => false,

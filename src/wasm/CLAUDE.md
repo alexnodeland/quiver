@@ -36,6 +36,13 @@ names below are the exact JS names (wasm-bindgen snake_cases them from Rust).
   *view into WASM memory*, valid only until the next engine call or `free()`. Copy
   it immediately (`Array.from(...)`, `myBuf.set(...)`) if you need to retain it.
   Output is safety-clamped to ±10V.
+- `write_input(channels)` → `number` — publish the host's input block for the next
+  render: an array of one `Float32Array` per channel (an AudioWorklet's `inputs[0]`).
+  Every `audio_input` module (from `add_module` or `load_patch`; the engine's registry
+  is bound to its stereo stream) plays it back one frame per tick, scaled ±1.0 → ±5 V.
+  A mono block fills both channels; at most `AUDIO_INPUT_MAX_FRAMES` (4096) frames;
+  rendering past the block gives silence. Copies into preallocated memory (no
+  allocation). The worklet calls it every quantum its input is connected.
 - `reset()` — reset all module state
 - `compile()` — explicitly compile (usually unnecessary: `tick`/`process_block`
   lazily recompile a dirty graph). Surfaces compile errors eagerly.

@@ -257,6 +257,10 @@ let input = patch.add("pitch", ExternalInput::voct(Arc::clone(&cv)));
 |------|--------|-------------|
 | `out` | Varies | External value |
 
+For audio from the host (a microphone, a line input, a worklet input), use
+[`AudioInput`](./io-modules.md#audioinput), which takes a block per process call
+instead of one value per tick.
+
 ---
 
 ## Mid/Side Encode

@@ -134,6 +134,16 @@ let pitch = patch.add("pitch", ExternalInput::voct(pitch_arc));
 
 **Solution**: Use `Offset` for static values, or re-add ExternalInputs after loading.
 
+`AudioInput` (host audio in) is different: it is registered as `audio_input`, so it
+round-trips. Its stream still cannot be serialized, so bind the host's stream in the
+registry before loading and every loaded `audio_input` reads it:
+
+```rust,ignore
+let mut registry = ModuleRegistry::new();
+registry.register_audio_input(Arc::clone(&input_stream));
+let patch = Patch::from_def(&def, &registry, 44100.0)?;
+```
+
 ## Patch Metadata
 
 Describe a patch either on the live `Patch` via `PatchMeta` (which survives a
