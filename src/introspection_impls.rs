@@ -18,9 +18,10 @@ use crate::modules::{
     Ducker, EnvelopeFollower, Euclidean, Flanger, FormantOsc, Granular, GroundLoop, KarplusStrong,
     Lfo, Limiter, LogicAnd, LogicNot, LogicOr, LogicXor, Max, MidSideDecode, MidSideEncode, Min,
     Mixer, Multiple, NoiseGate, NoiseGenerator, Offset, Oversample, ParametricEq, Phaser,
-    PitchShifter, PrecisionAdder, Quantizer, Rectifier, Reverb, RingModulator, SampleAndHold,
-    SamplePlayer, Scale, ScaleQuantizer, SlewLimiter, StepSequencer, StereoOutput, Supersaw, Svf,
-    Track, TrackRange, Tremolo, UnitDelay, VcSwitch, Vca, Vco, Vibrato, Vocoder, Wavetable,
+    PitchRange, PitchShifter, PitchTracker, PrecisionAdder, Quantizer, Rectifier, Reverb,
+    RingModulator, SampleAndHold, SamplePlayer, Scale, ScaleQuantizer, SlewLimiter, StepSequencer,
+    StereoOutput, Supersaw, Svf, Tremolo, UnitDelay, VcSwitch, Vca, Vco, Vibrato, Vocoder,
+    Wavetable,
 };
 
 // =============================================================================
@@ -418,17 +419,17 @@ impl ModuleIntrospection for Ducker {
     }
 }
 
-impl ModuleIntrospection for Track {
+impl ModuleIntrospection for PitchTracker {
     fn param_infos(&self) -> Vec<ParamInfo> {
         // `threshold` is a CV port (discovered through the port system); the band is the
         // one internal, discrete choice.
         vec![ParamInfo::select("range", "Range", 3)
-            .with_default(TrackRange::default().index() as f64)
+            .with_default(PitchRange::default().index() as f64)
             .with_value(self.range().index() as f64)]
     }
 
     fn set_param_by_id(&mut self, id: &str, value: f64) -> bool {
-        match (id, TrackRange::from_index(value)) {
+        match (id, PitchRange::from_index(value)) {
             ("range", Some(range)) => {
                 self.set_range(range);
                 true

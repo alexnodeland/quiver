@@ -94,14 +94,14 @@ let follower = patch.add("follow", EnvelopeFollower::new(44100.0));
 
 ---
 
-## Track
+## PitchTracker
 
 Pitch, gate and level from an audio signal: play a patch with a voice or an
-instrument. Pitch is estimated with YIN. `type_id`: `track`.
+instrument. Pitch is estimated with YIN. `type_id`: `pitch_tracker`.
 
 ```rust,ignore
 let mic = patch.add("mic", AudioInput::new(Arc::clone(&input)));
-let track = patch.add("track", Track::new(44100.0));
+let track = patch.add("tracker", PitchTracker::new(44100.0));
 patch.connect(mic.out("out"), track.in_("in"))?;
 patch.connect(track.out("voct"), vco.in_("voct"))?;
 patch.connect(track.out("gate"), env.in_("gate"))?;

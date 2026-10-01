@@ -1,6 +1,6 @@
-//! Signal analysis: [`Track`], a pitch, gate and level tracker.
+//! Signal analysis: [`PitchTracker`], a pitch, gate and level tracker.
 //!
-//! `Track` turns a monophonic audio signal (a voice, an instrument, a captured
+//! `PitchTracker` turns a monophonic audio signal (a voice, an instrument, a captured
 //! input) into the three signals that play a patch like a keyboard: a V/Oct
 //! pitch, a gate and a level. Pitch is estimated with YIN (de Cheveigné and
 //! Kawahara, *YIN, a fundamental frequency estimator for speech and music*,
@@ -10,8 +10,8 @@
 //!
 //! YIN's difference function costs `W · τmax` multiply-adds per estimate. Computed
 //! in one tick that is a burst of tens of thousands of operations every few
-//! milliseconds. `Track` instead spreads it evenly: it low-passes and decimates the
-//! input to an analysis rate chosen per [`TrackRange`] (so every band has the same
+//! milliseconds. `PitchTracker` instead spreads it evenly: it low-passes and decimates the
+//! input to an analysis rate chosen per [`PitchRange`] (so every band has the same
 //! lag count, about 170), snapshots a frame every 5 ms, and computes a fixed
 //! number of lags per tick until the next snapshot. The per-tick cost is bounded:
 //! at most one or two lags of a window (`W` = 150–480 analysis samples) per tick,
@@ -25,13 +25,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use libm::Libm;
 
-/// The pitch band a [`Track`] searches.
+/// The pitch band a [`PitchTracker`] searches.
 ///
 /// Each band is about 3.6–3.8 octaves wide and is analysed at its own decimated
 /// rate, so the lowest pitch spans the same number of analysis samples in every
 /// band and the cost does not depend on the band.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TrackRange {
+pub enum PitchRange {
     /// 40–500 Hz: bass instruments, low voices.
     Low,
     /// 70–1000 Hz: voices, guitar, most melodic instruments.
@@ -41,45 +41,45 @@ pub enum TrackRange {
     High,
 }
 
-impl TrackRange {
+impl PitchRange {
     /// Lowest and highest pitch searched, in Hz.
     pub fn bounds(self) -> (f64, f64) {
         match self {
-            TrackRange::Low => (40.0, 500.0),
-            TrackRange::Mid => (70.0, 1000.0),
-            TrackRange::High => (140.0, 2000.0),
+            PitchRange::Low => (40.0, 500.0),
+            PitchRange::Mid => (70.0, 1000.0),
+            PitchRange::High => (140.0, 2000.0),
         }
     }
 
     /// Target analysis rate: the input is decimated to roughly this rate.
     fn analysis_rate(self) -> f64 {
         match self {
-            TrackRange::Low => 6_000.0,
-            TrackRange::Mid => 12_000.0,
-            TrackRange::High => 24_000.0,
+            PitchRange::Low => 6_000.0,
+            PitchRange::Mid => 12_000.0,
+            PitchRange::High => 24_000.0,
         }
     }
 
     /// The `range` parameter value: `0` low, `1` mid, `2` high.
     pub fn index(self) -> usize {
         match self {
-            TrackRange::Low => 0,
-            TrackRange::Mid => 1,
-            TrackRange::High => 2,
+            PitchRange::Low => 0,
+            PitchRange::Mid => 1,
+            PitchRange::High => 2,
         }
     }
 
     /// Inverse of [`index`](Self::index); rounds, and is `None` out of range.
     pub fn from_index(value: f64) -> Option<Self> {
         match libm::round(value) as i64 {
-            0 => Some(TrackRange::Low),
-            1 => Some(TrackRange::Mid),
-            2 => Some(TrackRange::High),
+            0 => Some(PitchRange::Low),
+            1 => Some(PitchRange::Mid),
+            2 => Some(PitchRange::High),
             _ => None,
         }
     }
 
-    const ALL: [TrackRange; 3] = [TrackRange::Low, TrackRange::Mid, TrackRange::High];
+    const ALL: [PitchRange; 3] = [PitchRange::Low, PitchRange::Mid, PitchRange::High];
 }
 
 /// Analysis geometry for one band at one sample rate, in analysis samples.
@@ -105,7 +105,7 @@ struct Geometry {
 }
 
 impl Geometry {
-    fn new(range: TrackRange, sample_rate: f64) -> Self {
+    fn new(range: PitchRange, sample_rate: f64) -> Self {
         let (f_min, f_max) = range.bounds();
         let decim = (Libm::<f64>::round(sample_rate / range.analysis_rate()) as usize).max(1);
         let rate = sample_rate / decim as f64;
@@ -113,8 +113,9 @@ impl Geometry {
         let tau_min = ((rate / f_max) as usize).max(2);
         // At least one longest period, and at least 20 ms: YIN's bias near an amplitude
         // edge and its variance in noise both shrink as the window grows.
-        let window = tau_max.max(Libm::<f64>::round(rate * Track::MIN_WINDOW_SECONDS) as usize);
-        let hop = (Libm::<f64>::round(rate * Track::HOP_SECONDS) as usize).max(1);
+        let window =
+            tau_max.max(Libm::<f64>::round(rate * PitchTracker::MIN_WINDOW_SECONDS) as usize);
+        let hop = (Libm::<f64>::round(rate * PitchTracker::HOP_SECONDS) as usize).max(1);
         let ticks_per_hop = hop * decim;
         Self {
             decim,
@@ -190,7 +191,7 @@ impl Biquad {
 /// | `level` | CV unipolar | RMS level (two-pole, 10 ms), scaled so a full-scale ±5 V sine reads 10 V |
 ///
 /// The `range` parameter (an introspection `select`: `0` low, `1` mid, `2` high,
-/// default mid) picks the band searched; see [`TrackRange`].
+/// default mid) picks the band searched; see [`PitchRange`].
 ///
 /// # Behaviour
 ///
@@ -222,9 +223,9 @@ impl Biquad {
 ///   `tick_masked` shortcut: the analysis feeds every output (the gate needs the pitch
 ///   estimates, the pitch needs the level clock), so it must run whichever outputs are
 ///   cabled.
-pub struct Track {
+pub struct PitchTracker {
     sample_rate: f64,
-    range: TrackRange,
+    range: PitchRange,
     geometry: Geometry,
     /// Two cascaded biquads: a 4th-order Butterworth anti-alias low-pass at 80 % of the
     /// analysis Nyquist. Bypassed when there is no decimation.
@@ -268,7 +269,7 @@ pub struct Track {
     spec: PortSpec,
 }
 
-impl Track {
+impl PitchTracker {
     /// YIN's absolute threshold on the cumulative-mean-normalised difference: an
     /// estimate is pitched when its aperiodicity is below this.
     pub const YIN_THRESHOLD: f64 = 0.15;
@@ -293,7 +294,7 @@ impl Track {
         } else {
             44_100.0
         };
-        let range = TrackRange::default();
+        let range = PitchRange::default();
         let mut track = Self {
             sample_rate,
             range,
@@ -334,14 +335,14 @@ impl Track {
     }
 
     /// Builder form of [`set_range`](Self::set_range).
-    pub fn with_range(mut self, range: TrackRange) -> Self {
+    pub fn with_range(mut self, range: PitchRange) -> Self {
         self.set_range(range);
         self
     }
 
     /// Choose the pitch band. Restarts the analysis (the history no longer matches the
     /// new analysis rate) but keeps the held pitch; never allocates.
-    pub fn set_range(&mut self, range: TrackRange) {
+    pub fn set_range(&mut self, range: PitchRange) {
         if range != self.range {
             self.range = range;
             self.geometry = Geometry::new(range, self.sample_rate);
@@ -351,14 +352,14 @@ impl Track {
     }
 
     /// The pitch band searched.
-    pub fn range(&self) -> TrackRange {
+    pub fn range(&self) -> PitchRange {
         self.range
     }
 
     /// Size buffers for every band at the current rate (so `set_range` never
     /// allocates), and derive the filters and the level smoother.
     fn configure(&mut self) {
-        let geometries = TrackRange::ALL.map(|r| Geometry::new(r, self.sample_rate));
+        let geometries = PitchRange::ALL.map(|r| Geometry::new(r, self.sample_rate));
         let largest_frame = geometries
             .iter()
             .map(Geometry::frame_len)
@@ -538,13 +539,13 @@ impl Track {
     }
 }
 
-impl Default for Track {
+impl Default for PitchTracker {
     fn default() -> Self {
         Self::new(44_100.0)
     }
 }
 
-impl GraphModule for Track {
+impl GraphModule for PitchTracker {
     fn port_spec(&self) -> &PortSpec {
         &self.spec
     }
@@ -620,7 +621,7 @@ impl GraphModule for Track {
     }
 
     fn type_id(&self) -> &'static str {
-        "track"
+        "pitch_tracker"
     }
 
     crate::impl_introspect!();
@@ -634,7 +635,7 @@ mod tests {
     const SR: f64 = 48_000.0;
 
     /// Feed `samples` and return the `[voct, gate, level]` after each.
-    fn run(track: &mut Track, samples: impl IntoIterator<Item = f64>) -> Vec<[f64; 3]> {
+    fn run(track: &mut PitchTracker, samples: impl IntoIterator<Item = f64>) -> Vec<[f64; 3]> {
         let mut inputs = PortValues::new();
         let mut outputs = PortValues::new();
         samples
@@ -674,8 +675,8 @@ mod tests {
 
     /// Pitch error over the last 200 ms of a 400 ms, 2.5 V tone plus white noise of
     /// peak `noise`: `(worst, rms)` in cents. Asserts the gate holds throughout.
-    fn pitch_error(range: TrackRange, hz: f64, noise: f64) -> (f64, f64) {
-        let mut track = Track::new(SR).with_range(range);
+    fn pitch_error(range: PitchRange, hz: f64, noise: f64) -> (f64, f64) {
+        let mut track = PitchTracker::new(SR).with_range(range);
         let mut rng = Rng::from_seed(7);
         let frames = run(
             &mut track,
@@ -693,23 +694,23 @@ mod tests {
         (worst, rms)
     }
 
-    const BANDS: [(TrackRange, &[f64]); 3] = [
+    const BANDS: [(PitchRange, &[f64]); 3] = [
         (
-            TrackRange::Low,
+            PitchRange::Low,
             &[41.2, 55.0, 82.4, 110.0, 196.0, 330.0, 480.0],
         ),
         (
-            TrackRange::Mid,
+            PitchRange::Mid,
             &[73.4, 110.0, 196.0, 261.6, 440.0, 659.3, 950.0],
         ),
         (
-            TrackRange::High,
+            PitchRange::High,
             &[146.8, 261.6, 440.0, 880.0, 1318.5, 1900.0],
         ),
     ];
 
     #[test]
-    fn track_reads_clean_sines_within_one_cent_in_every_band() {
+    fn tracker_reads_clean_sines_within_one_cent_in_every_band() {
         for (range, freqs) in BANDS {
             for &hz in freqs {
                 let (worst, _) = pitch_error(range, hz, 0.0);
@@ -719,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn track_holds_pitch_in_noise() {
+    fn tracker_holds_pitch_in_noise() {
         // Full-band white noise 20 dB below the tone: within ±10 cents in every band.
         for (range, freqs) in BANDS {
             for &hz in freqs {
@@ -729,15 +730,15 @@ mod tests {
         }
         // 10 dB below, mid band: the gate holds and the RMS error stays under 10 cents.
         for &hz in BANDS[1].1 {
-            let (_, rms) = pitch_error(TrackRange::Mid, hz, noise_peak(10.0));
+            let (_, rms) = pitch_error(PitchRange::Mid, hz, noise_peak(10.0));
             assert!(rms < 10.0, "{hz} Hz at 10 dB: {rms:.2} cents RMS");
         }
     }
 
     #[test]
-    fn track_ignores_noise_alone() {
-        for range in TrackRange::ALL {
-            let mut track = Track::new(SR).with_range(range);
+    fn tracker_ignores_noise_alone() {
+        for range in PitchRange::ALL {
+            let mut track = PitchTracker::new(SR).with_range(range);
             let mut rng = Rng::from_seed(11);
             let frames = run(
                 &mut track,
@@ -755,14 +756,14 @@ mod tests {
     }
 
     #[test]
-    fn track_gate_follows_a_tone_burst() {
+    fn tracker_gate_follows_a_tone_burst() {
         // 100 ms silence, 500 ms tone, 300 ms silence, in every band.
         for (range, hz) in [
-            (TrackRange::Low, 82.4),
-            (TrackRange::Mid, 330.0),
-            (TrackRange::High, 880.0),
+            (PitchRange::Low, 82.4),
+            (PitchRange::Mid, 330.0),
+            (PitchRange::High, 880.0),
         ] {
-            let mut track = Track::new(SR).with_range(range);
+            let mut track = PitchTracker::new(SR).with_range(range);
             let frames = run(
                 &mut track,
                 silence(0.1).chain(sine(hz, 2.5, 0.5)).chain(silence(0.3)),
@@ -781,7 +782,7 @@ mod tests {
             // window and three hops of the end. 63/44/37 ms open, 28/23/23 ms close.
             let g = track.geometry;
             let ms = |samples: usize| samples as f64 / g.rate * 1000.0;
-            let hop_ms = Track::HOP_SECONDS * 1000.0;
+            let hop_ms = PitchTracker::HOP_SECONDS * 1000.0;
             let on_ms = (edges[0] as f64 / SR - 0.1) * 1000.0;
             let off_ms = (edges[1] as f64 / SR - 0.6) * 1000.0;
             assert!(
@@ -806,9 +807,9 @@ mod tests {
     }
 
     #[test]
-    fn track_follows_a_legato_pitch_change() {
+    fn tracker_follows_a_legato_pitch_change() {
         // 220 Hz into 330 Hz with no gap: the gate stays high and the pitch moves.
-        let mut track = Track::new(SR);
+        let mut track = PitchTracker::new(SR);
         let frames = run(
             &mut track,
             sine(220.0, 2.5, 0.3).chain(sine(330.0, 2.5, 0.3)),
@@ -820,7 +821,7 @@ mod tests {
         );
         // The new pitch lands within a frame and three hops (43 ms measured, mid band).
         let g = track.geometry;
-        let bound = g.frame_len() as f64 / g.rate + 3.0 * Track::HOP_SECONDS;
+        let bound = g.frame_len() as f64 / g.rate + 3.0 * PitchTracker::HOP_SECONDS;
         let settled = second
             .iter()
             .position(|f| cents(f[0], 330.0).abs() < 5.0)
@@ -834,10 +835,10 @@ mod tests {
     }
 
     #[test]
-    fn track_threshold_and_level() {
+    fn tracker_threshold_and_level() {
         // Level is RMS-based: a sine reads 2√2 × RMS = 2 × peak, and a low note does not
         // ripple with its waveform.
-        let mut track = Track::new(SR);
+        let mut track = PitchTracker::new(SR);
         let frames = run(&mut track, sine(55.0, 2.5, 0.4));
         let tail: Vec<f64> = frames[frames.len() - 4800..].iter().map(|f| f[2]).collect();
         let (lo, hi) = tail
@@ -847,7 +848,7 @@ mod tests {
             lo > 4.75 && hi < 5.25,
             "55 Hz level ripples: {lo:.3}..{hi:.3}"
         );
-        let mut track = Track::new(SR);
+        let mut track = PitchTracker::new(SR);
         let frames = run(&mut track, sine(220.0, 5.0, 0.2));
         assert!(
             (frames.last().unwrap()[2] - 10.0).abs() < 0.1,
@@ -856,7 +857,7 @@ mod tests {
 
         // A tone under the threshold never opens the gate; lowering the threshold does.
         let quiet = 0.05; // level ≈ 0.1 V, under the 0.25 V default
-        let mut track = Track::new(SR);
+        let mut track = PitchTracker::new(SR);
         assert!(run(&mut track, sine(220.0, quiet, 0.3))
             .iter()
             .all(|f| f[1] == 0.0));
@@ -874,25 +875,25 @@ mod tests {
     }
 
     #[test]
-    fn track_range_reset_and_sample_rate() {
-        let mut track = Track::new(SR);
-        assert_eq!(track.range(), TrackRange::Mid);
+    fn tracker_range_reset_and_sample_rate() {
+        let mut track = PitchTracker::new(SR);
+        assert_eq!(track.range(), PitchRange::Mid);
         // 1500 Hz is above the mid band; the high band reads it.
         let frames = run(&mut track, sine(1500.0, 2.5, 0.3));
         assert!(cents(frames.last().unwrap()[0], 1500.0).abs() > 50.0);
-        track.set_range(TrackRange::High);
+        track.set_range(PitchRange::High);
         let frames = run(&mut track, sine(1500.0, 2.5, 0.3));
         assert!(cents(frames.last().unwrap()[0], 1500.0).abs() < 1.0);
 
         // reset() returns to the fresh state: the same input renders the same output.
         track.reset();
         let a = run(&mut track, sine(440.0, 2.5, 0.2));
-        let mut fresh = Track::new(SR).with_range(TrackRange::High);
+        let mut fresh = PitchTracker::new(SR).with_range(PitchRange::High);
         assert_eq!(a, run(&mut fresh, sine(440.0, 2.5, 0.2)));
 
         // Other sample rates keep the accuracy.
         for sr in [22_050.0, 44_100.0, 96_000.0] {
-            let mut track = Track::new(SR);
+            let mut track = PitchTracker::new(SR);
             track.set_sample_rate(sr);
             let mut inputs = PortValues::new();
             let mut outputs = PortValues::new();
@@ -910,9 +911,9 @@ mod tests {
             );
             assert_eq!(outputs.get(11), Some(GATE_HIGH_V));
         }
-        assert_eq!(track.type_id(), "track");
-        assert_eq!(TrackRange::from_index(2.2), Some(TrackRange::High));
-        assert_eq!(TrackRange::from_index(-1.0), None);
+        assert_eq!(track.type_id(), "pitch_tracker");
+        assert_eq!(PitchRange::from_index(2.2), Some(PitchRange::High));
+        assert_eq!(PitchRange::from_index(-1.0), None);
     }
 
     /// Edges are where YIN goes wrong: once a frame holds a start or a stop, its dip
@@ -920,8 +921,8 @@ mod tests {
     /// semitones above each band's floor, the pitch is right when the gate rises and
     /// right after it falls.
     #[test]
-    fn track_pitch_is_clean_at_note_edges() {
-        for range in TrackRange::ALL {
+    fn tracker_pitch_is_clean_at_note_edges() {
+        for range in PitchRange::ALL {
             let f_min = range.bounds().0;
             for semitones in [2.0, 7.0, 19.0] {
                 let hz = f_min * Libm::<f64>::pow(2.0, semitones / 12.0);
@@ -944,7 +945,7 @@ mod tests {
                                 let phase = 2.0 * core::f64::consts::PI * hz * k / SR;
                                 env * 2.5 * Libm::<f64>::sin(phase)
                             });
-                        let mut track = Track::new(SR).with_range(range);
+                        let mut track = PitchTracker::new(SR).with_range(range);
                         let frames = run(&mut track, signal);
                         let rise = frames.windows(2).position(|w| w[1][1] > w[0][1]).unwrap() + 1;
                         let at_rise = cents(frames[rise][0], hz);

@@ -12,7 +12,7 @@ Sections above the auto-generated marker are hand-written and are preserved.
 
 A correctness pass driven by the September 2026 stack audit (findings Q-N1 … Q-N8), and
 audio in: `AudioInput` (a block-fed host input that fans out to any number of nodes),
-`Track` (pitch, gate and level from a signal) and `Capture` (record and play back), plus
+`PitchTracker` (pitch, gate and level from a signal) and `Capture` (record and play back), plus
 the WASM worklet input that feeds them. The new modules are additive; the numeric notes
 below concern the audit fixes.
 Unlike 0.2.0, this release is **not bit-exact** for every patch: two DSP fixes change
@@ -74,7 +74,7 @@ or opt-in.
   `audio_input` (category `I/O`); `ModuleRegistry::register_audio_input(stream)` binds every
   `audio_input` the registry builds — `from_def` included — to the host's stream, and an
   unbound one is silent.
-- **`Track`: pitch, gate and level from an audio signal** (`modules`, no_std). YIN on a
+- **`PitchTracker`: pitch, gate and level from an audio signal** (`modules`, no_std). YIN on a
   decimated copy of the input, one of three bands (`range`: 40–500, 70–1000, 140–2000 Hz),
   with the difference function spread across ticks so the cost is flat (100–300 ns a tick
   at 48 kHz, no allocation in `tick` or on a band change). Outputs `voct`, `gate` and an RMS
@@ -83,7 +83,7 @@ or opt-in.
   sound carried on, so the pitch is right when the gate rises and when it falls. Tested on
   sines in every band (±1 cent), white noise 20 dB down (±10 cents), noise alone (gate
   stays shut), tone bursts (gate timing bounded per band), legato changes and note edges
-  across alignments and releases. Registered as `track` (category `Utilities`).
+  across alignments and releases. Registered as `pitch_tracker` (category `Utilities`).
 - **`Capture`: record an input, play it back as a source** (`modules`, no_std). A
   fixed-size `f32` buffer (`Capture::new`: 4 s; `with_seconds`, up to 60 s) recorded by a
   `record` gate (each take starts at the top; a full buffer stops it) and played like

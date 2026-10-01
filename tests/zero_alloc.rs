@@ -64,7 +64,7 @@ fn count_allocs<F: FnOnce()>(f: F) -> usize {
 /// A representative patch exercising the routing engine end to end:
 /// VCO -> SVF -> VCA -> StereoOutput, an LFO modulation cable into the filter cutoff, a
 /// normalled input (StereoOutput's `right` normals to `left`), and host audio from an
-/// `AudioInput` summed into the filter input, tracked by a `Track` that plays the VCO and
+/// `AudioInput` summed into the filter input, tracked by a `PitchTracker` that plays the VCO and
 /// recorded by a `Capture` whose playback joins the filter input too.
 fn build_patch() -> Rig {
     let sr = 44_100.0;
@@ -86,7 +86,7 @@ fn build_patch() -> Rig {
     let mic = patch.add("mic", AudioInput::new(Arc::clone(&input)));
     patch.connect(mic.out("out"), svf.in_("in")).unwrap();
     // ...and pitch-tracked: the input plays the VCO.
-    let track = patch.add("track", Track::new(sr));
+    let track = patch.add("tracker", PitchTracker::new(sr));
     patch.connect(mic.out("out"), track.in_("in")).unwrap();
     patch.connect(track.out("voct"), vco.in_("voct")).unwrap();
     // ...and resampled: record and play gates come from the host.
@@ -215,7 +215,7 @@ fn graph_tick_paths_are_allocation_free() {
     // no-op), must allocate nothing; nor may the ticks that follow (which would if the
     // patch had been invalidated and lazily recompiled).
     let svf = patch.get_node_id_by_name("svf").unwrap();
-    let track = patch.get_node_id_by_name("track").unwrap();
+    let track = patch.get_node_id_by_name("tracker").unwrap();
     let mic = patch.get_node_id_by_name("mic").unwrap();
     let set_param = count_allocs(|| {
         black_box(patch.set_param_by_id(svf, "res", 0.7));

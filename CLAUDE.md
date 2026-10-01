@@ -297,7 +297,7 @@ On main branch only (expensive checks):
 ### Envelopes & Dynamics
 - `Adsr` - Attack-Decay-Sustain-Release envelope
 - `EnvelopeFollower` - Amplitude follower
-- `Track` - Pitch (YIN), gate and level from an audio signal (play a patch with a voice)
+- `PitchTracker` - Pitch (YIN), gate and level from an audio signal (play a patch with a voice)
 - `Compressor` - Dynamic range compressor (sidechain input)
 - `Limiter` - Brick-wall limiter (sidechain input)
 - `NoiseGate` - Noise gate (sidechain input)

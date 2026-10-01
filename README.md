@@ -77,7 +77,7 @@ instruments and tools — in native apps, plugins, or the browser — from Rust.
 - 🎚️ **Analog Modeling**: Realistic VCO drift, filter saturation, and component tolerances
 - 🎹 **Polyphony**: Built-in voice allocation with multiple algorithms
 - ⚡ **SIMD helpers**: Optional `wide`-backed `AudioBlock` / `RingBuffer` utilities (`simd` feature) for block-processing code you write on top of Quiver; the built-in modules and the patch engine themselves are scalar
-- 🎙️ **Audio In**: Feed host audio into a patch block by block (`AudioInput`, one capture fanned out to any number of nodes), track its pitch, gate and level (`Track`, YIN), or record and replay it (`Capture`)
+- 🎙️ **Audio In**: Feed host audio into a patch block by block (`AudioInput`, one capture fanned out to any number of nodes), track its pitch, gate and level (`PitchTracker`, YIN), or record and replay it (`Capture`)
 - 💾 **Serialization**: Save and load patches as JSON
 - 🔧 **`no_std` Support**: Run on embedded systems and WebAssembly targets
 

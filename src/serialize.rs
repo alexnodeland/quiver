@@ -588,15 +588,15 @@ impl ModuleRegistry {
         );
 
         self.register_factory_with_keywords(
-            "track",
-            "Track",
+            "pitch_tracker",
+            "Pitch Tracker",
             "Utilities",
             "Pitch (YIN), gate and level from an audio signal: play a patch with a voice",
             &[
                 "track", "pitch", "tracker", "yin", "detect", "follow", "voice", "gate",
             ],
             &[],
-            |sr| Box::new(Track::new(sr)),
+            |sr| Box::new(PitchTracker::new(sr)),
         );
 
         self.register_factory_with_keywords(
