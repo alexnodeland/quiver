@@ -569,7 +569,10 @@ impl core::fmt::Debug for AudioInputStream {
 }
 
 /// Which input channel an [`AudioInput`]'s `out` port carries.
+///
+/// Non-exhaustive: more channel choices may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum InputChannel {
     /// Channel 0.
     Left,
@@ -592,8 +595,11 @@ impl InputChannel {
     }
 
     /// Inverse of [`index`](Self::index); the value is rounded, and anything out of range
-    /// is `None`.
+    /// or not finite is `None`.
     pub fn from_index(value: f64) -> Option<Self> {
+        if !value.is_finite() {
+            return None;
+        }
         match libm::round(value) as i64 {
             0 => Some(InputChannel::Left),
             1 => Some(InputChannel::Right),
@@ -1897,6 +1903,14 @@ mod tests {
                 Some(channel)
             );
         }
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 3.0] {
+            assert_eq!(InputChannel::from_index(bad), None, "{bad}");
+        }
+        assert!(
+            !node.set_param_by_id("channel", f64::NAN),
+            "NaN does not pick left"
+        );
+        assert_eq!(node.channel(), InputChannel::Right);
         assert!(format!("{:?}", node.stream()).contains("capacity: 0"));
     }
 
@@ -1908,6 +1922,10 @@ mod tests {
         const FRAMES: usize = 16;
         const BLOCKS: usize = 20_000;
         let stream = Arc::new(AudioInputStream::new(2, FRAMES));
+        // Built before the writer starts, so it hears the blocks it publishes. Built
+        // after a writer that had already finished, it would treat the last block as
+        // consumed and never hear anything, and the loop below would never end.
+        let mut node = AudioInput::new(Arc::clone(&stream));
         let writer_stream = Arc::clone(&stream);
         let writer = std::thread::spawn(move || {
             let mut block = [0.0f32; FRAMES];
@@ -1919,10 +1937,12 @@ mod tests {
             }
         });
 
-        let mut node = AudioInput::new(Arc::clone(&stream));
         let mut previous = 0.0;
         let mut heard = 0usize;
+        let mut rounds = 0usize;
         while !writer.is_finished() || heard == 0 {
+            rounds += 1;
+            assert!(rounds < 10_000_000, "the reader never heard the writer");
             for [_, l, r] in run(&mut node, 64) {
                 assert_eq!(l, r, "torn frame: channels from different blocks");
                 if l != 0.0 {

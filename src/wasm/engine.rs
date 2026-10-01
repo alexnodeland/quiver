@@ -669,9 +669,14 @@ impl QuiverEngine {
             })?;
             let n = (data.length() as usize).min(AUDIO_INPUT_MAX_FRAMES);
             let at = ch * AUDIO_INPUT_MAX_FRAMES;
-            // `copy_to` requires equal lengths, hence the subarray.
-            data.subarray(0, n as u32)
-                .copy_to(&mut self.input_scratch[at..at + n]);
+            // `copy_to` requires equal lengths: take a subarray only when the channel is
+            // longer than the stream holds.
+            let dst = &mut self.input_scratch[at..at + n];
+            if data.length() as usize == n {
+                data.copy_to(dst);
+            } else {
+                data.subarray(0, n as u32).copy_to(dst);
+            }
             frames = frames.min(n);
         }
         Ok(self.publish_input(count, frames))

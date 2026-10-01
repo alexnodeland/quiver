@@ -30,7 +30,10 @@ use libm::Libm;
 /// Each band is about 3.6–3.8 octaves wide and is analysed at its own decimated
 /// rate, so the lowest pitch spans the same number of analysis samples in every
 /// band and the cost does not depend on the band.
+///
+/// Non-exhaustive: more bands may come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum PitchRange {
     /// 40–500 Hz: bass instruments, low voices.
     Low,
@@ -69,8 +72,12 @@ impl PitchRange {
         }
     }
 
-    /// Inverse of [`index`](Self::index); rounds, and is `None` out of range.
+    /// Inverse of [`index`](Self::index); rounds, and is `None` out of range or not
+    /// finite.
     pub fn from_index(value: f64) -> Option<Self> {
+        if !value.is_finite() {
+            return None;
+        }
         match libm::round(value) as i64 {
             0 => Some(PitchRange::Low),
             1 => Some(PitchRange::Mid),
@@ -952,6 +959,19 @@ mod tests {
         assert_eq!(track.type_id(), "pitch_tracker");
         assert_eq!(PitchRange::from_index(2.2), Some(PitchRange::High));
         assert_eq!(PitchRange::from_index(-1.0), None);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(PitchRange::from_index(bad), None, "{bad}");
+        }
+        #[cfg(feature = "alloc")]
+        {
+            use crate::introspection::ModuleIntrospection;
+            let mut tracker = PitchTracker::new(SR).with_range(PitchRange::High);
+            assert!(
+                !tracker.set_param_by_id("range", f64::NAN),
+                "NaN does not pick low"
+            );
+            assert_eq!(tracker.range(), PitchRange::High);
+        }
     }
 
     /// Edges are where YIN goes wrong: once a frame holds a start or a stop, its dip
