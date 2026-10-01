@@ -12,14 +12,46 @@ Sections above the auto-generated marker are hand-written and are preserved.
 
 A correctness pass driven by the September 2026 stack audit (findings Q-N1 … Q-N8), and
 audio in: `AudioInput` (a block-fed host input that fans out to any number of nodes),
-`PitchTracker` (pitch, gate and level from a signal) and `Capture` (record and play back), plus
-the WASM worklet input that feeds them. The new modules are additive; the numeric notes
-below concern the audit fixes.
+`PitchTracker` (pitch, gate and level from a signal) and `Capture` (record and play
+back), plus the WASM worklet input that feeds them. The audio-in modules add API without
+changing any (their prelude names aside, see *Breaking*); the numeric notes below concern
+the audit fixes.
+
 Unlike 0.2.0, this release is **not bit-exact** for every patch: two DSP fixes change
 rendered samples, and `tests/golden_vectors.rs` was rebaselined for exactly one of its
 five existing patches, deliberately and with the reason recorded in the file. Everything
 else that touches audio is either bit-identical (verified by the unchanged golden hashes)
 or opt-in.
+
+### Breaking
+
+What can stop compiling, or sound different, for code written against 0.3.3:
+
+- **The `rand` feature is gone.** It was the implicit feature of an optional `rand`
+  dependency nothing used. *Migration:* drop `features = ["rand"]`.
+- **`PatchDef.parameters` is a `BTreeMap<String, f64>`** (was a `HashMap` under `std`).
+  *Migration:* code that names the type or uses `HashMap`-only methods changes type;
+  iteration is now sorted.
+- **`Patch::set_param_by_id` returns `false` for a cabled control input.** The value is
+  still recorded and applies once the cable is removed. *Migration:* do not read `false`
+  as "no such parameter" for a port that has a cable on it.
+- **WASM: `QuiverEngine::set_observer_interval` is a no-op.** The observer captures every
+  sample while a port is subscribed; formatting happens in `poll_updates`.
+- **Rendered audio changes** (see *Numerics* below): `KarplusStrong` at every `stretch`;
+  a `DelayLine` or `UnitDelay` fed by an acyclic path no longer adds a sample of latency;
+  non-finite input to `PitchShifter`, `Granular` and `Wavefolder` now renders as silence.
+- **`Arpeggiator::reset` and `Granular::reset` rewind their random streams**, so a reset
+  module repeats its sequence instead of continuing it.
+- **`DelayLine::with_max_delay` clamps** its argument to `0.001..=60` s (a non-finite
+  value means the 2 s default); it was unbounded.
+- **The MDK harness is stricter.** `ModuleTestHarness::new` seeds the module under test,
+  and the stability, output-range and NaN-recovery checks drive Gate/Trigger/Clock inputs
+  with a pulse train, so a trigger-driven module is actually exercised and can fail checks
+  it used to pass untouched.
+- **The prelude has new names** that can clash with your own in code that
+  glob-imports `quiver::prelude::*`: `AudioInput`, `AudioInputStream`, `InputChannel`,
+  `Capture`, `PitchTracker`, `PitchRange`, `ModuleRng` and `derive_seed`. *Migration:*
+  import the clashing name explicitly, or qualify one of them.
 
 ### Numerics — what changed and what did not
 
