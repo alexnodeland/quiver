@@ -218,7 +218,10 @@ impl Biquad {
 ///   three hops of the end (28, 23 and 23 ms); a legato change lands within a frame and
 ///   three hops (43 ms, mid band).
 /// - **Cost**: 100, 160 and 300 ns per tick on average (low, mid, high; 0.5–1.4 % of one
-///   core at 48 kHz, release build, Apple M-series).
+///   core at 48 kHz, release build, Apple M-series). There is deliberately no
+///   `tick_masked` shortcut: the analysis feeds every output (the gate needs the pitch
+///   estimates, the pitch needs the level clock), so it must run whichever outputs are
+///   cabled.
 pub struct Track {
     sample_rate: f64,
     range: TrackRange,

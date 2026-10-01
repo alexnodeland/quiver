@@ -1161,8 +1161,9 @@ impl ModuleRegistry {
     ///
     /// let mut def = PatchDef::new("through");
     /// def.modules.push(ModuleDef::new("mic", "audio_input"));
-    /// def.modules.push(ModuleDef::new("output", "stereo_output"));
-    /// def.cables.push(CableDef::new("mic.out", "output.left"));
+    /// def.modules.push(ModuleDef::new("out", "stereo_output"));
+    /// def.cables.push(CableDef::new("mic.out", "out.left"));
+    /// def.output = Some("out".into()); // `to_def` writes this for you
     /// let mut patch = Patch::from_def(&def, &registry, 48_000.0).unwrap();
     ///
     /// input.write(&[&[0.5f32][..]]);

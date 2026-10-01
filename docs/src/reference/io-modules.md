@@ -162,7 +162,8 @@ registry.register_audio_input(Arc::clone(&input)); // every audio_input reads `i
 let patch = Patch::from_def(&def, &registry, sample_rate)?;
 ```
 
-Without that call a loaded `audio_input` is silent.
+Without that call a loaded `audio_input` is silent. (`to_def` records the output
+module in `PatchDef.output`; set it yourself in a hand-written `PatchDef`.)
 
 ---
 
