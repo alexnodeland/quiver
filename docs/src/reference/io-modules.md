@@ -130,10 +130,33 @@ older `audio_in` module, an `ExternalInput`, passes samples through unscaled.)
 ### Timing
 
 - **One capture fans out.** Any number of `AudioInput`s may read one stream,
-  in one patch or in many (one per polyphonic voice). Each keeps its own
-  cursor and starts each new block at its first frame, so voices rendered one
-  after another over the same block, or a voice that sat a block out, all hear
-  the same frames. A single-consumer ring buffer could not do this.
+  in one patch or in many (one per polyphonic voice). The block stays put and
+  every reader reads it; a single-consumer ring buffer would hand each frame to
+  the first voice only.
+- **Two ways to read**, chosen when the stream is built:
+  - `AudioInputStream::new`, for **voice-major** hosts. Each reader keeps its
+    own cursor and starts every new block at its first frame. Readers stay in
+    step as long as each starts or resumes at a block boundary: one patch
+    ticked frame by frame, several patches each rendering the whole block in
+    turn, a voice that sits out whole blocks. A reader that resumes mid-block
+    starts the block over (late) and drops its end; one built mid-block is
+    silent until the next block.
+  - `AudioInputStream::with_host_clock`, for **frame-by-frame** hosts. The host
+    names the current frame, calling `advance()` after each rendered frame (or
+    `set_frame(n)`); each `write` starts again at frame 0. Every reader reads
+    that frame, however late it joined. Use it when voices are ticked sample by
+    sample and may start or resume mid-block (`PolyPatch` skips free voices; an
+    offline render that compiles voices at note onsets), and for clips: write a
+    whole clip as one block, then `advance()` once per sample.
+
+    ```rust,ignore
+    let input = Arc::new(AudioInputStream::with_host_clock(1, clip.len()));
+    input.write(&[&clip[..]]);
+    for _ in 0..clip.len() {
+        let frame = poly.tick();   // every voice's AudioInput reads the same frame
+        input.advance();
+    }
+    ```
 - **Mismatched block sizes.** An engine that renders a host block in smaller
   pieces continues through it; one that renders more frames than the host
   wrote gets silence for the rest.
@@ -141,15 +164,17 @@ older `audio_in` module, an `ExternalInput`, passes samples through unscaled.)
 - **Overrun** (a new block before the old one is finished) drops the unread
   frames: latency never grows past one block. Writes longer than the stream's
   capacity keep the first `capacity` frames.
-- **New and reset inputs** start with the next block written, so they never
-  replay stale input or join a block out of step. Build the patch first, then
-  write each block just before rendering it.
+- **New and reset inputs** on a `new` stream start with the next block
+  written, so they never replay stale input. Build the patch first, then write
+  each block just before rendering it. (On a host-clock stream an input reads
+  the host's frame from its first tick.)
 - `clear()` publishes an empty block: every reader falls silent at once.
 
-Writing and reading are lock-free and allocation-free. Writing from another
-thread is sound (blocks are double-buffered and published with
-release/acquire; a reader lapped mid-read outputs silence instead of a torn
-sample), but there must be one writer.
+Writing, reading and the host clock are lock-free and allocation-free.
+Writing from another thread is sound (blocks are double-buffered and published
+with release/acquire; a reader lapped mid-read outputs silence instead of a
+torn sample), but there must be one writer: two writing at once can mix
+samples of both blocks.
 
 ### Saving and loading
 

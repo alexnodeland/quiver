@@ -72,6 +72,8 @@ fn build_patch() -> Rig {
     let input = Arc::new(AudioInputStream::new(2, 512));
     let record = Arc::new(AtomicF64::new(0.0));
     let play = Arc::new(AtomicF64::new(0.0));
+    // A clip read at the host's frame (the frame-by-frame mode).
+    let clip = Arc::new(AudioInputStream::with_host_clock(1, 2048));
 
     let vco = patch.add("vco", Vco::new(sr));
     let lfo = patch.add("lfo", Lfo::new(sr));
@@ -97,6 +99,8 @@ fn build_patch() -> Rig {
         .unwrap();
     patch.connect(gate.out("out"), capture.in_("gate")).unwrap();
     patch.connect(capture.out("out"), svf.in_("in")).unwrap();
+    let clip_in = patch.add("clip", AudioInput::new(Arc::clone(&clip)));
+    patch.connect(clip_in.out("out"), svf.in_("in")).unwrap();
     // LFO modulation cable into the filter cutoff (CvBipolar -> CvUnipolar; allowed).
     patch.connect(lfo.out("sin"), svf.in_("cutoff")).unwrap();
     patch.connect(svf.out("lp"), vca.in_("in")).unwrap();
@@ -111,6 +115,7 @@ fn build_patch() -> Rig {
         input,
         record,
         play,
+        clip,
     }
 }
 
@@ -120,6 +125,7 @@ struct Rig {
     input: Arc<AudioInputStream>,
     record: Arc<AtomicF64>,
     play: Arc<AtomicF64>,
+    clip: Arc<AudioInputStream>,
 }
 
 /// Both the per-sample `tick()` and the block `tick_block()` paths must allocate nothing
@@ -135,7 +141,10 @@ fn graph_tick_paths_are_allocation_free() {
         input,
         record,
         play,
+        clip,
     } = build_patch();
+    let clip_samples: Vec<f32> = (0..2048).map(|i| (i as f32 * 0.003).sin()).collect();
+    clip.write(&[&clip_samples[..]]);
     // The host's input: a continuous 220 Hz tone, refilled block by block into
     // preallocated buffers (planar and interleaved) before each render.
     let mut host_l = vec![0.0f32; 512];
@@ -177,6 +186,7 @@ fn graph_tick_paths_are_allocation_free() {
             play.set(if chunk >= 2 { 5.0 } else { 0.0 });
             for _ in 0..250 {
                 black_box(patch.tick());
+                clip.advance();
             }
         }
     });

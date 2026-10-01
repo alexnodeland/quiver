@@ -60,10 +60,14 @@ or opt-in.
   one frame per tick, on `out` (the `channel` select: left, right, or both mixed at equal
   gain), `left` and `right`, with a bounded `gain` input. Host `±1.0` becomes `±5 V`
   (`AudioInput::FULL_SCALE_VOLTS`); the WASM engine's older `audio_in` `ExternalInput`
-  stays unscaled. Any number of inputs may read one stream: each keeps its own cursor into
-  the shared, double-buffered block, so voices rendered one after another over a block, or
-  a voice that sat blocks out, hear identical frames. Underrun is silence, overrun drops the
-  unread frames (latency ≤ one block), a new or reset input starts with the next block, and
+  stays unscaled. Any number of inputs may read one stream's shared, double-buffered block,
+  in one of two ways chosen when the stream is built: `AudioInputStream::new` gives each
+  reader its own cursor, which keeps **voice-major** hosts in step (each voice renders whole
+  blocks, or sits whole blocks out); `AudioInputStream::with_host_clock` makes every reader
+  read the frame the host names (`advance()` per rendered frame, or `set_frame`), which keeps
+  **frame-by-frame** hosts in step when voices start or resume mid-block (`PolyPatch`, an
+  offline render) and plays whole clips. Underrun is silence, overrun drops the unread frames
+  (latency ≤ one block), a new or reset cursor reader starts with the next block, and
   non-finite samples are written as silence. Lock-free and allocation-free on both sides
   (`tests/zero_alloc.rs` now feeds its patch through one); a writer on another thread is
   sound, and a reader it laps outputs silence rather than a torn frame. Registered as

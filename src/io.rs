@@ -250,39 +250,60 @@ const AUDIO_INPUT_SLOTS: usize = 2;
 ///
 /// One capture fans out: the same input may feed several `AudioInput` nodes, in one patch
 /// or in several (one per polyphonic voice), and a host may render those patches one after
-/// another over the same block, or skip a voice that is idle. Each reader therefore keeps
-/// its **own** cursor into the block the host last wrote, and starts every new block at its
-/// first frame. A single-consumer FIFO cannot do this: the first voice to render would
-/// consume the frames the next voice needs.
+/// another over the same block. A single-consumer FIFO hands each frame to one reader, so
+/// the first voice to render would consume the frames the next one needs. Here the block
+/// stays put and every reader reads it.
+///
+/// # Two ways to read
+///
+/// How a reader finds its place in the block depends on how the host renders:
+///
+/// - **Voice-major hosts: [`new`](Self::new).** Each reader keeps its own cursor and starts
+///   every new block at its first frame. Readers stay in step as long as each one starts
+///   or resumes at a **block boundary**: one patch ticked frame by frame (all its readers
+///   move together), several patches each rendering the whole block in turn, a voice that
+///   sits out whole blocks (quiver's WASM engine; Auracle's live voice bank). A reader
+///   that resumes *mid-block* starts the block over (late) and drops its end, and one
+///   built mid-block is silent until the next block.
+/// - **Frame-by-frame hosts: [`with_host_clock`](Self::with_host_clock).** The host names
+///   the current frame, with [`advance`](Self::advance) after each rendered frame (or
+///   [`set_frame`](Self::set_frame)), and every reader reads that frame, however late it
+///   joined. Use it when voices are ticked sample by sample and may start or resume
+///   mid-block ([`PolyPatch`](crate::polyphony::PolyPatch) skips free voices; an offline
+///   render that compiles voices at note onsets), and for clips: write a whole clip as one
+///   block (capacity = clip length) and `advance` once per rendered sample.
 ///
 /// # Timing rules
 ///
 /// - **Underrun gives silence.** A reader that has used up the block (the engine rendered
-///   more frames than the host wrote), or that has had no block yet, outputs `0.0`. It never
-///   repeats a block.
+///   more frames than the host wrote), or whose host frame is past its end, or that has
+///   had no block yet, outputs `0.0`. It never repeats a block.
 /// - **Overrun drops the unread frames.** When the host writes a new block before a reader
-///   has finished the current one, the reader abandons the rest and starts the new block at
-///   its first frame, so input latency never grows past one block. A write longer than
+///   has finished the current one, the reader moves to the new block at its first frame,
+///   so input latency never grows past one block. A write longer than
 ///   [`capacity`](Self::capacity) keeps the first `capacity` frames.
-/// - **A reader hears the blocks written after it exists.** A newly built or
-///   [`reset`](GraphModule::reset) `AudioInput` treats the current block as consumed and
-///   starts with the next one, so it can neither replay stale input nor join a block late,
-///   out of step with the readers already on it. Build the patch, then write each block
-///   just before the frames that should hear it.
+/// - **Cursor readers hear the blocks written after they exist.** A newly built or
+///   [`reset`](GraphModule::reset) `AudioInput` on a [`new`](Self::new) stream treats the
+///   current block as consumed and starts with the next one, so it cannot replay stale
+///   input. Build the patch, then write each block just before the frames that should
+///   hear it. (Host-clock readers have no position of their own: they read the host's
+///   frame of the newest block from their first tick.)
 /// - Frames pass through one per tick at whatever rate the host delivers; resampling to
 ///   the engine's rate, if they differ, is the host's job.
 ///
 /// # Real-time safety
 ///
-/// All storage is allocated in [`new`](Self::new). Writing and reading are lock-free and
-/// allocation-free. The usual host writes and renders on the same thread (an audio
-/// callback, an `AudioWorklet`'s `process()`, an offline render loop), where every reader
-/// sees exactly the frames written. Writing from another thread is also sound: blocks are
-/// double-buffered and published with release/acquire ordering, and a reader that the
-/// writer laps mid-read discards the sample (outputs `0.0`) rather than return a torn one.
+/// All storage is allocated in [`new`](Self::new). Writing, reading and the host clock are
+/// lock-free and allocation-free. The usual host writes and renders on the same thread (an
+/// audio callback, an `AudioWorklet`'s `process()`, an offline render loop), where every
+/// reader sees exactly the frames written. Writing from another thread is also sound:
+/// blocks are double-buffered and published with release/acquire ordering, and a reader
+/// that the writer laps mid-read discards the sample (outputs `0.0`) rather than return a
+/// torn one. Cursor readers on different threads can be a frame apart around the moment
+/// the stream runs dry; readers on the rendering thread are sample-exact.
 ///
-/// There must be **one writer**. Concurrent writes from two threads are memory-safe but
-/// interleave their blocks.
+/// There must be **one writer**. Writes from two threads at once are memory-safe but can
+/// mix samples of both blocks within one block, and interleave their blocks.
 pub struct AudioInputStream {
     channels: usize,
     capacity: usize,
@@ -298,6 +319,11 @@ pub struct AudioInputStream {
     /// sees `writing - b >= AUDIO_INPUT_SLOTS` after its read may have read a sample of the
     /// block that reuses `b`'s slot, and drops it.
     writing: AtomicU32,
+    /// Readers read the frame the host sets ([`with_host_clock`](Self::with_host_clock))
+    /// rather than keeping their own cursors.
+    host_clock: bool,
+    /// The host's current frame within the newest block (host-clock streams only).
+    frame: AtomicUsize,
 }
 
 impl AudioInputStream {
@@ -316,7 +342,78 @@ impl AudioInputStream {
             lens: [AtomicUsize::new(0), AtomicUsize::new(0)],
             published: AtomicU32::new(0),
             writing: AtomicU32::new(0),
+            host_clock: false,
+            frame: AtomicUsize::new(0),
         }
+    }
+
+    /// Like [`new`](Self::new), for a **frame-by-frame** host: every reader reads the frame
+    /// the host names with [`advance`](Self::advance) or [`set_frame`](Self::set_frame),
+    /// whenever it joined. See [Two ways to read](Self#two-ways-to-read).
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use quiver::prelude::*;
+    ///
+    /// // An offline render: the whole clip is one block, read at the host's frame.
+    /// let clip: Vec<f32> = (0..1000).map(|i| i as f32 / 1000.0).collect();
+    /// let input = Arc::new(AudioInputStream::with_host_clock(1, clip.len()));
+    /// input.write(&[&clip[..]]);
+    ///
+    /// let (inputs, mut outputs) = (PortValues::new(), PortValues::new());
+    /// let mut early = AudioInput::new(Arc::clone(&input));
+    /// for _ in 0..500 {
+    ///     early.tick(&inputs, &mut outputs);
+    ///     input.advance();
+    /// }
+    /// // A voice that starts at frame 500 is in step with the one that started at 0.
+    /// let mut late = AudioInput::new(Arc::clone(&input));
+    /// early.tick(&inputs, &mut outputs);
+    /// let a = outputs.get(11).unwrap();
+    /// late.tick(&inputs, &mut outputs);
+    /// assert_eq!(outputs.get(11).unwrap(), a);
+    /// assert_eq!(a, 0.5 * AudioInput::FULL_SCALE_VOLTS);
+    /// ```
+    pub fn with_host_clock(channels: usize, capacity: usize) -> Self {
+        Self {
+            host_clock: true,
+            ..Self::new(channels, capacity)
+        }
+    }
+
+    /// Whether readers follow the host's frame ([`with_host_clock`](Self::with_host_clock))
+    /// rather than their own cursors.
+    pub fn is_host_clocked(&self) -> bool {
+        self.host_clock
+    }
+
+    /// Host clock: make `frame` (within the block last written) the frame every reader
+    /// reads next. Frames at or past the block's end read silence. No effect on a stream
+    /// built with [`new`](Self::new).
+    #[inline]
+    pub fn set_frame(&self, frame: usize) {
+        if self.host_clock {
+            self.frame.store(frame, Ordering::Relaxed);
+        }
+    }
+
+    /// Host clock: move every reader to the next frame. Call it once after each frame is
+    /// rendered (each [`write`](Self::write) starts again at frame 0). No effect on a
+    /// stream built with [`new`](Self::new).
+    #[inline]
+    pub fn advance(&self) {
+        if self.host_clock {
+            // One writer, so a load and a store; no read-modify-write (which targets
+            // without compare-and-swap lack).
+            let next = self.frame.load(Ordering::Relaxed).saturating_add(1);
+            self.frame.store(next, Ordering::Relaxed);
+        }
+    }
+
+    /// Host clock: the frame readers read next (always 0 on a stream built with
+    /// [`new`](Self::new)).
+    pub fn frame(&self) -> usize {
+        self.frame.load(Ordering::Relaxed)
     }
 
     /// Number of channels per frame.
@@ -401,7 +498,11 @@ impl AudioInputStream {
             }
         }
         self.lens[slot].store(frames, Ordering::Relaxed);
-        // Release: a reader that acquires `next` sees every sample and the length above.
+        if self.host_clock {
+            self.frame.store(0, Ordering::Relaxed);
+        }
+        // Release: a reader that acquires `next` sees every sample, the length and the
+        // frame reset above.
         self.published.store(next, Ordering::Release);
         frames
     }
@@ -461,6 +562,8 @@ impl core::fmt::Debug for AudioInputStream {
             .field("channels", &self.channels)
             .field("capacity", &self.capacity)
             .field("published", &self.published.load(Ordering::Relaxed))
+            .field("host_clock", &self.host_clock)
+            .field("frame", &self.frame())
             .finish()
     }
 }
@@ -503,11 +606,15 @@ impl InputChannel {
 /// Audio input: plays the host's audio, written block by block into an
 /// [`AudioInputStream`], into the patch.
 ///
-/// Each tick reads the next frame of the block the host last wrote (see the stream's
+/// Each tick reads a frame of the block the host last wrote (see the stream's
 /// [timing rules](AudioInputStream#timing-rules): silence on underrun, unread frames
 /// dropped on overrun). Any number of `AudioInput`s may share one stream, in one patch or
-/// in many; each keeps its own cursor, so voices rendered one after another over the same
-/// block all hear the same frames.
+/// in many. Which frame a tick reads depends on the stream: on a
+/// [`new`](AudioInputStream::new) stream each input keeps its own cursor, which keeps
+/// voice-major hosts (each voice renders whole blocks) in step; on a
+/// [`with_host_clock`](AudioInputStream::with_host_clock) stream every input reads the
+/// frame the host names, which keeps frame-by-frame hosts in step when voices start or
+/// resume mid-block. See [Two ways to read](AudioInputStream#two-ways-to-read).
 ///
 /// # Ports
 ///
@@ -608,6 +715,14 @@ impl AudioInput {
     #[inline]
     fn next_frame(&mut self) -> Option<[f64; 3]> {
         let newest = self.stream.newest();
+        if self.stream.host_clock {
+            // The host names the frame; this reader keeps no position of its own.
+            let frame = self.stream.frame();
+            if frame >= self.stream.block_len(newest) {
+                return None;
+            }
+            return self.stream.read_frame(newest, frame);
+        }
         if newest != self.seq {
             // A new block: start it at its first frame, abandoning any unread rest of the
             // previous one (overrun).
@@ -622,8 +737,9 @@ impl AudioInput {
         self.pos += 1;
         let read = self.stream.read_frame(self.seq, frame);
         if read.is_none() {
-            // Lapped by a writer on another thread. The block that overwrote this one's
-            // slot is already published, so the next tick starts it.
+            // Lapped by a writer on another thread: block `seq + 1` is published and
+            // `seq + 2` is being written into this one's slot. The next tick moves to the
+            // newest published block.
             self.pos = self.len;
         }
         read
@@ -1542,6 +1658,124 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A patch around one `AudioInput` on `stream`, `out` on both output channels.
+    fn input_patch(stream: &Arc<AudioInputStream>) -> crate::graph::Patch {
+        use crate::modules::StereoOutput;
+        let mut patch = crate::graph::Patch::new(48_000.0);
+        let input = patch.add("in", AudioInput::new(Arc::clone(stream)));
+        let out = patch.add("out", StereoOutput::new());
+        patch.connect(input.out("left"), out.in_("left")).unwrap();
+        patch.set_output(out.id());
+        patch.compile().unwrap();
+        patch
+    }
+
+    /// The frame-by-frame case a cursor cannot serve: patch A ticks every frame of a
+    /// 128-frame block, voice B is built at frame 64, and voice C pauses for frames
+    /// 32..96. On a host-clock stream all three read the same frame at every tick.
+    #[test]
+    fn audio_input_host_clock_keeps_frame_by_frame_readers_in_step() {
+        let stream = Arc::new(AudioInputStream::with_host_clock(1, 128));
+        assert!(stream.is_host_clocked());
+        let mut a = input_patch(&stream);
+        let mut c = input_patch(&stream);
+        let mut b = None;
+        for block in 0..3 {
+            let samples = ramp(block * 128 + 1, 128);
+            stream.write(&[&samples]);
+            assert_eq!(stream.frame(), 0, "each write starts at frame 0");
+            for (f, &sample) in samples.iter().enumerate() {
+                let expect = sample as f64 * V;
+                assert_eq!(a.tick().0, expect, "block {block} frame {f}: A");
+                if block == 0 && f == 64 {
+                    b = Some(input_patch(&stream));
+                }
+                if let Some(b) = b.as_mut() {
+                    assert_eq!(
+                        b.tick().0,
+                        expect,
+                        "block {block} frame {f}: B joined at 64"
+                    );
+                }
+                if block != 1 || !(32..96).contains(&f) {
+                    assert_eq!(c.tick().0, expect, "block {block} frame {f}: C resumed");
+                }
+                stream.advance();
+            }
+            // Past the block's end: silence for everyone.
+            assert_eq!(a.tick().0, 0.0);
+        }
+        // set_frame jumps every reader.
+        stream.write(&[ramp(1, 128)]);
+        stream.set_frame(100);
+        assert_eq!(a.tick().0, 101.0 * V);
+        assert_eq!(c.tick().0, 101.0 * V);
+    }
+
+    /// A whole clip written once, read at the host's frame: a reader built after the
+    /// write, or half-way through the render, hears the clip at the host's position.
+    #[test]
+    fn audio_input_host_clock_reads_a_whole_clip() {
+        let clip = ramp(1, 4_800);
+        let stream = Arc::new(AudioInputStream::with_host_clock(1, clip.len()));
+        stream.write(&[&clip]);
+        let mut first = AudioInput::new(Arc::clone(&stream));
+        let mut heard = Vec::new();
+        let mut late = None;
+        for f in 0..clip.len() {
+            if f == 2_400 {
+                late = Some(AudioInput::new(Arc::clone(&stream)));
+            }
+            let [_, l, _] = run(&mut first, 1)[0];
+            heard.push(l / V);
+            if let Some(late) = late.as_mut() {
+                assert_eq!(run(late, 1)[0][1], l, "frame {f}");
+            }
+            stream.advance();
+        }
+        assert_eq!(heard, as_f64(&clip));
+        assert_eq!(run(&mut first, 1)[0], [0.0; 3], "past the clip: silence");
+        // reset() does not move a host-clock reader.
+        stream.set_frame(10);
+        first.reset();
+        assert_eq!(run(&mut first, 1)[0][1], 11.0 * V);
+    }
+
+    /// The documented limit of cursor streams (and why host-clock streams exist): a
+    /// reader resuming mid-block starts the block over, late; one built mid-block is
+    /// silent until the next block. At block boundaries every cursor reader is in step.
+    #[test]
+    fn audio_input_cursor_readers_rejoin_at_block_boundaries_only() {
+        let stream = Arc::new(AudioInputStream::new(1, 128));
+        // The clock calls are ignored on a cursor stream.
+        stream.set_frame(5);
+        stream.advance();
+        assert_eq!(stream.frame(), 0);
+        assert!(!stream.is_host_clocked());
+
+        let mut a = AudioInput::new(Arc::clone(&stream));
+        let mut paused = AudioInput::new(Arc::clone(&stream));
+        stream.write(&[ramp(1, 128)]);
+        run(&mut a, 64);
+        run(&mut paused, 32);
+        let built_mid_block = &mut AudioInput::new(Arc::clone(&stream));
+        // Frame 64 for A; the paused reader resumes where it left off (frame 32).
+        assert_eq!(left(&mut a, 1), [65.0]);
+        assert_eq!(left(&mut paused, 1), [33.0]);
+        assert_eq!(left(built_mid_block, 1), [0.0]);
+        // From the next block on, all three are in step.
+        stream.write(&[ramp(201, 128)]);
+        for r in [&mut a, &mut paused, built_mid_block] {
+            assert_eq!(left(r, 2), [201.0, 202.0]);
+        }
+        // The reviewer's case: a voice that sat out resumes at frame 64 of a new block
+        // and plays its frame 0 there, 64 frames late.
+        stream.write(&[ramp(301, 128)]);
+        run(&mut a, 64);
+        assert_eq!(left(&mut a, 1), [365.0]);
+        assert_eq!(left(&mut paused, 1), [301.0]);
     }
 
     #[test]
