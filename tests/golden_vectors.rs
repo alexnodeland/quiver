@@ -19,6 +19,11 @@
 //! scheduler now defers only cables that close a cycle, so the delay reads the current sample.
 //! The other four patches contain no cycle-breaker and are bit-identical to 0.1.1.
 //!
+//! **Deliberate rebaseline, 0.4.1:** `diode_ladder` changed from `0xae58_26e6_0315_0055` to
+//! `0x751c_aa6f_4219_5449`. The ladder's diode saturation now uses a clamped Padé (7,6)
+//! `tanh` instead of libm's (within 1.2e-8 of `tanh` below |x| = 2, 9.7e-5 at worst), which
+//! moves its samples by a rounding. The module changed, not the interpreter.
+//!
 //! Coverage is chosen to exercise every path in `Patch::tick_step`:
 //!
 //! | patch | exercises |
@@ -428,7 +433,7 @@ fn golden_diode_ladder() {
     assert_golden(
         "diode_ladder",
         render_hash(&mut patch),
-        0xae58_26e6_0315_0055,
+        0x751c_aa6f_4219_5449,
     );
 }
 

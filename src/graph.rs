@@ -4,7 +4,7 @@
 //! arbitrary signal routing between modules. It handles topological sorting,
 //! execution ordering, and signal propagation.
 
-use crate::modules::common::{flush_denorm, sanitize_audio};
+use crate::modules::common::sanitize_flush;
 use crate::port::{GraphModule, ParamId, PortId, PortSpec, PortValues, SignalKind};
 use crate::StdMap;
 use alloc::boxed::Box;
@@ -419,9 +419,17 @@ struct InEdge {
 }
 
 /// Compiled routing plan for a single input port (in [`PortSpec`] input order).
+///
+/// Kept after compile for the parts of the plan that can change at runtime (an input's
+/// default, through [`Patch::set_param_by_id`]); the per-sample walk reads the leaner
+/// [`PatchedInput`] and [`NormalledPlan`] lists instead.
 struct InputPlan {
     /// The input port's id (used as the [`PortValues`] key the module reads).
     port_id: PortId,
+    /// The dense slot of `port_id` in this node's scratch input buffer, resolved once at
+    /// compile with [`PortValues::slot_of`] (so a repeated id resolves to the one slot it
+    /// shares, exactly as a per-sample `set` would).
+    slot: usize,
     /// Value used when the input is unpatched and not normalled.
     default: f64,
     /// Sibling input port this normals to when unpatched (see two-pass gather).
@@ -430,6 +438,16 @@ struct InputPlan {
     /// `has_connection`: when true the input is the sum of its `edges` (even if that sum is
     /// 0.0), taking precedence over the default and any normalled fallback.
     has_connection: bool,
+    /// Whether this input's value is its `default`, written into the scratch input buffer
+    /// once (at compile, and again whenever the default changes) rather than every sample:
+    /// an unpatched, non-normalled input that no later input of the same id overwrites.
+    fixed: bool,
+}
+
+/// A patched input as the per-sample walk sees it: where its value goes and what feeds it.
+struct PatchedInput {
+    /// Dense slot of the input in the node's scratch input buffer.
+    slot: usize,
     /// Cables feeding this input, summed at runtime (hardware-style input mixing).
     edges: Vec<InEdge>,
 }
@@ -442,9 +460,11 @@ struct InputPlan {
 struct NormalledPlan {
     /// The input port to fill in.
     port_id: PortId,
-    /// The pass-1-resolved sibling input to copy from (already collapsed to the chain's
-    /// terminal by [`resolve_normalled_chains`]).
-    source: PortId,
+    /// Dense slot of `port_id` in the node's scratch input buffer.
+    slot: usize,
+    /// Dense slot of the pass-1-resolved sibling input to copy from (already collapsed to
+    /// the chain's terminal by [`resolve_normalled_chains`]).
+    source_slot: usize,
     /// Fallback if the sibling somehow has no value.
     default: f64,
 }
@@ -458,6 +478,13 @@ struct NodeExec {
     out_ids: Vec<PortId>,
     /// Input plans in [`PortSpec`] input order.
     inputs: Vec<InputPlan>,
+    /// The patched inputs `gather` pass 1 sums every sample, in [`PortSpec`] input order:
+    /// exactly those whose value is not overwritten by a later input of the same id.
+    patched: Vec<PatchedInput>,
+    /// Whether this node's scratch output buffer holds `out_ids[k]` at slot `k` for every
+    /// `k`, checked once at compile. True for every well-formed spec; false only for one
+    /// that repeats an output id, whose `scatter` then looks each port up as before.
+    out_by_index: bool,
     /// Exactly the inputs `gather` pass 2 must resolve, in [`PortSpec`] input order. Empty
     /// for the overwhelming majority of nodes.
     normalled_pending: Vec<NormalledPlan>,
@@ -469,40 +496,51 @@ struct NodeExec {
 
 impl NodeExec {
     /// Resolve this node's input values into `dst` using the two-pass normalled rule,
-    /// reading source outputs from the dense `out_buf`. Semantically identical to the
-    /// previous cable-scanning `gather_inputs`, but does a single pass over exactly the
-    /// cables feeding each input.
+    /// reading source outputs from the dense `out_buf`.
+    ///
+    /// Semantically identical to clearing `dst` and setting every input each sample in
+    /// [`PortSpec`] order, which is what it used to do, but it writes only what can change:
+    /// the inputs whose value is a default were written once by
+    /// [`prefill_defaults`](Self::prefill_defaults), and nothing reads or writes `dst`
+    /// between ticks except this function (a module only reads its inputs). Every slot it
+    /// writes was resolved at compile, so each write is an index, not a lookup.
     fn gather(&self, out_buf: &[f64], dst: &mut PortValues) {
-        dst.clear();
-        // Pass 1: patched inputs (summed) and plain (non-normalled) defaults.
-        for plan in &self.inputs {
-            if plan.has_connection {
-                let mut sum = 0.0;
-                for e in &plan.edges {
-                    // Unconditional, because the identity coefficients are exact: `x * 1.0`
-                    // is `x` for every value `out_buf` can hold (scatter has already
-                    // sanitized non-finites away), and `+ 0.0` only ever differs by turning
-                    // a `-0.0` term into `+0.0` — which `sum` would do anyway, since it
-                    // starts at `+0.0` and no sum of the form `+0.0 + x` is `-0.0`.
-                    let attenuated = out_buf[e.src_slot] * e.attenuation;
-                    sum += attenuated + e.offset;
-                }
-                dst.set(plan.port_id, sum);
-            } else if plan.normalled_to.is_none() {
-                dst.set(plan.port_id, plan.default);
+        // Pass 1: patched inputs (summed). Plain defaults are already in place.
+        for plan in &self.patched {
+            let mut sum = 0.0;
+            for e in &plan.edges {
+                // Unconditional, because the identity coefficients are exact: `x * 1.0`
+                // is `x` for every value `out_buf` can hold (scatter has already
+                // sanitized non-finites away), and `+ 0.0` only ever differs by turning
+                // a `-0.0` term into `+0.0` — which `sum` would do anyway, since it
+                // starts at `+0.0` and no sum of the form `+0.0 + x` is `-0.0`.
+                let attenuated = out_buf[e.src_slot] * e.attenuation;
+                sum += attenuated + e.offset;
             }
-            // else: normalled + unpatched -> resolved in pass 2 below.
+            dst.set_at(plan.slot, sum);
         }
         // Pass 2: normalled-but-unpatched inputs read the *current-tick* value of the
         // terminal sibling INPUT they normal to. `resolve_normalled_chains` (at
         // compile time) collapsed each chain so the source points at a sibling pass 1
-        // already resolved, making this pass order-independent; a cycle or dangling
-        // reference was collapsed to `None`, which pass 1 then handles as a plain
-        // default. `normalled_pending` therefore holds exactly the inputs left unset by
-        // pass 1 — no presence test over every input is needed.
+        // resolves (a patched input, or a default prefilled at compile), making this pass
+        // order-independent; a cycle or dangling reference was collapsed to `None`, which
+        // makes the input a plain default. `normalled_pending` therefore holds exactly the
+        // inputs pass 1 does not cover, and no pass-2 input is another's source.
         for plan in &self.normalled_pending {
-            let value = dst.get(plan.source).unwrap_or(plan.default);
-            dst.set(plan.port_id, value);
+            let value = dst.value_at(plan.source_slot).unwrap_or(plan.default);
+            dst.set_at(plan.slot, value);
+        }
+    }
+
+    /// Write every [`fixed`](InputPlan::fixed) input's default into `dst`.
+    ///
+    /// Runs at compile and whenever a default changes ([`Patch::set_param_by_id`]); between
+    /// those, `gather` leaves these slots alone.
+    fn prefill_defaults(&self, dst: &mut PortValues) {
+        for plan in &self.inputs {
+            if plan.fixed {
+                dst.set_at(plan.slot, plan.default);
+            }
         }
     }
 
@@ -519,14 +557,27 @@ impl NodeExec {
     ///
     /// `src` is this node's scratch output buffer, warmed at compile time in [`PortSpec`]
     /// output order — the same order as `out_ids` and as the `out_buf` window starting at
-    /// `out_base`. Slot `k` therefore lines up on both sides and the copy is an indexed
-    /// walk rather than a per-port lookup ([`PortValues::get_at`] re-checks the id and
-    /// falls back to a lookup if a module ever wrote an off-spec port, so the result is
-    /// identical either way).
+    /// `out_base`. Compile checks that once (`out_by_index`), so slot `k` lines up on both
+    /// sides and the copy is an indexed walk with no id check per port. A spec that repeats
+    /// an output id fails the check and takes the old walk, [`PortValues::get_at`], which
+    /// re-checks the id and falls back to a lookup, so the result is identical either way.
+    /// The sanitize and the flush are one comparison ([`sanitize_flush`]), bit for bit the
+    /// two in sequence.
     fn scatter(&self, src: &PortValues, out_buf: &mut [f64]) {
-        for (k, &port_id) in self.out_ids.iter().enumerate() {
-            if let Some(value) = src.get_at(k, port_id) {
-                out_buf[self.out_base + k] = flush_denorm(sanitize_audio(value));
+        let dst = &mut out_buf[self.out_base..self.out_base + self.out_ids.len()];
+        if self.out_by_index {
+            // Slots only ever append, so the layout checked at compile still holds: a
+            // module that writes an off-spec port adds a slot after these.
+            for (k, out) in dst.iter_mut().enumerate() {
+                if let Some(value) = src.value_at(k) {
+                    *out = sanitize_flush(value);
+                }
+            }
+        } else {
+            for (k, &port_id) in self.out_ids.iter().enumerate() {
+                if let Some(value) = src.get_at(k, port_id) {
+                    dst[k] = sanitize_flush(value);
+                }
             }
         }
     }
@@ -596,6 +647,13 @@ fn resolve_normalled_chains(inputs: &mut [InputPlan]) {
 /// covers. A repeated `port_id` (a malformed spec) is skipped once already claimed, matching
 /// the previous `if dst.has(port_id) { continue }` guard exactly.
 fn collect_normalled_pending(inputs: &[InputPlan]) -> Vec<NormalledPlan> {
+    let slot_of = |id: PortId| {
+        inputs
+            .iter()
+            .find(|p| p.port_id == id)
+            .map(|p| p.slot)
+            .expect("a resolved normalled source is one of the node's own inputs")
+    };
     let mut claimed: Vec<PortId> = inputs
         .iter()
         .filter(|p| p.has_connection || p.normalled_to.is_none())
@@ -615,7 +673,8 @@ fn collect_normalled_pending(inputs: &[InputPlan]) -> Vec<NormalledPlan> {
         claimed.push(plan.port_id);
         pending.push(NormalledPlan {
             port_id: plan.port_id,
-            source,
+            slot: plan.slot,
+            source_slot: slot_of(source),
             default: plan.default,
         });
     }
@@ -1439,7 +1498,9 @@ impl Patch {
             routing.nodes.push(NodeExec {
                 out_base,
                 out_ids,
+                out_by_index: false,
                 inputs: Vec::new(),
+                patched: Vec::new(),
                 normalled_pending: Vec::new(),
                 wanted_outputs: u32::MAX,
             });
@@ -1457,7 +1518,12 @@ impl Patch {
 
             let mut scratch_in = PortValues::new();
             let mut scratch_out = PortValues::new();
+            // Warm the input buffer in spec order first, so every input's slot is known.
+            for input in &spec.inputs {
+                scratch_in.set(input.id, 0.0);
+            }
             let mut inputs = Vec::with_capacity(spec.inputs.len());
+            let mut edges_of = Vec::with_capacity(spec.inputs.len());
 
             for input in &spec.inputs {
                 let port_ref = PortRef {
@@ -1486,25 +1552,58 @@ impl Patch {
                 let default = node.override_for(input.id).unwrap_or(input.default);
                 inputs.push(InputPlan {
                     port_id: input.id,
+                    slot: scratch_in
+                        .slot_of(input.id)
+                        .expect("the input buffer was warmed with every input id"),
                     default,
                     normalled_to: input.normalled_to,
                     has_connection,
-                    edges,
+                    fixed: false,
                 });
-                scratch_in.set(input.id, 0.0);
+                edges_of.push(edges);
             }
             // Collapse each normalled chain to its pass-1-resolvable terminal so the
             // runtime two-pass `gather` is order-independent (see the fn's docs).
             resolve_normalled_chains(&mut inputs);
             let normalled_pending = collect_normalled_pending(&inputs);
+            // Pass 1 used to write every patched input's sum and every plain default, in
+            // spec order, each sample; a slot's value was its last writer's. Keep only the
+            // last writer of each slot (all of them, unless a spec repeats an id): a patched
+            // one is summed every sample, a default one is written once (`fixed`).
+            let pass1 = |p: &InputPlan| p.has_connection || p.normalled_to.is_none();
+            let mut patched = Vec::new();
+            for i in 0..inputs.len() {
+                if !pass1(&inputs[i]) {
+                    continue;
+                }
+                let slot = inputs[i].slot;
+                if inputs[i + 1..].iter().any(|p| pass1(p) && p.slot == slot) {
+                    continue;
+                }
+                if inputs[i].has_connection {
+                    patched.push(PatchedInput {
+                        slot,
+                        edges: core::mem::take(&mut edges_of[i]),
+                    });
+                } else {
+                    inputs[i].fixed = true;
+                }
+            }
             for output in &spec.outputs {
                 scratch_out.set(output.id, 0.0);
             }
+            routing.nodes[exec_idx].out_by_index = routing.nodes[exec_idx]
+                .out_ids
+                .iter()
+                .enumerate()
+                .all(|(k, &id)| scratch_out.slot_of(id) == Some(k));
 
             routing.nodes[exec_idx].wanted_outputs =
                 self.consumed_output_mask(node_id, &routing.nodes[exec_idx].out_ids);
             routing.nodes[exec_idx].normalled_pending = normalled_pending;
             routing.nodes[exec_idx].inputs = inputs;
+            routing.nodes[exec_idx].patched = patched;
+            routing.nodes[exec_idx].prefill_defaults(&mut scratch_in);
             routing.scratch_in.push(scratch_in);
             routing.scratch_out.push(scratch_out);
         }
@@ -2028,6 +2127,11 @@ impl Patch {
                 if let Some(exec) = self.routing.nodes.get_mut(exec_idx) {
                     if let Some(plan) = exec.inputs.iter_mut().find(|p| p.port_id == port_id) {
                         plan.default = value;
+                    }
+                    // A default is written into the input buffer once, not every sample:
+                    // write it again so the next tick reads the new value.
+                    if let Some(scratch) = self.routing.scratch_in.get_mut(exec_idx) {
+                        exec.prefill_defaults(scratch);
                     }
                     if let Some(pending) = exec
                         .normalled_pending
@@ -2816,6 +2920,105 @@ mod tests {
         assert!(!patch.set_param_by_id(vca.id(), "no_such_port", 1.0));
         assert!(!patch.set_param_by_id(vca.id(), "in", 1.0));
         assert_eq!(patch.get_param_by_id(vca.id(), "in"), None);
+    }
+
+    /// Control inputs with a normal and repeated ids: what `gather` must resolve exactly as
+    /// the per-sample "clear, then set every input in spec order" walk did.
+    struct Knobs {
+        spec: PortSpec,
+    }
+    impl Knobs {
+        fn new() -> Self {
+            Self {
+                spec: PortSpec {
+                    inputs: vec![
+                        PortDef::new(0, "a", SignalKind::CvUnipolar).with_default(1.0),
+                        PortDef::new(1, "b", SignalKind::CvUnipolar)
+                            .with_default(2.0)
+                            .normalled_to(0),
+                        PortDef::new(2, "c", SignalKind::CvUnipolar).with_default(3.0),
+                        // Repeats id 2: the later default wins, as it did when written last.
+                        PortDef::new(2, "d", SignalKind::CvUnipolar).with_default(4.0),
+                        // Id 3 twice, patched: a cable to an id reaches both, so both sum it.
+                        PortDef::new(3, "e", SignalKind::Audio),
+                        PortDef::new(3, "f", SignalKind::CvUnipolar).with_default(6.0),
+                    ],
+                    outputs: vec![
+                        PortDef::new(10, "a", SignalKind::CvUnipolar),
+                        PortDef::new(11, "b", SignalKind::CvUnipolar),
+                        PortDef::new(12, "c", SignalKind::CvUnipolar),
+                        PortDef::new(13, "e", SignalKind::CvUnipolar),
+                    ],
+                },
+            }
+        }
+    }
+    impl GraphModule for Knobs {
+        fn port_spec(&self) -> &PortSpec {
+            &self.spec
+        }
+        fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+            for (k, id) in [0, 1, 2, 3].into_iter().enumerate() {
+                outputs.set(10 + k as PortId, inputs.get_or(id, f64::NAN));
+            }
+        }
+        fn reset(&mut self) {}
+        fn set_sample_rate(&mut self, _: f64) {}
+    }
+
+    fn knobs_patch() -> (Patch, NodeId) {
+        let mut patch = Patch::new(44100.0);
+        let src = patch.add("src", ConstSource::new(9.0));
+        let knobs = patch.add("knobs", Knobs::new());
+        patch.connect(src.out("out"), knobs.in_("e")).unwrap();
+        patch.set_output(knobs.id());
+        patch.compile().unwrap();
+        (patch, knobs.id())
+    }
+
+    fn knob_values(patch: &mut Patch, node: NodeId) -> [f64; 4] {
+        patch.tick();
+        [10, 11, 12, 13].map(|port| patch.get_output_value(node, port).unwrap())
+    }
+
+    // Defaults are written into the input buffer once, at compile; `set_param_by_id` on a
+    // compiled patch must write them again, normals included, with no recompile.
+    #[test]
+    fn test_prefilled_defaults_follow_set_param_by_id() {
+        let (mut patch, knobs) = knobs_patch();
+        assert_eq!(knob_values(&mut patch, knobs), [1.0, 1.0, 4.0, 9.0]);
+        assert_eq!(knob_values(&mut patch, knobs), [1.0, 1.0, 4.0, 9.0]);
+
+        // `a` changes, and `b`, normalled to it, follows on the very next tick.
+        assert!(patch.set_param_by_id(knobs, "a", 5.0));
+        assert!(!patch.dirty);
+        assert_eq!(knob_values(&mut patch, knobs), [5.0, 5.0, 4.0, 9.0]);
+        assert!(patch.set_param_by_id(knobs, "a", -0.25));
+        assert_eq!(knob_values(&mut patch, knobs)[..2], [-0.25, -0.25]);
+        // `b`'s own default is pass 2's fallback only; it does not override the normal.
+        assert!(patch.set_param_by_id(knobs, "b", 8.0));
+        assert_eq!(knob_values(&mut patch, knobs)[1], -0.25);
+        // `f` is cabled (through `e`'s id), so its default is shadowed.
+        assert!(!patch.set_param_by_id(knobs, "f", 1.5));
+        assert_eq!(knob_values(&mut patch, knobs)[3], 9.0);
+
+        // A recompile writes the same values in, and a fresh patch with the same
+        // overrides agrees.
+        let live = knob_values(&mut patch, knobs);
+        patch.compile().unwrap();
+        assert_eq!(
+            knob_values(&mut patch, knobs).map(f64::to_bits),
+            live.map(f64::to_bits)
+        );
+        let (mut fresh, fresh_knobs) = knobs_patch();
+        for (name, value) in [("a", -0.25), ("b", 8.0), ("f", 1.5)] {
+            fresh.set_param_by_id(fresh_knobs, name, value);
+        }
+        fresh.compile().unwrap();
+        assert_eq!(
+            knob_values(&mut fresh, fresh_knobs).map(f64::to_bits),
+            live.map(f64::to_bits)
+        );
     }
 
     // Q-N3: before the first compile the override is simply baked in by `compile`.

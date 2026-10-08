@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This changelog is auto-generated from git history. Run `make changelog` to update.
 Sections above the auto-generated marker are hand-written and are preserved.
 
+## [0.4.1] - unreleased
+
+A performance release: the diode ladder's saturation and the per-sample graph walk cost
+less. The public API is unchanged. Every patch renders bit for bit as in 0.4.0, except
+those with a `DiodeLadderFilter`, whose output moves by a rounding (see *Changed*).
+
+Measured downstream in Auracle's phrase-render benchmark (a set of 18 patches, CPU time,
+alternating builds, the least of three rounds of three), against 0.4.0: the set takes
+30% less CPU time natively and 32% less in wasm (under node), and patches built on the
+ladder about 40% less in both.
+
+### Performance
+
+- **The ladder's saturation is a Padé approximant.** `DiodeLadderFilter` called libm's
+  `tanh` 19 times a sample; it now calls a clamped Padé (7,6) `tanh` 16 times (the
+  saturation after the fourth stage fed nothing and is gone). A ladder patch takes
+  about 20% less time from this alone.
+- **The graph walk writes only what changes.** A node's inputs are no longer cleared and
+  set again by id every sample: each input's slot is resolved at compile, an unpatched
+  input's default is written once (and again when `set_param_by_id` changes it), and a
+  patched input's sum is written by index. Outputs are scattered by index after the
+  layout is checked once at compile, and the non-finite sanitize and the tiny-value flush
+  are one comparison. The gather saves about 20% of a render, the scatter 5%.
+- **`PortValues` finds a contiguously numbered port without a scan**, which is how nearly
+  every module numbers its ports: about 4% natively and 7% in wasm.
+
+### Changed
+
+- **`DiodeLadderFilter`'s output differs from 0.4.0 by a rounding.** Its diode
+  saturation uses a (7,6) Padé approximant of `tanh`, clamped to `[-1, 1]` (its argument
+  first to `±5`): within 1.2e-8 of `tanh` below |x| = 2 and 9.7e-5 at worst, where it
+  meets the clamp at |x| = 4.97. Golden `diode_ladder` moved
+  (`0xae58_26e6_0315_0055 → 0x751c_aa6f_4219_5449`); the other golden patches are
+  unchanged. In Auracle's measurement of 62 presets, no audio feature moved by more than
+  2e-10 of its spread. Every other `tanh` in the crate is still libm's.
+
 ## [0.4.0] - unreleased
 
 A correctness pass driven by the September 2026 stack audit (findings Q-N1 … Q-N8), and

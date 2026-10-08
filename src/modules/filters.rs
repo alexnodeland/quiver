@@ -244,10 +244,25 @@ impl DiodeLadderFilter {
     fn diode_sat(x: f64) -> f64 {
         // Asymmetric tanh-like saturation mimicking diode behavior
         if x >= 0.0 {
-            Libm::<f64>::tanh(x * 1.2)
+            Self::tanh_pade(x * 1.2)
         } else {
-            Libm::<f64>::tanh(x * 0.8)
+            Self::tanh_pade(x * 0.8)
         }
+    }
+
+    /// tanh by its (7,6) Pade approximant, clamped to [-1, 1]: within 1.2e-8
+    /// of tanh below |x| = 2 and 9.7e-5 at worst (where it clamps, |x| = 4.97).
+    ///
+    /// The argument is clamped to ±5 first, where the approximant is already
+    /// past 1 and clamps anyway, so a huge finite argument cannot overflow
+    /// the numerator and denominator into `inf / inf = NaN`.
+    #[inline]
+    fn tanh_pade(x: f64) -> f64 {
+        let x = x.clamp(-5.0, 5.0);
+        let x2 = x * x;
+        let n = x * (135135.0 + x2 * (17325.0 + x2 * (378.0 + x2)));
+        let d = 135135.0 + x2 * (62370.0 + x2 * (3150.0 + 28.0 * x2));
+        (n / d).clamp(-1.0, 1.0)
     }
 
     /// Run the 4-stage saturated one-pole cascade once for input `u` (volts)
@@ -269,8 +284,10 @@ impl DiodeLadderFilter {
             let yi = v + s[i]; // TPT output
             y[i] = yi;
             new_s[i] = yi + v; // = 2·y - s_old  (bilinear pole)
-                               // Inter-stage diode saturation feeds the next pole.
-            x = Self::diode_sat(yi / 5.0) * 5.0;
+            if i < 3 {
+                // Inter-stage diode saturation feeds the next pole; the fourth has none.
+                x = Self::diode_sat(yi / 5.0) * 5.0;
+            }
         }
         (y, new_s)
     }
@@ -639,6 +656,31 @@ mod tests {
         // LP output should exist
         assert!(outputs.get(10).is_some());
     }
+    #[test]
+    fn test_ladder_tanh_pade_error_and_range() {
+        // Within 1.2e-8 of tanh below |x| = 2, within 9.7e-5 everywhere, odd, and in [-1, 1].
+        let mut worst_low = 0.0f64;
+        let mut worst = 0.0f64;
+        for i in 0..=200_000 {
+            let x = i as f64 * 1e-4; // 0 ..= 20
+            let p = DiodeLadderFilter::tanh_pade(x);
+            let err = (p - Libm::<f64>::tanh(x)).abs();
+            if x < 2.0 {
+                worst_low = worst_low.max(err);
+            }
+            worst = worst.max(err);
+            assert!((0.0..=1.0).contains(&p));
+            assert_eq!(DiodeLadderFilter::tanh_pade(-x).to_bits(), (-p).to_bits());
+        }
+        assert!(worst_low < 1.2e-8, "below 2: {worst_low}");
+        assert!(worst < 9.7e-5, "worst: {worst}");
+        // A huge finite argument saturates instead of overflowing into inf / inf = NaN.
+        for x in [1e60, f64::MAX, f64::INFINITY] {
+            assert_eq!(DiodeLadderFilter::tanh_pade(x), 1.0);
+            assert_eq!(DiodeLadderFilter::tanh_pade(-x), -1.0);
+        }
+    }
+
     #[test]
     fn test_svf_default_reset_sample_rate() {
         let mut svf = Svf::default();
