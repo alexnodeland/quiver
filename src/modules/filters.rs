@@ -269,8 +269,10 @@ impl DiodeLadderFilter {
             let yi = v + s[i]; // TPT output
             y[i] = yi;
             new_s[i] = yi + v; // = 2·y - s_old  (bilinear pole)
-                               // Inter-stage diode saturation feeds the next pole.
-            x = Self::diode_sat(yi / 5.0) * 5.0;
+            if i < 3 {
+                // Inter-stage diode saturation feeds the next pole; the fourth has none.
+                x = Self::diode_sat(yi / 5.0) * 5.0;
+            }
         }
         (y, new_s)
     }
