@@ -352,6 +352,16 @@ impl PortValues {
     /// read and write it by index ([`value_at`](Self::value_at), [`set_at`](Self::set_at)).
     #[inline]
     pub(crate) fn slot_of(&self, id: PortId) -> Option<usize> {
+        // Fast path: a module's ports are usually numbered contiguously from its first one
+        // (inputs 0, 1, 2, …; outputs 10, 11, …), and a container warmed in spec order
+        // holds them in that order, so `id - ids[0]` is the slot. Ids are unique, so a hit
+        // is the slot the scan would find; a miss (a wrap included) falls back to the scan.
+        if let Some(&first) = self.ids.first() {
+            let guess = id.wrapping_sub(first) as usize;
+            if self.ids.get(guess) == Some(&id) {
+                return Some(guess);
+            }
+        }
         self.ids.iter().position(|&candidate| candidate == id)
     }
 
@@ -1040,6 +1050,31 @@ mod tests {
         assert!(spec.input_by_id(99).is_none());
         assert!(spec.output_by_id(10).is_some());
         assert!(spec.output_by_id(99).is_none());
+    }
+
+    // The contiguous-id guess in `slot_of` finds exactly the slot the scan does.
+    #[test]
+    fn test_port_values_slot_of_matches_scan() {
+        let layouts: [&[PortId]; 6] = [
+            &[0, 1, 2, 3, 4, 5],
+            &[10, 11, 12, 13],
+            &[10, 12, 11, 13, 20],
+            &[5, 0, 1, 2],
+            &[u32::MAX, 0, 1, u32::MAX - 1],
+            &[3, 7, 1, 100, 2],
+        ];
+        for ids in layouts {
+            let mut pv = PortValues::new();
+            for &id in ids {
+                pv.set(id, 1.0);
+            }
+            for probe in (0..130).chain([u32::MAX, u32::MAX - 1, u32::MAX - 2]) {
+                let scan = ids.iter().position(|&id| id == probe);
+                assert_eq!(pv.slot_of(probe), scan, "{ids:?} probing {probe}");
+                assert_eq!(pv.has(probe), scan.is_some());
+            }
+        }
+        assert_eq!(PortValues::new().slot_of(0), None);
     }
 
     #[test]
