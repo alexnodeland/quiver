@@ -11,6 +11,13 @@ on:
         required: false
         default: false
         type: boolean
+  # From auto-release.yml, once a version bump lands on main (no tag yet).
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version being released (e.g., v0.4.1)'
+        required: true
+        type: string
 
 jobs:
   publish:
@@ -63,8 +70,11 @@ jobs:
         run: npm run build:ts
 
       - name: Verify package versions
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION_TAG="${INPUT_VERSION:-${GITHUB_REF#refs/tags/}}"
+          TAG_VERSION="${VERSION_TAG#v}"
           echo "Tag version: $TAG_VERSION"
 
           # Check each package version matches
