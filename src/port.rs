@@ -347,8 +347,11 @@ impl PortValues {
     }
 
     /// Dense slot holding `id`, whether or not it currently holds a value.
+    ///
+    /// Crate-visible so the graph can resolve a port's slot once at compile time and then
+    /// read and write it by index ([`value_at`](Self::value_at), [`set_at`](Self::set_at)).
     #[inline]
-    fn slot_of(&self, id: PortId) -> Option<usize> {
+    pub(crate) fn slot_of(&self, id: PortId) -> Option<usize> {
         self.ids.iter().position(|&candidate| candidate == id)
     }
 
@@ -410,6 +413,21 @@ impl PortValues {
             Some(&found) if found == id => self.values[slot],
             _ => self.get(id),
         }
+    }
+
+    /// Value at dense slot `slot`, `None` if it is unwritten since the last
+    /// [`clear`](Self::clear). `slot` must come from [`slot_of`](Self::slot_of) on this
+    /// container (slots are stable: ids are only ever appended).
+    #[inline]
+    pub(crate) fn value_at(&self, slot: usize) -> Option<f64> {
+        self.values[slot]
+    }
+
+    /// Write `value` at dense slot `slot`, exactly as [`set`](Self::set) would for the id
+    /// that holds it. `slot` must come from [`slot_of`](Self::slot_of) on this container.
+    #[inline]
+    pub(crate) fn set_at(&mut self, slot: usize, value: f64) {
+        self.values[slot] = Some(value);
     }
 
     /// Iterate the ports that currently hold a value, in slot order.
