@@ -4,7 +4,7 @@
 //! arbitrary signal routing between modules. It handles topological sorting,
 //! execution ordering, and signal propagation.
 
-use crate::modules::common::{flush_denorm, sanitize_audio};
+use crate::modules::common::sanitize_flush;
 use crate::port::{GraphModule, ParamId, PortId, PortSpec, PortValues, SignalKind};
 use crate::StdMap;
 use alloc::boxed::Box;
@@ -481,6 +481,10 @@ struct NodeExec {
     /// The patched inputs `gather` pass 1 sums every sample, in [`PortSpec`] input order:
     /// exactly those whose value is not overwritten by a later input of the same id.
     patched: Vec<PatchedInput>,
+    /// Whether this node's scratch output buffer holds `out_ids[k]` at slot `k` for every
+    /// `k`, checked once at compile. True for every well-formed spec; false only for one
+    /// that repeats an output id, whose `scatter` then looks each port up as before.
+    out_by_index: bool,
     /// Exactly the inputs `gather` pass 2 must resolve, in [`PortSpec`] input order. Empty
     /// for the overwhelming majority of nodes.
     normalled_pending: Vec<NormalledPlan>,
@@ -553,14 +557,27 @@ impl NodeExec {
     ///
     /// `src` is this node's scratch output buffer, warmed at compile time in [`PortSpec`]
     /// output order — the same order as `out_ids` and as the `out_buf` window starting at
-    /// `out_base`. Slot `k` therefore lines up on both sides and the copy is an indexed
-    /// walk rather than a per-port lookup ([`PortValues::get_at`] re-checks the id and
-    /// falls back to a lookup if a module ever wrote an off-spec port, so the result is
-    /// identical either way).
+    /// `out_base`. Compile checks that once (`out_by_index`), so slot `k` lines up on both
+    /// sides and the copy is an indexed walk with no id check per port. A spec that repeats
+    /// an output id fails the check and takes the old walk, [`PortValues::get_at`], which
+    /// re-checks the id and falls back to a lookup, so the result is identical either way.
+    /// The sanitize and the flush are one comparison ([`sanitize_flush`]), bit for bit the
+    /// two in sequence.
     fn scatter(&self, src: &PortValues, out_buf: &mut [f64]) {
-        for (k, &port_id) in self.out_ids.iter().enumerate() {
-            if let Some(value) = src.get_at(k, port_id) {
-                out_buf[self.out_base + k] = flush_denorm(sanitize_audio(value));
+        let dst = &mut out_buf[self.out_base..self.out_base + self.out_ids.len()];
+        if self.out_by_index {
+            // Slots only ever append, so the layout checked at compile still holds: a
+            // module that writes an off-spec port adds a slot after these.
+            for (k, out) in dst.iter_mut().enumerate() {
+                if let Some(value) = src.value_at(k) {
+                    *out = sanitize_flush(value);
+                }
+            }
+        } else {
+            for (k, &port_id) in self.out_ids.iter().enumerate() {
+                if let Some(value) = src.get_at(k, port_id) {
+                    dst[k] = sanitize_flush(value);
+                }
             }
         }
     }
@@ -1481,6 +1498,7 @@ impl Patch {
             routing.nodes.push(NodeExec {
                 out_base,
                 out_ids,
+                out_by_index: false,
                 inputs: Vec::new(),
                 patched: Vec::new(),
                 normalled_pending: Vec::new(),
@@ -1574,6 +1592,11 @@ impl Patch {
             for output in &spec.outputs {
                 scratch_out.set(output.id, 0.0);
             }
+            routing.nodes[exec_idx].out_by_index = routing.nodes[exec_idx]
+                .out_ids
+                .iter()
+                .enumerate()
+                .all(|(k, &id)| scratch_out.slot_of(id) == Some(k));
 
             routing.nodes[exec_idx].wanted_outputs =
                 self.consumed_output_mask(node_id, &routing.nodes[exec_idx].out_ids);

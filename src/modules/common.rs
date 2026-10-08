@@ -132,6 +132,22 @@ pub fn flush_denorm(x: f64) -> f64 {
     }
 }
 
+/// `flush_denorm(sanitize_audio(x))` in one comparison: `x` when `1e-20 <= |x| < inf`,
+/// else `+0.0`.
+///
+/// Bit-identical to the composition for every input (NaN and ±inf to `+0.0` through
+/// `sanitize_audio`, then `fabs(0.0) < 1e-20` to `+0.0`; ±0.0 and anything under the
+/// floor, subnormals included, to `+0.0`; everything else unchanged), because a NaN fails
+/// both of the range's comparisons. The graph's scatter applies it to every output.
+#[inline]
+pub(crate) fn sanitize_flush(x: f64) -> f64 {
+    if (1e-20..f64::INFINITY).contains(&Libm::<f64>::fabs(x)) {
+        x
+    } else {
+        0.0
+    }
+}
+
 /// Wrap a phase accumulator into `[0, 1)`, recovering from non-finite values.
 ///
 /// Q198: oscillator phase accumulators are recursive state, so a single
@@ -360,8 +376,60 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{voct_to_hz, Memo, C4_HZ};
+    use super::{flush_denorm, sanitize_audio, sanitize_flush, voct_to_hz, Memo, C4_HZ};
     use libm::Libm;
+
+    #[test]
+    fn test_sanitize_flush_is_the_composition_bit_for_bit() {
+        let mut cases = vec![
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7ff0_0000_0000_0001), // signalling NaN
+            f64::from_bits(0xfff8_dead_beef_0001), // negative NaN with a payload
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -0.0,
+            f64::from_bits(1), // smallest subnormal
+            -f64::from_bits(1),
+            f64::from_bits(0x000f_ffff_ffff_ffff), // largest subnormal
+            -f64::from_bits(0x000f_ffff_ffff_ffff),
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
+            1e-21,
+            -1e-21,
+            1e-20,
+            -1e-20,
+            f64::from_bits(1e-20f64.to_bits() - 1), // just under the floor
+            f64::from_bits(1e-20f64.to_bits() + 1), // just over it
+            -f64::from_bits(1e-20f64.to_bits() - 1),
+            1e-19,
+            0.5,
+            -0.5,
+            1.0,
+            -1.0,
+            10.0,
+            -10.0,
+            1e300,
+            f64::MAX,
+            f64::MIN,
+            core::f64::consts::PI,
+        ];
+        // A sweep of exponents across the whole range, both signs.
+        for e in -1075..=1024 {
+            let x = Libm::<f64>::pow(2.0, e as f64) * 1.25;
+            cases.push(x);
+            cases.push(-x);
+        }
+        for x in cases {
+            assert_eq!(
+                sanitize_flush(x).to_bits(),
+                flush_denorm(sanitize_audio(x)).to_bits(),
+                "{x:e} ({:#018x})",
+                x.to_bits()
+            );
+        }
+    }
 
     #[test]
     fn test_memo_first_call_always_computes() {
