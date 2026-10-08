@@ -1,0 +1,104 @@
+name: Auto release
+
+# A version bump that lands on main releases itself: crates.io, npm, then the
+# tag and the GitHub release, in that order.
+#
+# Until now a release started from a pushed `v*` tag (publish-crates.yml,
+# publish-npm.yml and release.yml all run on one) or by hand. Neither works
+# from a checkout that may push branches but not tags, or start no workflows
+# (an agent session's GitHub access). Here the bump itself is the trigger:
+# when Cargo.toml's version has no tag yet, the three workflows run as
+# reusable workflows, and release.yml's GitHub release creates the tag last,
+# so a tag only ever names a version that published. A tag made that way
+# (with GITHUB_TOKEN) starts no other workflow, so nothing runs twice.
+#
+# Each publish is skipped when its registry already has the version, so a
+# run that failed half-way is finished by the next push to main.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Is there a version to release?
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.v.outputs.release }}
+      version: ${{ steps.v.outputs.version }}
+      crates: ${{ steps.v.outputs.crates }}
+      npm: ${{ steps.v.outputs.npm }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the version, and what is already out
+        id: v
+        run: |
+          set -euo pipefail
+          number=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          version="v$number"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null; then
+            echo "::notice::$version is already tagged: nothing to release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          ua="quiver-auto-release (github.com/$GITHUB_REPOSITORY)"
+          crates=$(curl -sS -o /dev/null -w '%{http_code}' -A "$ua" \
+            "https://crates.io/api/v1/crates/quiver-dsp/$number")
+          # Publish to crates.io unless it already has this version.
+          if [ "$crates" = 200 ]; then echo "crates=false"; else echo "crates=true"; fi >> "$GITHUB_OUTPUT"
+          # npm: publish unless every package already has it.
+          npm=false
+          for pkg in types wasm react; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              "https://registry.npmjs.org/@quiver-dsp%2F$pkg/$number")
+            [ "$code" = 200 ] || npm=true
+          done
+          echo "npm=$npm" >> "$GITHUB_OUTPUT"
+          echo "::notice::Releasing $version (crates.io: $([ "$crates" = 200 ] && echo has it || echo publish), npm: $npm)"
+
+  crates:
+    name: crates.io
+    needs: detect
+    if: needs.detect.outputs.release == 'true' && needs.detect.outputs.crates == 'true'
+    uses: ./.github/workflows/publish-crates.yml
+    with:
+      version: ${{ needs.detect.outputs.version }}
+    secrets: inherit
+
+  npm:
+    name: npm
+    needs: [detect, crates]
+    # After crates.io, whether it ran or was skipped as already published,
+    # but never after it failed.
+    if: >-
+      always() && needs.detect.outputs.release == 'true' &&
+      needs.detect.outputs.npm == 'true' &&
+      (needs.crates.result == 'success' || needs.crates.result == 'skipped')
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-npm.yml
+    with:
+      version: ${{ needs.detect.outputs.version }}
+    secrets: inherit
+
+  release:
+    name: Tag and GitHub release
+    needs: [detect, crates, npm]
+    if: >-
+      always() && needs.detect.outputs.release == 'true' &&
+      (needs.crates.result == 'success' || needs.crates.result == 'skipped') &&
+      (needs.npm.result == 'success' || needs.npm.result == 'skipped')
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ needs.detect.outputs.version }}
+    secrets: inherit

@@ -2879,9 +2879,18 @@ mod tests {
 
     /// The stretch allpass is unity-magnitude, so a stretched string still
     /// decays — the loop gain is below one at every frequency.
+    ///
+    /// Seeded, and judged on each window's RMS rather than its peak. Unseeded,
+    /// the pluck's noise came from the thread-wide stream, so the outcome
+    /// moved with whichever tests ran first on the thread; and a window's peak
+    /// is one sample of that noise: over 16 seeds the late/early peak ratio
+    /// ran 0.37 to 0.66 against the old limit of 0.5, while the RMS ratio
+    /// stays between 0.60 and 0.71 (damping 0.9 loses about a third of the
+    /// energy in two seconds). A string that does not decay reads about 1.
     #[test]
     fn test_ks_stretched_string_decays() {
         let mut ks = KarplusStrong::new(44100.0);
+        ks.seed(1);
         let mut inputs = PortValues::new();
         let mut outputs = PortValues::new();
         inputs.set(0, -1.0);
@@ -2890,21 +2899,27 @@ mod tests {
         inputs.set(1, 5.0);
         ks.tick(&inputs, &mut outputs);
         inputs.set(1, 0.0);
-        let mut early = 0.0f64;
-        let mut late = 0.0f64;
+        let mut early_peak = 0.0f64;
+        let mut early_energy = 0.0f64;
+        let mut late_energy = 0.0f64;
         for n in 0..88200 {
             ks.tick(&inputs, &mut outputs);
-            let y = outputs.get(10).unwrap().abs();
+            let y = outputs.get(10).unwrap();
             if n < 4410 {
-                early = early.max(y);
+                early_peak = early_peak.max(y.abs());
+                early_energy += y * y;
             } else if n >= 88200 - 4410 {
-                late = late.max(y);
+                late_energy += y * y;
             }
         }
-        assert!(early > 0.05, "stretched string did not ring: {early}");
         assert!(
-            late < early * 0.5,
-            "stretched string did not decay: {early} -> {late}"
+            early_peak > 0.05,
+            "stretched string did not ring: {early_peak}"
+        );
+        let ratio = (late_energy / early_energy).sqrt();
+        assert!(
+            ratio < 0.8,
+            "stretched string did not decay: RMS ratio {ratio}"
         );
     }
 
