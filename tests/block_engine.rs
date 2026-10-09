@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use quiver::io::ExternalOutput;
 use quiver::modules::{
     Bitcrusher, Chorus, Clock, Comparator, Compressor, Crossfader, DelayLine, Distortion,
     EnvelopeFollower, Euclidean, FormantOsc, KarplusStrong, Limiter, Max, Min, Mixer, NoiseGate,
@@ -320,6 +321,9 @@ fn every_kind_with_a_block_path_and_some_without() {
         ("comparator", || Box::new(Comparator::new())),
         ("min", || Box::new(Min::new())),
         ("max", || Box::new(Max::new())),
+        ("external_input", || {
+            Box::new(ExternalInput::cv(Arc::new(AtomicF64::new(0.375))))
+        }),
         // Without one: the per-sample path inside a block.
         ("diode_ladder", || Box::new(DiodeLadderFilter::new(SR))),
         ("ring_bernoulli", || Box::new(BernoulliGate::new())),
@@ -327,10 +331,43 @@ fn every_kind_with_a_block_path_and_some_without() {
         ("multiple", || Box::new(Multiple::new())),
         ("analog_vco", || Box::new(AnalogVco::new(SR))),
     ];
-    for (kind, make) in kinds {
+    let with_block = kinds.iter().position(|k| k.0 == "diode_ladder").unwrap();
+    for (index, (kind, make)) in kinds.into_iter().enumerate() {
+        // The block path is really taken: driven the way the patch drives it (its spec's
+        // port counts and first ids), the module accepts the block, so a drift in an
+        // override's port counts or numbering cannot silently lose the fast path.
+        assert_eq!(
+            takes_blocks(make()),
+            index < with_block,
+            "`{kind}`: tick_frames accepted a block?"
+        );
         let build = one_of(kind, make);
         check(kind, &build, 6_000);
     }
+}
+
+/// Whether `module` accepts a block laid out as `Patch::tick_block` lays out its ports.
+fn takes_blocks(mut module: Box<dyn GraphModule>) -> bool {
+    let spec = module.port_spec().clone();
+    let (ins, outs) = (spec.inputs.len(), spec.outputs.len());
+    let frames = 4;
+    let input_rows = vec![0.25; ins.max(1) * frames];
+    let mut output_rows = vec![0.0; outs.max(1) * frames];
+    let inputs = BlockInputs::new(
+        &input_rows,
+        frames,
+        frames,
+        ins,
+        spec.inputs.first().map_or(0, |p| p.id),
+    );
+    let mut outputs = BlockOutputs::new(
+        &mut output_rows,
+        frames,
+        frames,
+        outs,
+        spec.outputs.first().map_or(0, |p| p.id),
+    );
+    module.tick_frames(&inputs, &mut outputs, u32::MAX)
 }
 
 /// A `Mixer <-> DelayLine` feedback loop between a VCO and a filter: the loop runs sample
@@ -684,4 +721,141 @@ fn a_module_tick_frames_can_be_driven_by_hand() {
     let mut outputs = BlockOutputs::new(&mut outs, 8, frames, 1, 10);
     assert!(!by_block.tick_frames(&inputs, &mut outputs, u32::MAX));
     assert_eq!(outputs.written(), 0);
+}
+
+#[test]
+fn reset_seed_remove_and_disconnect_between_blocks() {
+    let edits = || -> Vec<(usize, Edit)> {
+        vec![
+            (1_500, Box::new(|p: &mut Patch| p.reset())),
+            (
+                2_222,
+                Box::new(|p: &mut Patch| {
+                    let lfo = p.get_node_id_by_name("lfo").unwrap();
+                    p.remove(lfo).unwrap();
+                }),
+            ),
+            (
+                4_000,
+                Box::new(|p: &mut Patch| {
+                    let svf = p.get_handle_by_name("svf").unwrap();
+                    let vca = p.get_handle_by_name("vca").unwrap();
+                    p.disconnect_ports(svf.out("lp"), vca.in_("in")).unwrap();
+                    p.connect(svf.out("bp"), vca.in_("in")).unwrap();
+                }),
+            ),
+            (5_001, Box::new(|p: &mut Patch| p.reset())),
+        ]
+    };
+    check_with(
+        "reset_remove_disconnect",
+        &subtractive,
+        7_000,
+        &edits,
+        &|| {},
+    );
+
+    // Seeding after compile: the unseeded noise sources' group is kept until the next
+    // recompile (here, a disconnect), and both renders agree throughout.
+    let edits = || -> Vec<(usize, Edit)> {
+        vec![
+            (1_000, Box::new(|p: &mut Patch| p.seed(7))),
+            (2_500, Box::new(|p: &mut Patch| p.reset())),
+            (
+                4_100,
+                Box::new(|p: &mut Patch| {
+                    let n2 = p.get_handle_by_name("n2").unwrap();
+                    let mix = p.get_handle_by_name("mix").unwrap();
+                    p.disconnect_ports(n2.out("pink"), mix.in_("ch1")).unwrap();
+                }),
+            ),
+        ]
+    };
+    check_with(
+        "seed_after_compile",
+        &two_unseeded_noises,
+        6_000,
+        &edits,
+        &|| quiver::rng::seed(0x5EED),
+    );
+}
+
+/// An `ExternalOutput` writing the cell an `ExternalInput` of the same patch reads: the
+/// reader must see the writer's value frame by frame, as with `tick` — both name the cell
+/// (`shares_state`), so they run as one group. Two plain readers on host knobs alongside
+/// share nothing anyone writes.
+fn loopback() -> Patch {
+    let mut p = Patch::new(SR);
+    let cell = Arc::new(AtomicF64::new(0.0));
+    let knob = Arc::new(AtomicF64::new(0.5));
+    let lfo = p.add("lfo", Lfo::new(SR));
+    let tx = p.add(
+        "tx",
+        ExternalOutput::new(Arc::clone(&cell), SignalKind::Audio),
+    );
+    let rx = p.add(
+        "rx",
+        ExternalInput::new(Arc::clone(&cell), SignalKind::Audio),
+    );
+    let k1 = p.add("k1", ExternalInput::cv(Arc::clone(&knob)));
+    let k2 = p.add("k2", ExternalInput::cv(knob));
+    let vca = p.add("vca", Vca::new());
+    let out = p.add("out", StereoOutput::new());
+    p.connect(lfo.out("sin"), tx.in_("in")).unwrap();
+    p.connect(rx.out("out"), vca.in_("in")).unwrap();
+    p.connect(k1.out("out"), vca.in_("gain")).unwrap();
+    p.connect(vca.out("out"), out.in_("left")).unwrap();
+    p.connect(k2.out("out"), out.in_("right")).unwrap();
+    p.set_output(out.id());
+    p.compile().unwrap();
+    p
+}
+
+#[test]
+fn an_external_output_looped_into_an_external_input() {
+    assert!(audible(&loopback, 2_000));
+    check("loopback", &loopback, 5_000);
+    // Built the other way round (the reader added first) too.
+    let reversed = || {
+        let mut p = Patch::new(SR);
+        let cell = Arc::new(AtomicF64::new(0.0));
+        let rx = p.add(
+            "rx",
+            ExternalInput::new(Arc::clone(&cell), SignalKind::Audio),
+        );
+        let out = p.add("out", StereoOutput::new());
+        let lfo = p.add("lfo", Lfo::new(SR));
+        let tx = p.add("tx", ExternalOutput::new(cell, SignalKind::Audio));
+        p.connect(lfo.out("tri"), tx.in_("in")).unwrap();
+        p.connect(rx.out("out"), out.in_("left")).unwrap();
+        p.set_output(out.id());
+        p.compile().unwrap();
+        p
+    };
+    check("loopback_reversed", &reversed, 5_000);
+}
+
+#[test]
+#[should_panic(expected = "a block of frames must fit in its stride")]
+fn block_outputs_reject_frames_longer_than_their_stride() {
+    let mut out = [0.0; 8];
+    let _ = BlockOutputs::new(&mut out, 0, 8, 1, 10);
+}
+
+#[test]
+#[should_panic(expected = "a block of frames must fit in its stride")]
+fn block_inputs_reject_frames_longer_than_their_stride() {
+    let data = [0.0; 8];
+    let _ = BlockInputs::new(&data, 2, 8, 1, 0);
+}
+
+#[test]
+fn a_single_port_block_with_a_wide_stride_drives_by_hand() {
+    // One port, its frames at the front of a wider stride: the built-ins take it.
+    let ins = [1.0, 2.0, 3.0, 9.0];
+    let mut outs = [7.0; 6];
+    let inputs = BlockInputs::new(&ins, 6, 3, 1, 0);
+    let mut outputs = BlockOutputs::new(&mut outs, 6, 3, 1, 10);
+    assert!(Offset::new(1.0).tick_frames(&inputs, &mut outputs, u32::MAX));
+    assert_eq!(outs, [2.0, 3.0, 4.0, 7.0, 7.0, 7.0]);
 }

@@ -105,8 +105,10 @@ A module of your own gets the block path's cheaper walk for free. To run its own
 loop too, override `GraphModule::tick_frames`: read `inputs.port(k)`, write
 `outputs.port(k)`, and make each frame exactly what `tick_masked` would have produced (the
 default declines, and the patch calls `tick_masked` frame by frame). A module that draws
-from the thread-wide random stream, or shares any other state with another node, says so
-with `GraphModule::shares_state`.
+from the thread-wide random stream, or reads or writes a cell another node also touches,
+names it with `GraphModule::shares_state` (`SharedState::RANDOM_STREAM`,
+`SharedState::reads`, `SharedState::writes`), so the nodes sharing something one of them
+writes run sample by sample together.
 
 ### Zero-Allocation Guarantee
 

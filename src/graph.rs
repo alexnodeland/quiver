@@ -418,12 +418,6 @@ struct InEdge {
     /// DC offset added after attenuation (see [`Cable::offset`]), with an absent offset
     /// baked in as `0.0`.
     offset: f64,
-    /// Whether the source runs in the same sample-by-sample group of
-    /// [`Patch::tick_block`] as the node this edge feeds, so that inside a block the
-    /// edge reads the source's latest value from [`Routing::out_buf`] (this frame's, or the
-    /// previous frame's for a deferred feedback edge) rather than the source's block row.
-    /// Always `false` outside such a group; [`Patch::tick`] never reads it.
-    live: bool,
 }
 
 /// Compiled routing plan for a single input port (in [`PortSpec`] input order).
@@ -514,6 +508,13 @@ struct NodeExec {
     in_first: PortId,
     /// Id of output port 0 (port `k` is `out_first + k` when `frames_ok`).
     out_first: PortId,
+    /// For a member of a sample-by-sample group of [`Patch::tick_block`], one flag per
+    /// edge of `patched` (flattened in order): whether its source is a fellow member, so
+    /// that inside a block it reads the source's latest value from [`Routing::out_buf`]
+    /// (this frame's, or the previous frame's for a deferred feedback edge) rather than
+    /// the source's row. Empty for every other node, whose edges all read rows. Kept out
+    /// of [`InEdge`] so the per-sample gather's edges stay as small as they were.
+    live: Vec<bool>,
 }
 
 impl NodeExec {
@@ -632,13 +633,14 @@ impl NodeExec {
     }
 
     /// [`gather`](Self::gather) for frame `t` of a block, into the scratch input buffer:
-    /// an edge reads `out_buf` when it is [`live`](InEdge::live), its source's row at `t`
+    /// an edge reads `out_buf` when it is [`live`](Self::live), its source's row at `t`
     /// otherwise.
     fn gather_frame(&self, block_out: &[f64], out_buf: &[f64], dst: &mut PortValues, t: usize) {
+        let mut live = self.live.iter();
         for plan in &self.patched {
             let mut sum = 0.0;
             for e in &plan.edges {
-                let x = if e.live {
+                let x = if live.next().copied().unwrap_or(false) {
                     out_buf[e.src_slot]
                 } else {
                     block_out[e.src_slot * BLOCK + t]
@@ -1680,6 +1682,7 @@ impl Patch {
                 frames_ok: false,
                 in_first: 0,
                 out_first: 0,
+                live: Vec::new(),
             });
         }
         routing.out_buf.resize(slot, 0.0);
@@ -1719,7 +1722,6 @@ impl Patch {
                                 src_slot,
                                 attenuation: cable.attenuation.unwrap_or(1.0),
                                 offset: cable.offset.unwrap_or(0.0),
-                                live: false,
                             });
                         }
                     }
@@ -1878,15 +1880,19 @@ impl Patch {
     ///    feedback edge, which is what it reads in `tick`) and any other edge reads its
     ///    source's row.
     /// 2. **State two modules share.** Modules' states are disjoint except where a module
-    ///    says otherwise ([`GraphModule::shares_state`]): the thread-wide random stream,
-    ///    which an unseeded `NoiseGenerator`, `KarplusStrong`, `BernoulliGate`, … draws
-    ///    from, so the draws of two such nodes interleave in execution order. All such
-    ///    nodes are joined into one group, as if a cable ran each way between consecutive
-    ///    ones, and so draw in exactly `tick`'s order. A seeded module draws from its own
-    ///    stream and is not shared. Nothing else in quiver is: an `AudioInput` reads with
-    ///    its own cursor (a host-clock stream's frame stays put through a block, as through
-    ///    any run of ticks with no `advance` between them), a `Capture` records into its
-    ///    own buffer, and an `ExternalInput`'s `AtomicF64` is set by the host between calls.
+    ///    names what it shares ([`GraphModule::shares_state`]). The thread-wide random
+    ///    stream: an unseeded `NoiseGenerator`, `KarplusStrong`, `BernoulliGate`, … draws
+    ///    from it, so the draws of two such nodes interleave in execution order. And a cell
+    ///    behind an `Arc`: an `ExternalOutput` writes an `AtomicF64` that an
+    ///    `ExternalInput` (or `OscInput`) of the same patch may read, frame by frame. Every
+    ///    piece of state that two or more nodes name and at least one writes joins its
+    ///    nodes into one group, as if a cable ran each way between consecutive ones, so
+    ///    they draw, write and read in exactly `tick`'s order. Readers alone (several
+    ///    `ExternalInput`s on host knobs) are not grouped: nothing changes the cell during
+    ///    a call. A seeded module draws from its own stream and shares nothing. Nothing
+    ///    else in quiver is shared: an `AudioInput` reads with its own cursor (a host-clock
+    ///    stream's frame stays put through a block, as through any run of ticks with no
+    ///    `advance` between them), and a `Capture` records into its own buffer.
     /// 3. **The host.** Nothing runs between the frames of one `tick_block` call: no
     ///    `set_param_by_id`, no edit, no `get_output_value`, no observer. Whatever the host
     ///    changes between calls, it changes between the same two frames as between two
@@ -1918,10 +1924,23 @@ impl Patch {
                 self_loop[p] |= p == q;
             }
         }
-        let sharing: Vec<usize> = (0..n).filter(|&i| self.modules[i].shares_state()).collect();
-        for pair in sharing.windows(2) {
-            succ[pair[0]].push(pair[1]);
-            succ[pair[1]].push(pair[0]);
+        // Shared state: for each piece of state at least one node writes and two or more
+        // name, chain its nodes together (in execution order) both ways.
+        let mut sharing: Vec<(usize, usize, bool)> = (0..n)
+            .filter_map(|i| {
+                self.modules[i]
+                    .shares_state()
+                    .map(|s| (s.key(), i, s.is_write()))
+            })
+            .collect();
+        sharing.sort_unstable();
+        for same in sharing.chunk_by(|a, b| a.0 == b.0) {
+            if same.len() >= 2 && same.iter().any(|&(_, _, writes)| writes) {
+                for pair in same.windows(2) {
+                    succ[pair[0].1].push(pair[1].1);
+                    succ[pair[1].1].push(pair[0].1);
+                }
+            }
         }
 
         let (comp, count) = strongly_connected(&succ);
@@ -1975,11 +1994,12 @@ impl Patch {
             for &i in group {
                 let exec = &mut routing.nodes[i];
                 exec.frames_ok = false;
-                for plan in &mut exec.patched {
-                    for e in &mut plan.edges {
-                        e.live = comp[owner[e.src_slot]] == c;
-                    }
-                }
+                exec.live = exec
+                    .patched
+                    .iter()
+                    .flat_map(|plan| &plan.edges)
+                    .map(|e| comp[owner[e.src_slot]] == c)
+                    .collect();
             }
         }
         debug_assert_eq!(

@@ -492,6 +492,11 @@ impl GraphModule for OscInput {
         outputs.set(0, self.value.get());
     }
 
+    /// Reads a cell the OSC thread, or an `ExternalOutput` of the same patch, may write.
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        Some(crate::port::SharedState::reads(Arc::as_ptr(&self.value)))
+    }
+
     fn reset(&mut self) {}
 
     fn set_sample_rate(&mut self, _: f64) {}

@@ -24,19 +24,24 @@ Sections above the auto-generated marker are hand-written and are preserved.
   `Vibrato`, `Reverb`, the quantizers, `Clock`, `Euclidean`, `Crossfader`, `Comparator`,
   `Min`, `Max`, `Bitcrusher`, `Distortion`, `RingModulator`, `Wavefolder`,
   `ExternalInput`) run their own per-sample code in a loop, with no `PortValues` and no
-  dynamic call per sample. Nodes on a feedback loop, and nodes that draw from the
-  thread-wide random stream, run sample by sample as a group, as `tick` runs them. A
+  dynamic call per sample. Nodes on a feedback loop, and nodes that share state one of
+  them changes (the thread-wide random stream, say), run sample by sample as a group, as
+  `tick` runs them. A
   render of Auracle's benchmark set by `tick_block` takes 35 to 39% less CPU time in wasm
   (under node) and about 35% less natively than the same render by `tick` on 0.4.1, with
   the same samples bit for bit; `tick` itself is unchanged.
 - New, for module authors: `GraphModule::tick_frames`, a block hook with a default that
   declines (the patch then runs `tick_masked` frame by frame, so no implementor breaks),
   with its buffers `BlockInputs` and `BlockOutputs`; and `GraphModule::shares_state`,
-  which a module that draws from the thread-wide random stream, or shares any other state
-  with another node, returns `true` from, so that `tick_block` keeps it in step with the
-  others. Its default is `false`: a third-party module that draws from
-  `quiver::rng::random` in two nodes of one patch should override it, or `tick_block`
-  will hand the draws out in a different order than `tick`.
+  through which a module names state it shares with other nodes (`SharedState`: the
+  thread-wide random stream, or a cell behind an `Arc` it reads or writes), so that
+  `tick_block` runs the nodes that share something one of them writes sample by sample
+  together. The built-in random sources (while unseeded), `ExternalOutput`,
+  `ExternalInput`, `OscInput` and `VoiceInput` say so, which keeps an `ExternalOutput`
+  looped into an `ExternalInput` of the same patch frame-exact. Its default is `None`: a
+  third-party module that draws from `quiver::rng::random` in two nodes of one patch
+  should return `Some(SharedState::RANDOM_STREAM)`, or `tick_block` will hand the draws
+  out in a different order than `tick`.
 - The diode ladder resolves its resonance feedback in one fixed-point pass instead of two,
   about a third cheaper per sample. Its output changes slightly (the `diode_ladder` golden
   vector is rebaselined); patches without a `DiodeLadderFilter` are bit for bit unchanged.

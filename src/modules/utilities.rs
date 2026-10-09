@@ -2342,8 +2342,8 @@ impl GraphModule for BernoulliGate {
     }
 
     /// Unseeded, it draws from the thread-wide stream (see [`GraphModule::shares_state`]).
-    fn shares_state(&self) -> bool {
-        !self.rng.is_seeded()
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        (!self.rng.is_seeded()).then_some(crate::port::SharedState::RANDOM_STREAM)
     }
 
     fn seed(&mut self, seed: u64) {
@@ -2951,8 +2951,8 @@ impl GraphModule for Arpeggiator {
     }
 
     /// Unseeded, it draws from the thread-wide stream (see [`GraphModule::shares_state`]).
-    fn shares_state(&self) -> bool {
-        !self.rng.is_seeded()
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        (!self.rng.is_seeded()).then_some(crate::port::SharedState::RANDOM_STREAM)
     }
 
     fn seed(&mut self, seed: u64) {

@@ -134,7 +134,7 @@ pub mod prelude {
     pub use crate::port::{
         ports_compatible, BlockInputs, BlockOutputs, BlockPortValues, Compatibility, GraphModule,
         ModulatedParam, ParamDef, ParamId, ParamRange, PortDef, PortId, PortInfo, PortSpec,
-        PortValues, SignalColors, SignalKind,
+        PortValues, SharedState, SignalColors, SignalKind,
     };
 
     // Layer 3: Patch Graph

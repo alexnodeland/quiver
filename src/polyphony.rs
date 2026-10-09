@@ -830,6 +830,11 @@ impl GraphModule for VoiceInput {
         outputs.set(3, self.control.velocity() * 10.0); // Scale to 0-10V
     }
 
+    /// Reads the voice's control block, which the allocator writes.
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        Some(crate::port::SharedState::reads(Arc::as_ptr(&self.control)))
+    }
+
     fn reset(&mut self) {
         self.control.reset();
         self.trigger_remaining = 0;

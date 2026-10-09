@@ -217,6 +217,11 @@ impl GraphModule for ExternalInput {
         true
     }
 
+    /// Reads a cell the host, or an `ExternalOutput` of the same patch, may write.
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        Some(crate::port::SharedState::reads(Arc::as_ptr(&self.value)))
+    }
+
     fn reset(&mut self) {}
 
     fn set_sample_rate(&mut self, _: f64) {}
@@ -1104,6 +1109,11 @@ impl GraphModule for ExternalOutput {
     fn tick(&mut self, inputs: &PortValues, _outputs: &mut PortValues) {
         let value = inputs.get_or(0, 0.0);
         self.value.set(value);
+    }
+
+    /// Writes a cell an `ExternalInput` of the same patch may read.
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        Some(crate::port::SharedState::writes(Arc::as_ptr(&self.value)))
     }
 
     fn reset(&mut self) {
