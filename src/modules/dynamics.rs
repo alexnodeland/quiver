@@ -5,7 +5,8 @@ use super::common::{
     GATE_THRESHOLD_V,
 };
 use crate::port::{
-    GraphModule, ModulatedParam, ParamRange, PortDef, PortSpec, PortValues, SignalKind,
+    drive_frames, BlockInputs, BlockOutputs, GraphModule, InputFrame, ModulatedParam, OutputFrame,
+    ParamRange, PortDef, PortSpec, PortValues, SignalKind,
 };
 use alloc::vec;
 use libm::Libm;
@@ -119,12 +120,11 @@ impl Default for Adsr {
     }
 }
 
-impl GraphModule for Adsr {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Adsr {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let gate = inputs.get_or(0, 0.0);
         let retrig = inputs.get_or(1, 0.0);
         let attack_cv = inputs.get_or(2, 0.1);
@@ -244,6 +244,25 @@ impl GraphModule for Adsr {
         outputs.set(11, (1.0 - self.level) * 10.0); // Inverted
         outputs.set(12, eoc);
     }
+}
+
+impl GraphModule for Adsr {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<7, 3, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
+    }
 
     fn reset(&mut self) {
         self.stage = AdsrStage::Idle;
@@ -315,12 +334,11 @@ impl Default for Vca {
     }
 }
 
-impl GraphModule for Vca {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Vca {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let input = inputs.get_or(0, 0.0);
         let cv = inputs.get_or(1, 10.0).clamp(0.0, 10.0) / 10.0;
         let exp_response = inputs.get_or(2, 0.0) > GATE_THRESHOLD_V;
@@ -332,6 +350,25 @@ impl GraphModule for Vca {
         let base_gain = if exp_response { cv * cv } else { cv };
 
         outputs.set(10, input * base_gain * gain_scale);
+    }
+}
+
+impl GraphModule for Vca {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<4, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {}
@@ -391,12 +428,11 @@ impl Default for Limiter {
     }
 }
 
-impl GraphModule for Limiter {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Limiter {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         // Q160: sanitize audio + sidechain so a non-finite sample cannot latch
         // the envelope detector (a one-pole feedback state) to NaN permanently.
         let input = sanitize_audio(inputs.get_or(0, 0.0));
@@ -456,6 +492,25 @@ impl GraphModule for Limiter {
         let out = (input * gain).clamp(-threshold, threshold);
         outputs.set(10, out);
         outputs.set(11, (1.0 - gain) * 10.0);
+    }
+}
+
+impl GraphModule for Limiter {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<5, 2, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -556,12 +611,11 @@ impl Default for NoiseGate {
     }
 }
 
-impl GraphModule for NoiseGate {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl NoiseGate {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         // Q160: sanitize audio + sidechain to keep a non-finite sample out of
         // the envelope detector's feedback state.
         let input = sanitize_audio(inputs.get_or(0, 0.0));
@@ -629,6 +683,25 @@ impl GraphModule for NoiseGate {
                 0.0
             },
         );
+    }
+}
+
+impl GraphModule for NoiseGate {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<6, 2, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -702,12 +775,11 @@ impl Default for Compressor {
     }
 }
 
-impl GraphModule for Compressor {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Compressor {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         // Q160: sanitize audio + sidechain to keep a non-finite sample out of
         // the envelope detector's feedback state.
         let input = sanitize_audio(inputs.get_or(0, 0.0));
@@ -755,6 +827,25 @@ impl GraphModule for Compressor {
 
         outputs.set(10, input * gain * makeup_gain);
         outputs.set(11, (1.0 - gain) * 10.0);
+    }
+}
+
+impl GraphModule for Compressor {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<7, 2, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -990,12 +1081,11 @@ impl Default for EnvelopeFollower {
     }
 }
 
-impl GraphModule for EnvelopeFollower {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl EnvelopeFollower {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         // Q160: sanitize the audio input so a non-finite sample cannot latch the
         // envelope detector (a one-pole feedback state) to NaN permanently.
         let input = sanitize_audio(inputs.get_or(0, 0.0));
@@ -1028,6 +1118,25 @@ impl GraphModule for EnvelopeFollower {
         let out = (self.envelope * gain).clamp(0.0, 10.0);
         outputs.set(10, out);
         outputs.set(11, 10.0 - out);
+    }
+}
+
+impl GraphModule for EnvelopeFollower {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<4, 2, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {

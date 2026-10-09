@@ -8,10 +8,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This changelog is auto-generated from git history. Run `make changelog` to update.
 Sections above the auto-generated marker are hand-written and are preserved.
 
-## [Unreleased]
+## [0.5.0] - 2026-10-09
+
+A performance release: `Patch::tick_block` walks the graph once per block instead of
+once per sample, and the diode ladder resolves its feedback in one pass. A block renders
+exactly what as many `tick`s would, bit for bit; `tick` itself is unchanged. The API
+grows, for module authors, by a block hook (`GraphModule::tick_frames`, with
+`BlockInputs` and `BlockOutputs`) and a way to name shared state
+(`GraphModule::shares_state`, `SharedState`); both default to what every module did
+before. Every patch renders bit for bit as in 0.4.1 except those with a
+`DiodeLadderFilter`, whose output moves slightly. One behaviour note for third-party
+modules: one that draws from `quiver::rng` (or shares any other state with another node)
+must say so through `shares_state`, or `tick_block` may hand two such nodes their draws
+in a different order than `tick` would.
 
 ### Performance
 
+- **`Patch::tick_block` walks the graph once per block, not once per sample.** It still
+  renders exactly what as many calls to `tick` would, bit for bit, and leaves every output
+  port where they would (so `get_output_value` and observers read the same values after
+  it). Inside a block of up to 64 frames each node now runs through every frame before
+  the next starts, reading its inputs as rows its sources filled, and the built-in modules
+  most patches are made of (`Vco`, `Lfo`, `NoiseGenerator`, `Supersaw`, `Wavetable`,
+  `FormantOsc`, `KarplusStrong`, `Svf`, `ParametricEq`, `Adsr`, `Vca`, `Limiter`,
+  `Compressor`, `NoiseGate`, `EnvelopeFollower`, `Mixer`, `Offset`, `Attenuverter`,
+  `SlewLimiter`, `SampleAndHold`, `StereoOutput`, the delays, `Chorus`, `Tremolo`,
+  `Vibrato`, `Reverb`, the quantizers, `Clock`, `Euclidean`, `Crossfader`, `Comparator`,
+  `Min`, `Max`, `Bitcrusher`, `Distortion`, `RingModulator`, `Wavefolder`,
+  `ExternalInput`) run their own per-sample code in a loop, with no `PortValues` and no
+  dynamic call per sample. Nodes on a feedback loop, and nodes that share state one of
+  them changes (the thread-wide random stream, say), run sample by sample as a group, as
+  `tick` runs them. A
+  render of Auracle's benchmark set by `tick_block` takes 35 to 39% less CPU time in wasm
+  (under node) and about 35% less natively than the same render by `tick` on 0.4.1, with
+  the same samples bit for bit; `tick` itself is unchanged.
+- New, for module authors: `GraphModule::tick_frames`, a block hook with a default that
+  declines (the patch then runs `tick_masked` frame by frame, so no implementor breaks),
+  with its buffers `BlockInputs` and `BlockOutputs`; and `GraphModule::shares_state`,
+  through which a module names state it shares with other nodes (`SharedState`: the
+  thread-wide random stream, or a cell behind an `Arc` it reads or writes), so that
+  `tick_block` runs the nodes that share something one of them writes sample by sample
+  together. The built-in random sources (while unseeded), `ExternalOutput`,
+  `ExternalInput`, `OscInput` and `VoiceInput` say so, which keeps an `ExternalOutput`
+  looped into an `ExternalInput` of the same patch frame-exact. Its default is `None`: a
+  third-party module that draws from `quiver::rng::random` in two nodes of one patch
+  should return `Some(SharedState::RANDOM_STREAM)`, or `tick_block` will hand the draws
+  out in a different order than `tick`.
 - The diode ladder resolves its resonance feedback in one fixed-point pass instead of two,
   about a third cheaper per sample. Its output changes slightly (the `diode_ladder` golden
   vector is rebaselined); patches without a `DiodeLadderFilter` are bit for bit unchanged.

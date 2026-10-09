@@ -3,7 +3,8 @@
 //! This integration test installs a counting global allocator (a wrapper around the system
 //! allocator that increments an atomic on every `alloc`/`realloc` while armed). It builds a
 //! representative patch (VCO -> SVF -> VCA -> StereoOutput, plus an LFO modulation cable, a
-//! normalled input, and a host `AudioInput` summed into the filter), warms it up, then asserts
+//! normalled input, a host `AudioInput` summed into the filter, a feedback loop and two
+//! unseeded noise sources, which `tick_block` runs sample by sample), warms it up, then asserts
 //! that a burst of `tick()` calls and a `tick_block()` call — each preceded by the host writing
 //! its input block — perform **zero** heap allocations.
 //!
@@ -17,6 +18,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use quiver::modules::{DelayLine, Mixer};
 use quiver::prelude::*;
 
 /// Global allocator that counts allocations while `COUNTING` is armed.
@@ -101,6 +103,26 @@ fn build_patch() -> Rig {
     patch.connect(capture.out("out"), svf.in_("in")).unwrap();
     let clip_in = patch.add("clip", AudioInput::new(Arc::clone(&clip)));
     patch.connect(clip_in.out("out"), svf.in_("in")).unwrap();
+    // A feedback loop (mixer <-> delay) and two unseeded noise sources sharing the
+    // thread-wide stream, both of which `tick_block` runs sample by sample, as groups.
+    let loop_mix = patch.add("loop_mix", Mixer::new(2));
+    let loop_delay = patch.add("loop_delay", DelayLine::new(sr));
+    let noise_a = patch.add("noise_a", NoiseGenerator::new());
+    let noise_b = patch.add("noise_b", NoiseGenerator::new());
+    patch.connect(vco.out("sqr"), loop_mix.in_("ch0")).unwrap();
+    patch
+        .connect(loop_mix.out("out"), loop_delay.in_("in"))
+        .unwrap();
+    patch
+        .connect_attenuated(loop_delay.out("out"), loop_mix.in_("ch1"), 0.5)
+        .unwrap();
+    patch.connect(loop_delay.out("out"), svf.in_("in")).unwrap();
+    patch
+        .connect_attenuated(noise_a.out("white"), svf.in_("in"), 0.01)
+        .unwrap();
+    patch
+        .connect_attenuated(noise_b.out("pink"), vca.in_("cv"), 0.1)
+        .unwrap();
     // LFO modulation cable into the filter cutoff (CvBipolar -> CvUnipolar; allowed).
     patch.connect(lfo.out("sin"), svf.in_("cutoff")).unwrap();
     patch.connect(svf.out("lp"), vca.in_("in")).unwrap();

@@ -3,7 +3,10 @@
 use super::common::{
     polyblamp, polyblep, voct_to_hz, wrap_phase, EdgeDetector, Memo, GATE_THRESHOLD_V,
 };
-use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
+use crate::port::{
+    drive_frames, BlockInputs, BlockOutputs, GraphModule, InputFrame, OutputFrame, PortDef,
+    PortSpec, PortValues, SignalKind,
+};
 use crate::rng::ModuleRng;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -87,7 +90,13 @@ impl Vco {
     /// must *not* be skipped, and is not: the memoized frequency derivation, the hard-sync
     /// edge detector, and the phase advance. `tick` calls this with an all-ones mask, so
     /// the unmasked path is literally this code with every branch taken.
-    fn tick_wanted(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
+    #[inline(always)]
+    fn tick_wanted<I: InputFrame, O: OutputFrame>(
+        &mut self,
+        inputs: &I,
+        outputs: &mut O,
+        wanted: u32,
+    ) {
         let voct = inputs.get_or(0, 0.0);
         let fm = inputs.get_or(1, 0.0);
         let pw = inputs.get_or(2, 0.5).clamp(0.05, 0.95);
@@ -225,6 +234,15 @@ impl GraphModule for Vco {
         self.tick_wanted(inputs, outputs, wanted);
     }
 
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        wanted: u32,
+    ) -> bool {
+        drive_frames::<5, 4, 0, 10>(inputs, outputs, |i, o| self.tick_wanted(i, o, wanted))
+    }
+
     fn reset(&mut self) {
         self.phase = 0.0;
         self.sync_edge.reset();
@@ -298,7 +316,13 @@ impl Lfo {
     /// Every waveform is a pure function of `phase`, `scale` and `depth`, so skipping any
     /// of them is invisible to the rest. The memoized rate map, the reset edge detector and
     /// the phase advance are unconditional. `tick` calls this with an all-ones mask.
-    fn tick_wanted(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
+    #[inline(always)]
+    fn tick_wanted<I: InputFrame, O: OutputFrame>(
+        &mut self,
+        inputs: &I,
+        outputs: &mut O,
+        wanted: u32,
+    ) {
         let rate_cv = inputs.get_or(0, 0.5);
         let depth = inputs.get_or(1, 10.0) / 10.0; // Normalize to 0-1
         let reset = inputs.get_or(2, 0.0);
@@ -356,6 +380,15 @@ impl GraphModule for Lfo {
 
     fn tick_masked(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
         self.tick_wanted(inputs, outputs, wanted);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        wanted: u32,
+    ) -> bool {
+        drive_frames::<3, 5, 0, 10>(inputs, outputs, |i, o| self.tick_wanted(i, o, wanted))
     }
 
     fn reset(&mut self) {
@@ -442,12 +475,11 @@ impl Default for Supersaw {
     }
 }
 
-impl GraphModule for Supersaw {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Supersaw {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let voct = inputs.get_or(0, 0.0);
         let detune = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let mix = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
@@ -498,6 +530,25 @@ impl GraphModule for Supersaw {
 
         outputs.set(10, output);
         outputs.set(11, sub);
+    }
+}
+
+impl GraphModule for Supersaw {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<3, 2, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -667,12 +718,11 @@ impl Default for KarplusStrong {
     }
 }
 
-impl GraphModule for KarplusStrong {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl KarplusStrong {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         // Non-finite CVs fall back to the port default rather than poisoning
         // the coefficients (`f64::clamp` passes NaN through).
         let voct = finite_or(inputs.get_or(0, 0.0), 0.0);
@@ -760,11 +810,35 @@ impl GraphModule for KarplusStrong {
 
         outputs.set(10, leaked);
     }
+}
+
+impl GraphModule for KarplusStrong {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<5, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
+    }
 
     fn reset(&mut self) {
         self.clear_loop_state();
         self.trigger_edge.reset();
         self.rng.reset();
+    }
+
+    /// Unseeded, it draws from the thread-wide stream (see [`GraphModule::shares_state`]).
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        (!self.rng.is_seeded()).then_some(crate::port::SharedState::RANDOM_STREAM)
     }
 
     fn seed(&mut self, seed: u64) {
@@ -896,7 +970,13 @@ impl NoiseGenerator {
     /// the *remaining* outputs produce on later samples. Only the two correlation mixes
     /// (pure arithmetic) and the writes themselves are skipped. `tick` calls this with an
     /// all-ones mask.
-    fn tick_wanted(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
+    #[inline(always)]
+    fn tick_wanted<I: InputFrame, O: OutputFrame>(
+        &mut self,
+        inputs: &I,
+        outputs: &mut O,
+        wanted: u32,
+    ) {
         // Phase 3: Adjustable correlation
         let correlation = inputs.get_or(0, self.correlation).clamp(0.0, 1.0);
 
@@ -948,6 +1028,15 @@ impl GraphModule for NoiseGenerator {
         self.tick_wanted(inputs, outputs, wanted);
     }
 
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        wanted: u32,
+    ) -> bool {
+        drive_frames::<1, 4, 0, 10>(inputs, outputs, |i, o| self.tick_wanted(i, o, wanted))
+    }
+
     fn reset(&mut self) {
         self.pink = PinkNoiseState::new();
         self.pink2 = PinkNoiseState::new();
@@ -959,6 +1048,11 @@ impl GraphModule for NoiseGenerator {
 
     fn seed(&mut self, seed: u64) {
         self.rng.seed(seed);
+    }
+
+    /// Unseeded, it draws from the thread-wide stream (see [`GraphModule::shares_state`]).
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        (!self.rng.is_seeded()).then_some(crate::port::SharedState::RANDOM_STREAM)
     }
 
     fn set_sample_rate(&mut self, _: f64) {}
@@ -1238,12 +1332,11 @@ impl Default for Wavetable {
     }
 }
 
-impl GraphModule for Wavetable {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Wavetable {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         // Get inputs
         let v_oct = inputs.get_or(0, 0.0);
         let table_cv = inputs.get_or(1, 0.0).clamp(0.0, 1.0);
@@ -1286,6 +1379,25 @@ impl GraphModule for Wavetable {
 
         // Output as audio (±5V)
         outputs.set(10, sample * 5.0);
+    }
+}
+
+impl GraphModule for Wavetable {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<4, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -1458,12 +1570,11 @@ impl Default for FormantOsc {
     }
 }
 
-impl GraphModule for FormantOsc {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl FormantOsc {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         // Get inputs
         let v_oct = inputs.get_or(0, 0.0);
         let vowel = inputs.get_or(1, 0.0).clamp(0.0, 1.0);
@@ -1512,6 +1623,25 @@ impl GraphModule for FormantOsc {
 
         // Output with normalization (±5V audio)
         outputs.set(10, output.clamp(-1.0, 1.0) * 5.0);
+    }
+}
+
+impl GraphModule for FormantOsc {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<4, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {

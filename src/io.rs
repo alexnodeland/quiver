@@ -11,7 +11,9 @@
 //! - [`MidiState`] turns raw MIDI bytes into the atomics `ExternalInput` reads.
 
 use crate::introspection::{ModuleIntrospection, ParamInfo};
-use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
+use crate::port::{
+    BlockInputs, BlockOutputs, GraphModule, PortDef, PortSpec, PortValues, SignalKind,
+};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -197,6 +199,27 @@ impl GraphModule for ExternalInput {
 
     fn tick(&mut self, _inputs: &PortValues, outputs: &mut PortValues) {
         outputs.set(0, self.value.get());
+    }
+
+    /// Reads the value once per frame, as `tick` does.
+    fn tick_frames(
+        &mut self,
+        _inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        if outputs.len() != 1 {
+            return false;
+        }
+        for value in outputs.port(0) {
+            *value = self.value.get();
+        }
+        true
+    }
+
+    /// Reads a cell the host, or an `ExternalOutput` of the same patch, may write.
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        Some(crate::port::SharedState::reads(Arc::as_ptr(&self.value)))
     }
 
     fn reset(&mut self) {}
@@ -1086,6 +1109,11 @@ impl GraphModule for ExternalOutput {
     fn tick(&mut self, inputs: &PortValues, _outputs: &mut PortValues) {
         let value = inputs.get_or(0, 0.0);
         self.value.set(value);
+    }
+
+    /// Writes a cell an `ExternalInput` of the same patch may read.
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        Some(crate::port::SharedState::writes(Arc::as_ptr(&self.value)))
     }
 
     fn reset(&mut self) {

@@ -5,7 +5,9 @@
 //! execution ordering, and signal propagation.
 
 use crate::modules::common::sanitize_flush;
-use crate::port::{GraphModule, ParamId, PortId, PortSpec, PortValues, SignalKind};
+use crate::port::{
+    BlockInputs, BlockOutputs, GraphModule, ParamId, PortId, PortSpec, PortValues, SignalKind,
+};
 use crate::StdMap;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -492,6 +494,27 @@ struct NodeExec {
     /// order. Passed to [`GraphModule::tick_masked`] so a module can skip producing what
     /// nobody consumes. All ones for nodes with more than 32 outputs.
     wanted_outputs: u32,
+    /// First row of this node's inputs in [`Routing::block_in`]: input slot `s` (the
+    /// scratch input buffer's slot) is row `in_base + s`.
+    in_base: usize,
+    /// Rows this node holds in [`Routing::block_in`]: one per input slot.
+    in_rows: usize,
+    /// Whether [`Patch::tick_block`] offers this node's module
+    /// [`GraphModule::tick_frames`]: its ports are laid out the way [`BlockInputs`] and
+    /// [`BlockOutputs`] index them, it is not in a sample-by-sample group, and its module
+    /// has not declined. Cleared the first time the module declines.
+    frames_ok: bool,
+    /// Id of input port 0 (port `k` is `in_first + k` when `frames_ok`).
+    in_first: PortId,
+    /// Id of output port 0 (port `k` is `out_first + k` when `frames_ok`).
+    out_first: PortId,
+    /// For a member of a sample-by-sample group of [`Patch::tick_block`], one flag per
+    /// edge of `patched` (flattened in order): whether its source is a fellow member, so
+    /// that inside a block it reads the source's latest value from [`Routing::out_buf`]
+    /// (this frame's, or the previous frame's for a deferred feedback edge) rather than
+    /// the source's row. Empty for every other node, whose edges all read rows. Kept out
+    /// of [`InEdge`] so the per-sample gather's edges stay as small as they were.
+    live: Vec<bool>,
 }
 
 impl NodeExec {
@@ -578,6 +601,76 @@ impl NodeExec {
                 if let Some(value) = src.get_at(k, port_id) {
                     dst[k] = sanitize_flush(value);
                 }
+            }
+        }
+    }
+
+    /// Fill this node's input rows for the first `frames` frames of a block from the
+    /// source rows in `block_out`: [`gather`](Self::gather), a frame at a time, into rows.
+    ///
+    /// Each patched input's frame `t` is `0.0`, plus each edge's `x * attenuation + offset`
+    /// in edge order — the same additions in the same order as `gather`'s `sum`. A
+    /// normalled input copies its source row, as pass 2 copies its source slot. A default's
+    /// row was filled when it was set ([`prefill_block`](Self::prefill_block)).
+    fn gather_block(&self, block_out: &[f64], block_in: &mut [f64], frames: usize) {
+        let base = self.in_base * BLOCK;
+        for plan in &self.patched {
+            let row = &mut block_in[base + plan.slot * BLOCK..][..frames];
+            row.fill(0.0);
+            for e in &plan.edges {
+                let src = &block_out[e.src_slot * BLOCK..][..frames];
+                let (attenuation, offset) = (e.attenuation, e.offset);
+                for (sum, &x) in row.iter_mut().zip(src) {
+                    let attenuated = x * attenuation;
+                    *sum += attenuated + offset;
+                }
+            }
+        }
+        for plan in &self.normalled_pending {
+            let from = base + plan.source_slot * BLOCK;
+            block_in.copy_within(from..from + frames, base + plan.slot * BLOCK);
+        }
+    }
+
+    /// [`gather`](Self::gather) for frame `t` of a block, into the scratch input buffer:
+    /// an edge reads `out_buf` when it is [`live`](Self::live), its source's row at `t`
+    /// otherwise.
+    fn gather_frame(&self, block_out: &[f64], out_buf: &[f64], dst: &mut PortValues, t: usize) {
+        let mut live = self.live.iter();
+        for plan in &self.patched {
+            let mut sum = 0.0;
+            for e in &plan.edges {
+                let x = if live.next().copied().unwrap_or(false) {
+                    out_buf[e.src_slot]
+                } else {
+                    block_out[e.src_slot * BLOCK + t]
+                };
+                let attenuated = x * e.attenuation;
+                sum += attenuated + e.offset;
+            }
+            dst.set_at(plan.slot, sum);
+        }
+        for plan in &self.normalled_pending {
+            let value = dst.value_at(plan.source_slot).unwrap_or(plan.default);
+            dst.set_at(plan.slot, value);
+        }
+    }
+
+    /// Record frame `t` of this node's outputs: each `out_buf` slot into its row.
+    fn store_frame(&self, out_buf: &[f64], block_out: &mut [f64], t: usize) {
+        for k in 0..self.out_ids.len() {
+            let slot = self.out_base + k;
+            block_out[slot * BLOCK + t] = out_buf[slot];
+        }
+    }
+
+    /// Fill every [`fixed`](InputPlan::fixed) input's row with its default, the block
+    /// counterpart of [`prefill_defaults`](Self::prefill_defaults), run when it is.
+    fn prefill_block(&self, block_in: &mut [f64]) {
+        for plan in &self.inputs {
+            if plan.fixed {
+                let start = (self.in_base + plan.slot) * BLOCK;
+                block_in[start..start + BLOCK].fill(plan.default);
             }
         }
     }
@@ -681,6 +774,62 @@ fn collect_normalled_pending(inputs: &[InputPlan]) -> Vec<NormalledPlan> {
     pending
 }
 
+/// The strongly connected components of the graph `succ` (adjacency lists over `0..n`):
+/// each vertex's component index, and the number of components. Kosaraju's algorithm,
+/// iterative so that a long chain cannot exhaust the stack. Compile time only.
+fn strongly_connected(succ: &[Vec<usize>]) -> (Vec<usize>, usize) {
+    let n = succ.len();
+    let mut visited = alloc::vec![false; n];
+    let mut finished = Vec::with_capacity(n);
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for start in 0..n {
+        if visited[start] {
+            continue;
+        }
+        visited[start] = true;
+        stack.push((start, 0));
+        while let Some(top) = stack.last_mut() {
+            let (v, next) = *top;
+            if let Some(&w) = succ[v].get(next) {
+                top.1 += 1;
+                if !visited[w] {
+                    visited[w] = true;
+                    stack.push((w, 0));
+                }
+            } else {
+                finished.push(v);
+                stack.pop();
+            }
+        }
+    }
+    let mut pred: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
+    for (v, outs) in succ.iter().enumerate() {
+        for &w in outs {
+            pred[w].push(v);
+        }
+    }
+    let mut comp = alloc::vec![usize::MAX; n];
+    let mut count = 0;
+    let mut todo = Vec::new();
+    for &start in finished.iter().rev() {
+        if comp[start] != usize::MAX {
+            continue;
+        }
+        comp[start] = count;
+        todo.push(start);
+        while let Some(v) = todo.pop() {
+            for &w in &pred[v] {
+                if comp[w] == usize::MAX {
+                    comp[w] = count;
+                    todo.push(w);
+                }
+            }
+        }
+        count += 1;
+    }
+    (comp, count)
+}
+
 /// Compiled, allocation-free routing state produced by [`Patch::compile`].
 ///
 /// All buffers are preallocated at compile time so [`Patch::tick`] performs no heap
@@ -702,6 +851,31 @@ struct Routing {
     scratch_in: Vec<PortValues>,
     /// Reusable per-node output buffers (parallel to `nodes`), cleared and written per tick.
     scratch_out: Vec<PortValues>,
+    /// [`Patch::tick_block`]'s output rows: [`BLOCK`] frames per `out_buf` slot, slot `s`
+    /// at `block_out[s * BLOCK..]`. Frame `t` of a row is what `out_buf[s]` held after
+    /// frame `t` of the block.
+    block_out: Vec<f64>,
+    /// [`Patch::tick_block`]'s input rows: [`BLOCK`] frames per input slot of every node
+    /// (see [`NodeExec::in_base`]). A default's row is filled when it is set, not per block.
+    block_in: Vec<f64>,
+    /// The order [`Patch::tick_block`] runs the nodes in (see [`Stage`]).
+    stages: Vec<Stage>,
+    /// The members of every [`Stage::Group`], each group's in execution order.
+    group_members: Vec<usize>,
+}
+
+/// Frames [`Patch::tick_block`] runs each node through at a time. A longer request is cut
+/// into blocks of this many frames.
+const BLOCK: usize = 64;
+
+/// One step of [`Patch::tick_block`]'s schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// One node, through every frame of the block before the next stage starts.
+    Node(usize),
+    /// `group_members[start..end]`, run sample by sample: frame by frame, each member in
+    /// execution order, exactly as [`Patch::tick`] runs them.
+    Group(usize, usize),
 }
 
 impl Routing {
@@ -1503,12 +1677,19 @@ impl Patch {
                 patched: Vec::new(),
                 normalled_pending: Vec::new(),
                 wanted_outputs: u32::MAX,
+                in_base: 0,
+                in_rows: 0,
+                frames_ok: false,
+                in_first: 0,
+                out_first: 0,
+                live: Vec::new(),
             });
         }
         routing.out_buf.resize(slot, 0.0);
 
         // Pass B: resolve each input's incoming cables into dense edges and preallocate the
         // reusable scratch buffers (keys inserted here so the hot path never grows them).
+        let mut in_rows_total = 0;
         for (exec_idx, &node_id) in self.execution_order.iter().enumerate() {
             let node = self
                 .nodes
@@ -1600,6 +1781,34 @@ impl Patch {
 
             routing.nodes[exec_idx].wanted_outputs =
                 self.consumed_output_mask(node_id, &routing.nodes[exec_idx].out_ids);
+
+            // Block rows: one per input slot. The module is offered whole blocks when its
+            // slots are its spec indices and its ids count up by one, which is how
+            // `BlockInputs`/`BlockOutputs` number ports (every built-in spec qualifies).
+            let in_rows = inputs.iter().map(|p| p.slot + 1).max().unwrap_or(0);
+            fn counts_up(ids: impl Iterator<Item = PortId>) -> bool {
+                let mut expected = None;
+                for id in ids {
+                    if expected.is_some_and(|e| e != id) {
+                        return false;
+                    }
+                    expected = id.checked_add(1);
+                }
+                true
+            }
+            let exec = &mut routing.nodes[exec_idx];
+            exec.in_base = in_rows_total;
+            exec.in_rows = in_rows;
+            in_rows_total += in_rows;
+            exec.in_first = spec.inputs.first().map_or(0, |p| p.id);
+            exec.out_first = spec.outputs.first().map_or(0, |p| p.id);
+            exec.frames_ok = exec.out_by_index
+                && exec.out_ids.len() <= u32::BITS as usize
+                && in_rows == inputs.len()
+                && inputs.iter().enumerate().all(|(k, p)| p.slot == k)
+                && counts_up(inputs.iter().map(|p| p.port_id))
+                && counts_up(exec.out_ids.iter().copied());
+
             routing.nodes[exec_idx].normalled_pending = normalled_pending;
             routing.nodes[exec_idx].inputs = inputs;
             routing.nodes[exec_idx].patched = patched;
@@ -1607,6 +1816,14 @@ impl Patch {
             routing.scratch_in.push(scratch_in);
             routing.scratch_out.push(scratch_out);
         }
+
+        // Pass B': the block engine's rows and schedule (see `tick_block`).
+        routing.block_out = alloc::vec![0.0; slot * BLOCK];
+        routing.block_in = alloc::vec![0.0; in_rows_total * BLOCK];
+        for exec in &routing.nodes {
+            exec.prefill_block(&mut routing.block_in);
+        }
+        self.build_stages(&mut routing);
 
         // Pass C: precompute the stereo output read slots (right = left when mono).
         routing.output_slots = self.output_node.and_then(|out_node| {
@@ -1633,6 +1850,170 @@ impl Patch {
 
         self.routing = routing;
         self.routing_generation = self.routing_generation.wrapping_add(1);
+    }
+
+    /// Build [`Patch::tick_block`]'s schedule into `routing.stages`.
+    ///
+    /// # Why a block gives every module what `tick` gives it
+    ///
+    /// `tick` runs the nodes sample-major: for each frame, every node in execution order.
+    /// `tick_block` runs most of them node-major: each node through every frame of the
+    /// block, then the next. A module's output depends only on its own state and the
+    /// inputs it is handed, frame by frame, so the two agree whenever each module sees the
+    /// same input on every frame and nothing else it can observe changes. Four things
+    /// could make them differ, and the schedule is built so that none does:
+    ///
+    /// 1. **Cables.** A cable from a node that runs earlier in execution order is read in
+    ///    the same frame. Node-major, its source has run every frame of the block before
+    ///    the reader starts, and the reader takes frame `t` of the source's row: the same
+    ///    value. A cable from a node that runs at or after its reader (a feedback edge,
+    ///    deferred by the topological sort into a cycle-breaker) is read one frame late,
+    ///    and frame `t` of the source must then run *after* frame `t` of the reader but
+    ///    before its frame `t + 1`: the two can only be interleaved. So every such cable
+    ///    joins its two ends, and every node on a path between them, into one group run
+    ///    sample by sample, frame by frame in execution order, as `tick` runs it.
+    ///    Formally: the stages are the strongly connected components of the cable graph
+    ///    with each feedback cable also taken backwards, in a topological order of their
+    ///    condensation. Every cable between two stages runs forward in it, so a stage's
+    ///    sources have finished the block before it starts; inside a group, an edge from a
+    ///    fellow member reads `out_buf` (this frame's value, or the previous frame's for a
+    ///    feedback edge, which is what it reads in `tick`) and any other edge reads its
+    ///    source's row.
+    /// 2. **State two modules share.** Modules' states are disjoint except where a module
+    ///    names what it shares ([`GraphModule::shares_state`]). The thread-wide random
+    ///    stream: an unseeded `NoiseGenerator`, `KarplusStrong`, `BernoulliGate`, … draws
+    ///    from it, so the draws of two such nodes interleave in execution order. And a cell
+    ///    behind an `Arc`: an `ExternalOutput` writes an `AtomicF64` that an
+    ///    `ExternalInput` (or `OscInput`) of the same patch may read, frame by frame. Every
+    ///    piece of state that two or more nodes name and at least one writes joins its
+    ///    nodes into one group, as if a cable ran each way between consecutive ones, so
+    ///    they draw, write and read in exactly `tick`'s order. Readers alone (several
+    ///    `ExternalInput`s on host knobs) are not grouped: nothing changes the cell during
+    ///    a call. A seeded module draws from its own stream and shares nothing. Nothing
+    ///    else in quiver is shared: an `AudioInput` reads with its own cursor (a host-clock
+    ///    stream's frame stays put through a block, as through any run of ticks with no
+    ///    `advance` between them), and a `Capture` records into its own buffer.
+    /// 3. **The host.** Nothing runs between the frames of one `tick_block` call: no
+    ///    `set_param_by_id`, no edit, no `get_output_value`, no observer. Whatever the host
+    ///    changes between calls, it changes between the same two frames as between two
+    ///    ticks. (A value another *thread* writes while a block runs is read when the
+    ///    reader happens to run, as it would be inside a run of ticks; only its timing
+    ///    differs.)
+    /// 4. **What is left behind.** After the block, `out_buf` holds every port's value as
+    ///    of the block's last frame, as after the last of the ticks, so
+    ///    `get_output_value`, observers, the next `tick` and the next block's feedback
+    ///    edges all read what they would have.
+    fn build_stages(&self, routing: &mut Routing) {
+        let n = routing.nodes.len();
+        let pos: StdMap<NodeId, usize> = self
+            .execution_order
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect();
+        let mut succ: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
+        let mut self_loop = alloc::vec![false; n];
+        for cable in &self.cables {
+            let (Some(&p), Some(&q)) = (pos.get(&cable.from.node), pos.get(&cable.to.node)) else {
+                continue;
+            };
+            succ[p].push(q);
+            if p >= q {
+                // A feedback edge: its two ends must interleave (see above).
+                succ[q].push(p);
+                self_loop[p] |= p == q;
+            }
+        }
+        // Shared state: for each piece of state at least one node writes and two or more
+        // name, chain its nodes together (in execution order) both ways.
+        let mut sharing: Vec<(usize, usize, bool)> = (0..n)
+            .filter_map(|i| {
+                self.modules[i]
+                    .shares_state()
+                    .map(|s| (s.key(), i, s.is_write()))
+            })
+            .collect();
+        sharing.sort_unstable();
+        for same in sharing.chunk_by(|a, b| a.0 == b.0) {
+            if same.len() >= 2 && same.iter().any(|&(_, _, writes)| writes) {
+                for pair in same.windows(2) {
+                    succ[pair[0].1].push(pair[1].1);
+                    succ[pair[1].1].push(pair[0].1);
+                }
+            }
+        }
+
+        let (comp, count) = strongly_connected(&succ);
+        let mut members: Vec<Vec<usize>> = alloc::vec![Vec::new(); count];
+        for (i, &c) in comp.iter().enumerate() {
+            members[c].push(i); // ascending, so each in execution order
+        }
+        // Topological order of the condensation; among the ready components, the one whose
+        // first member runs earliest, so an acyclic patch keeps execution order exactly.
+        let mut indegree = alloc::vec![0usize; count];
+        let mut csucc: Vec<Vec<usize>> = alloc::vec![Vec::new(); count];
+        for (v, outs) in succ.iter().enumerate() {
+            for &w in outs {
+                if comp[v] != comp[w] {
+                    csucc[comp[v]].push(comp[w]);
+                    indegree[comp[w]] += 1;
+                }
+            }
+        }
+        let mut ready: alloc::collections::BinaryHeap<core::cmp::Reverse<(usize, usize)>> = (0
+            ..count)
+            .filter(|&c| indegree[c] == 0)
+            .map(|c| core::cmp::Reverse((members[c][0], c)))
+            .collect();
+
+        let mut owner = alloc::vec![0usize; routing.out_buf.len()];
+        for (i, exec) in routing.nodes.iter().enumerate() {
+            for k in 0..exec.out_ids.len() {
+                owner[exec.out_base + k] = i;
+            }
+        }
+        while let Some(core::cmp::Reverse((_, c))) = ready.pop() {
+            for &d in &csucc[c] {
+                indegree[d] -= 1;
+                if indegree[d] == 0 {
+                    ready.push(core::cmp::Reverse((members[d][0], d)));
+                }
+            }
+            let group = &members[c];
+            if let [only] = group[..] {
+                if !self_loop[only] {
+                    routing.stages.push(Stage::Node(only));
+                    continue;
+                }
+            }
+            let start = routing.group_members.len();
+            routing.group_members.extend_from_slice(group);
+            routing
+                .stages
+                .push(Stage::Group(start, routing.group_members.len()));
+            for &i in group {
+                let exec = &mut routing.nodes[i];
+                exec.frames_ok = false;
+                exec.live = exec
+                    .patched
+                    .iter()
+                    .flat_map(|plan| &plan.edges)
+                    .map(|e| comp[owner[e.src_slot]] == c)
+                    .collect();
+            }
+        }
+        debug_assert_eq!(
+            routing
+                .stages
+                .iter()
+                .map(|s| match *s {
+                    Stage::Node(_) => 1,
+                    Stage::Group(a, b) => b - a,
+                })
+                .sum::<usize>(),
+            n,
+            "every node is in exactly one stage"
+        );
     }
 
     /// Whether the module at `node` is a feedback cycle-breaker (delay-style).
@@ -1805,25 +2186,197 @@ impl Patch {
         self.tick_step()
     }
 
-    /// Process a block of samples into stereo `out_left`/`out_right` slices with **no
-    /// per-frame heap allocation**.
+    /// Process a block of samples into stereo `out_left`/`out_right` slices, with no heap
+    /// allocation, bit for bit what `n = out_left.len().min(out_right.len())` calls to
+    /// [`tick`](Self::tick) would return.
     ///
-    /// This is the allocation-free block entry point (in contrast to the default
-    /// [`GraphModule::process_block`], which builds a fresh [`PortValues`] per frame). It
-    /// (re)compiles once if needed, then drives the same per-sample engine over
-    /// `n = out_left.len().min(out_right.len())` frames, reusing the preallocated routing
-    /// buffers across every frame. Full SIMD-vectorized block execution is not performed;
-    /// the guarantee here is zero allocation, not vectorization.
+    /// It (re)compiles once if needed, as the first of those ticks would, then renders the
+    /// frames in blocks of up to 64. Within a block most nodes run **node-major**: each
+    /// node through every frame before the next node starts, reading its inputs as
+    /// per-port rows its sources filled, so the walk is paid per block rather than per
+    /// sample, and a module that implements [`GraphModule::tick_frames`] (the common
+    /// built-ins do) runs its per-sample code in a loop with no [`PortValues`] at all.
+    /// Nodes on a feedback cycle, and nodes that share state such as the thread-wide
+    /// random stream ([`GraphModule::shares_state`]), run sample by sample as a group,
+    /// exactly as `tick` runs them; see `build_stages` in the source for why every module
+    /// sees the same inputs either way.
+    ///
+    /// What the host can observe:
+    ///
+    /// - Each sample, and the module states and every output port's value
+    ///   ([`get_output_value`](Self::get_output_value), observers) after the call, are the
+    ///   same bits as after `n` ticks.
+    /// - The call is atomic: nothing the host does lands mid-block. A parameter set, an
+    ///   edit or an `AudioInputStream::advance` between two calls lands between the same
+    ///   two frames as between two ticks; one the host would make *between* those ticks
+    ///   needs the ticks (a host-clock audio stream reads one frame for the whole call).
+    /// - A value another thread writes while the call runs (an `ExternalInput`'s
+    ///   `AtomicF64`) is read whenever its reader runs, which is no more defined inside a
+    ///   run of ticks.
     pub fn tick_block(&mut self, out_left: &mut [f64], out_right: &mut [f64]) {
         if self.dirty {
             let _ = self.compile();
         }
         let frames = out_left.len().min(out_right.len());
-        for frame in 0..frames {
-            let (left, right) = self.tick_step();
-            out_left[frame] = left;
-            out_right[frame] = right;
+        let (out_left, out_right) = (&mut out_left[..frames], &mut out_right[..frames]);
+
+        // Lockstep is established by compile(). An uncompiled or failed compile leaves the
+        // plan empty, which renders silence, as `tick_step` does.
+        if self.routing.nodes.len() != self.modules.len() {
+            debug_assert!(
+                self.routing.nodes.is_empty(),
+                "routing plan is out of step with modules"
+            );
+            out_left.fill(0.0);
+            out_right.fill(0.0);
+            return;
         }
+
+        let mut done = 0;
+        while done < frames {
+            let n = (frames - done).min(BLOCK);
+            self.run_block(n);
+            let (left, right) = (
+                &mut out_left[done..done + n],
+                &mut out_right[done..done + n],
+            );
+            match self.routing.output_slots {
+                Some((l, r)) => {
+                    left.copy_from_slice(&self.routing.block_out[l * BLOCK..l * BLOCK + n]);
+                    right.copy_from_slice(&self.routing.block_out[r * BLOCK..r * BLOCK + n]);
+                }
+                None => {
+                    left.fill(0.0);
+                    right.fill(0.0);
+                }
+            }
+            done += n;
+        }
+    }
+
+    /// Run `frames` (at most [`BLOCK`]) frames of the compiled schedule's stages, leaving
+    /// each output port's rows in `block_out` and its latest value in `out_buf`.
+    fn run_block(&mut self, frames: usize) {
+        let Routing {
+            nodes,
+            out_buf,
+            scratch_in,
+            scratch_out,
+            block_out,
+            block_in,
+            stages,
+            group_members,
+            ..
+        } = &mut self.routing;
+        let modules = &mut self.modules;
+
+        for &stage in stages.iter() {
+            match stage {
+                Stage::Node(i) => {
+                    let exec = &mut nodes[i];
+                    let module = &mut *modules[i];
+                    if exec.frames_ok
+                        && Self::run_node_frames(exec, module, out_buf, block_out, block_in, frames)
+                    {
+                        continue;
+                    }
+                    for t in 0..frames {
+                        Self::run_node_frame(
+                            exec,
+                            module,
+                            out_buf,
+                            block_out,
+                            &mut scratch_in[i],
+                            &mut scratch_out[i],
+                            t,
+                        );
+                    }
+                }
+                Stage::Group(start, end) => {
+                    let group = &group_members[start..end];
+                    for t in 0..frames {
+                        for &i in group {
+                            Self::run_node_frame(
+                                &nodes[i],
+                                &mut *modules[i],
+                                out_buf,
+                                block_out,
+                                &mut scratch_in[i],
+                                &mut scratch_out[i],
+                                t,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// One node through a whole block by its [`GraphModule::tick_frames`]. Returns
+    /// `false`, having changed nothing but its input rows, if the module declines, and
+    /// then stops offering it the hook until the next compile.
+    fn run_node_frames(
+        exec: &mut NodeExec,
+        module: &mut dyn GraphModule,
+        out_buf: &mut [f64],
+        block_out: &mut [f64],
+        block_in: &mut [f64],
+        frames: usize,
+    ) -> bool {
+        exec.gather_block(block_out, block_in, frames);
+        let count = exec.out_ids.len();
+        let rows = exec.out_base * BLOCK..(exec.out_base + count) * BLOCK;
+        let written = {
+            let inputs = BlockInputs::new(
+                &block_in[exec.in_base * BLOCK..(exec.in_base + exec.in_rows) * BLOCK],
+                BLOCK,
+                frames,
+                exec.in_rows,
+                exec.in_first,
+            );
+            let mut outputs =
+                BlockOutputs::new(&mut block_out[rows], BLOCK, frames, count, exec.out_first);
+            if !module.tick_frames(&inputs, &mut outputs, exec.wanted_outputs) {
+                exec.frames_ok = false;
+                return false;
+            }
+            outputs.written()
+        };
+        for k in 0..count {
+            let slot = exec.out_base + k;
+            let row = &mut block_out[slot * BLOCK..slot * BLOCK + frames];
+            if written & (1 << k) != 0 {
+                // The scatter's flush, frame by frame.
+                for value in row.iter_mut() {
+                    *value = sanitize_flush(*value);
+                }
+                out_buf[slot] = row[frames - 1];
+            } else if exec.wanted_outputs & (1 << k) != 0 {
+                // Unwritten: every frame reads the value the port already held, as a
+                // tick that leaves a port unwritten leaves its slot.
+                row.fill(out_buf[slot]);
+            }
+        }
+        true
+    }
+
+    /// One node through frame `t` of a block, by the per-sample path: gather (from rows,
+    /// or `out_buf` for a group's own edges), `tick_masked`, scatter, and record the frame
+    /// in the node's rows.
+    fn run_node_frame(
+        exec: &NodeExec,
+        module: &mut dyn GraphModule,
+        out_buf: &mut [f64],
+        block_out: &mut [f64],
+        inputs: &mut PortValues,
+        outputs: &mut PortValues,
+        t: usize,
+    ) {
+        exec.gather_frame(block_out, out_buf, inputs, t);
+        outputs.clear();
+        module.tick_masked(inputs, outputs, exec.wanted_outputs);
+        exec.scatter(outputs, out_buf);
+        exec.store_frame(out_buf, block_out, t);
     }
 
     /// Execute one sample of the already-compiled schedule (no dirty/recompile check).
@@ -2133,6 +2686,8 @@ impl Patch {
                     if let Some(scratch) = self.routing.scratch_in.get_mut(exec_idx) {
                         exec.prefill_defaults(scratch);
                     }
+                    // And into its block row, which `tick_block` reads the same way.
+                    exec.prefill_block(&mut self.routing.block_in);
                     if let Some(pending) = exec
                         .normalled_pending
                         .iter_mut()

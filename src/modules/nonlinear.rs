@@ -3,7 +3,10 @@
 use super::common::{env_coef, sanitize_audio, Memo, GATE_THRESHOLD_V};
 use super::oversample::{Oversample, Oversampler};
 use crate::analog::saturation;
-use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
+use crate::port::{
+    drive_frames, BlockInputs, BlockOutputs, GraphModule, InputFrame, OutputFrame, PortDef,
+    PortSpec, PortValues, SignalKind,
+};
 use alloc::vec;
 use alloc::vec::Vec;
 use libm::Libm;
@@ -59,12 +62,11 @@ impl Default for Bitcrusher {
     }
 }
 
-impl GraphModule for Bitcrusher {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Bitcrusher {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let input = inputs.get_or(0, 0.0);
         let bits_cv = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let downsample_cv = inputs.get_or(2, 0.0).clamp(0.0, 1.0);
@@ -94,6 +96,25 @@ impl GraphModule for Bitcrusher {
         let normalized = ((self.hold_sample / 5.0 + 1.0) * 0.5).clamp(0.0, 1.0);
         let quantized = Libm::<f64>::round(normalized * steps) / steps;
         outputs.set(10, (quantized * 2.0 - 1.0) * 5.0);
+    }
+}
+
+impl GraphModule for Bitcrusher {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<3, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -237,12 +258,11 @@ impl Default for Distortion {
     }
 }
 
-impl GraphModule for Distortion {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Distortion {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let input = sanitize_audio(inputs.get_or(0, 0.0));
         let drive = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let tone = inputs.get_or(2, 0.5).clamp(0.0, 1.0);
@@ -276,6 +296,25 @@ impl GraphModule for Distortion {
         let filtered = self.tone_lp;
 
         outputs.set(10, input * (1.0 - mix) + filtered * mix);
+    }
+}
+
+impl GraphModule for Distortion {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<5, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -331,12 +370,11 @@ impl Default for RingModulator {
     }
 }
 
-impl GraphModule for RingModulator {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl RingModulator {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let carrier = inputs.get_or(0, 0.0);
         let modulator = inputs.get_or(1, 0.0);
 
@@ -344,6 +382,25 @@ impl GraphModule for RingModulator {
         // Normalize by 5.0 to keep output in ±5V range (both inputs are ±5V)
         let out = (carrier * modulator) / 5.0;
         outputs.set(10, out);
+    }
+}
+
+impl GraphModule for RingModulator {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<2, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {}
@@ -1064,6 +1121,11 @@ impl GraphModule for Granular {
         self.norm_smooth = 1.0;
     }
 
+    /// Unseeded, it draws from the thread-wide stream (see [`GraphModule::shares_state`]).
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        (!self.rng.is_seeded()).then_some(crate::port::SharedState::RANDOM_STREAM)
+    }
+
     fn seed(&mut self, seed: u64) {
         self.rng.seed(seed);
     }
@@ -1133,12 +1195,11 @@ impl Default for Wavefolder {
     }
 }
 
-impl GraphModule for Wavefolder {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Wavefolder {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         // Q-N6: the oversampler's half-band filters are stateful; keep NaN/Inf out.
         let input = sanitize_audio(inputs.get_or(0, 0.0));
         let threshold = inputs.get_or(1, self.threshold).max(0.1);
@@ -1149,6 +1210,25 @@ impl GraphModule for Wavefolder {
             .oversampler
             .process(input, |x| saturation::fold(x / 5.0, threshold) * 5.0);
         outputs.set(10, folded);
+    }
+}
+
+impl GraphModule for Wavefolder {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<2, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {

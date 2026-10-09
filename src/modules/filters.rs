@@ -1,7 +1,10 @@
 //! Filter modules.
 
 use crate::modules::common::{flush_denorm, sanitize_audio, Memo};
-use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
+use crate::port::{
+    drive_frames, BlockInputs, BlockOutputs, GraphModule, InputFrame, OutputFrame, PortDef,
+    PortSpec, PortValues, SignalKind,
+};
 use alloc::vec;
 use core::f64::consts::{PI, TAU};
 use libm::Libm;
@@ -97,12 +100,11 @@ impl Default for Svf {
     }
 }
 
-impl GraphModule for Svf {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Svf {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         // Q160: sanitize so a non-finite input can never poison the resonant
         // TPT integrator state (which would otherwise latch NaN forever).
         let input = sanitize_audio(inputs.get_or(0, 0.0));
@@ -166,6 +168,25 @@ impl GraphModule for Svf {
         outputs.set(11, band); // BP
         outputs.set(12, high); // HP
         outputs.set(13, notch); // Notch
+    }
+}
+
+impl GraphModule for Svf {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<6, 4, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -545,12 +566,11 @@ impl Default for ParametricEq {
     }
 }
 
-impl GraphModule for ParametricEq {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl ParametricEq {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         // Q160: sanitize the audio input so a non-finite sample can never latch
         // the recursive biquad state to NaN/Inf permanently (matching Svf and
         // DiodeLadderFilter).
@@ -613,6 +633,25 @@ impl GraphModule for ParametricEq {
         signal = Self::process_biquad(signal, &self.high_coefs, &mut self.high_state);
 
         outputs.set(10, signal);
+    }
+}
+
+impl GraphModule for ParametricEq {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<8, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {

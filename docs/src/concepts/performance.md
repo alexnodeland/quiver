@@ -90,8 +90,25 @@ let mut right = [0.0f64; 128];
 patch.tick_block(&mut left, &mut right);
 ```
 
-`tick_block` is equivalent to calling `tick()` in a loop, but keeps the per-buffer
-bookkeeping out of your code.
+`tick_block` renders exactly what calling `tick()` in a loop would, bit for bit, and is
+cheaper. It walks the graph once per block of up to 64 frames rather than once per sample:
+each node runs through every frame of the block before the next node starts, reading its
+inputs as rows its sources filled, and the common built-in modules (oscillators, filters,
+envelopes, VCAs, mixers, effects) run their per-sample code in a tight loop through
+`GraphModule::tick_frames`. Nodes on a feedback loop, and nodes that draw from the shared
+random stream, still run sample by sample, as a group, so they see what `tick` shows them.
+Prefer it whenever you render more than one sample at a time; nothing you do between calls
+(a parameter, an edit, writing an audio input) can land mid-block, so do anything that must
+happen between two particular samples between two `tick()`s instead.
+
+A module of your own gets the block path's cheaper walk for free. To run its own code in a
+loop too, override `GraphModule::tick_frames`: read `inputs.port(k)`, write
+`outputs.port(k)`, and make each frame exactly what `tick_masked` would have produced (the
+default declines, and the patch calls `tick_masked` frame by frame). A module that draws
+from the thread-wide random stream, or reads or writes a cell another node also touches,
+names it with `GraphModule::shares_state` (`SharedState::RANDOM_STREAM`,
+`SharedState::reads`, `SharedState::writes`), so the nodes sharing something one of them
+writes run sample by sample together.
 
 ### Zero-Allocation Guarantee
 
@@ -144,7 +161,7 @@ flowchart LR
 ```toml
 # Cargo.toml
 [dependencies]
-quiver-dsp = { version = "0.2", features = ["simd"] }
+quiver-dsp = { version = "0.5", features = ["simd"] }
 ```
 
 ### SIMD Operations

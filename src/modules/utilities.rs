@@ -1,7 +1,10 @@
 //! Utility, logic, CV, and sequencing modules.
 
 use super::common::{sanitize_audio, EdgeDetector, Memo, GATE_HIGH_V, GATE_THRESHOLD_V};
-use crate::port::{GraphModule, ParamDef, ParamId, PortDef, PortSpec, PortValues, SignalKind};
+use crate::port::{
+    drive_frames, drive_rows, BlockInputs, BlockOutputs, GraphModule, InputFrame, OutputFrame,
+    ParamDef, ParamId, PortDef, PortSpec, PortValues, SignalKind,
+};
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -40,16 +43,34 @@ impl Default for Mixer {
     }
 }
 
+impl Mixer {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
+        let sum: f64 = (0..self.num_channels)
+            .map(|i| inputs.get_or(i as u32, 0.0))
+            .sum();
+        outputs.set(100, sum);
+    }
+}
+
 impl GraphModule for Mixer {
     fn port_spec(&self) -> &PortSpec {
         &self.spec
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let sum: f64 = (0..self.num_channels)
-            .map(|i| inputs.get_or(i as u32, 0.0))
-            .sum();
-        outputs.set(100, sum);
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_rows::<1, 100>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {}
@@ -91,14 +112,32 @@ impl Default for Offset {
     }
 }
 
+impl Offset {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
+        let input = inputs.get_or(0, 0.0);
+        outputs.set(10, input + self.offset);
+    }
+}
+
 impl GraphModule for Offset {
     fn port_spec(&self) -> &PortSpec {
         &self.spec
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
-        outputs.set(10, input + self.offset);
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<1, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {}
@@ -336,12 +375,11 @@ impl Default for ScaleQuantizer {
     }
 }
 
-impl GraphModule for ScaleQuantizer {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl ScaleQuantizer {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let input = inputs.get_or(0, 0.0);
         let root_cv = inputs.get_or(1, 0.0).clamp(0.0, 1.0);
         let scale_cv = inputs.get_or(2, 0.0).clamp(0.0, 1.0);
@@ -392,6 +430,25 @@ impl GraphModule for ScaleQuantizer {
 
         outputs.set(10, output_voct);
         outputs.set(11, trigger);
+    }
+}
+
+impl GraphModule for ScaleQuantizer {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<3, 2, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -515,12 +572,11 @@ impl Default for Euclidean {
     }
 }
 
-impl GraphModule for Euclidean {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Euclidean {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let clock = inputs.get_or(0, 0.0);
         let steps_cv = inputs.get_or(1, 0.5).clamp(0.0, 1.0);
         let pulses_cv = inputs.get_or(2, 0.25).clamp(0.0, 1.0);
@@ -579,6 +635,25 @@ impl GraphModule for Euclidean {
 
         outputs.set(10, out);
         outputs.set(11, accent);
+    }
+}
+
+impl GraphModule for Euclidean {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<5, 2, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -928,17 +1003,35 @@ impl Default for StereoOutput {
     }
 }
 
+impl StereoOutput {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
+        let left = inputs.get_or(0, 0.0);
+        let right = inputs.get_or(1, left); // Mono fallback
+
+        outputs.set(0, left);
+        outputs.set(1, right);
+    }
+}
+
 impl GraphModule for StereoOutput {
     fn port_spec(&self) -> &PortSpec {
         &self.spec
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let left = inputs.get_or(0, 0.0);
-        let right = inputs.get_or(1, left); // Mono fallback
+        self.tick_generic(inputs, outputs);
+    }
 
-        outputs.set(0, left);
-        outputs.set(1, right);
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<2, 2, 0, 0>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {}
@@ -981,12 +1074,11 @@ impl Default for SampleAndHold {
     }
 }
 
-impl GraphModule for SampleAndHold {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl SampleAndHold {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let input = inputs.get_or(0, 0.0);
         let trigger = inputs.get_or(1, 0.0);
 
@@ -996,6 +1088,25 @@ impl GraphModule for SampleAndHold {
         }
 
         outputs.set(10, self.held_value);
+    }
+}
+
+impl GraphModule for SampleAndHold {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<2, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -1060,12 +1171,11 @@ impl Default for SlewLimiter {
     }
 }
 
-impl GraphModule for SlewLimiter {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl SlewLimiter {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let target = inputs.get_or(0, 0.0);
         let rise_cv = inputs.get_or(1, 0.5);
         let fall_cv = inputs.get_or(2, 0.5);
@@ -1090,6 +1200,25 @@ impl GraphModule for SlewLimiter {
         }
 
         outputs.set(10, self.current);
+    }
+}
+
+impl GraphModule for SlewLimiter {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<3, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -1212,12 +1341,11 @@ impl Default for Quantizer {
     }
 }
 
-impl GraphModule for Quantizer {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Quantizer {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let input = inputs.get_or(0, 0.0);
         let candidate = self.quantize(input);
         // Hold the note through hysteresis so a CV parked on a boundary does not
@@ -1230,6 +1358,25 @@ impl GraphModule for Quantizer {
         );
         self.last_output = Some(committed);
         outputs.set(10, committed);
+    }
+}
+
+impl GraphModule for Quantizer {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<1, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -1303,12 +1450,11 @@ impl Default for Clock {
     }
 }
 
-impl GraphModule for Clock {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Clock {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let bpm_cv = inputs.get_or(0, Self::DEFAULT_BPM_CV); // Default 120 BPM
         let reset = inputs.get_or(1, 0.0);
 
@@ -1357,6 +1503,25 @@ impl GraphModule for Clock {
         }
         self.phase = new_phase - wraps;
     }
+}
+
+impl GraphModule for Clock {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<2, 3, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
+    }
 
     fn reset(&mut self) {
         self.phase = 0.0;
@@ -1400,16 +1565,34 @@ impl Default for Attenuverter {
     }
 }
 
+impl Attenuverter {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
+        let input = inputs.get_or(0, 0.0);
+        let level = inputs.get_or(1, 5.0) / 5.0; // Normalize to -1..+1
+
+        outputs.set(10, input * level);
+    }
+}
+
 impl GraphModule for Attenuverter {
     fn port_spec(&self) -> &PortSpec {
         &self.spec
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let input = inputs.get_or(0, 0.0);
-        let level = inputs.get_or(1, 5.0) / 5.0; // Normalize to -1..+1
+        self.tick_generic(inputs, outputs);
+    }
 
-        outputs.set(10, input * level);
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<2, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {}
@@ -1511,12 +1694,11 @@ impl Default for Crossfader {
     }
 }
 
-impl GraphModule for Crossfader {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Crossfader {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let a = inputs.get_or(0, 0.0);
         let b = inputs.get_or(1, 0.0);
         let pos = inputs.get_or(2, 0.0);
@@ -1537,6 +1719,25 @@ impl GraphModule for Crossfader {
         // At pos=-5V: full left, at pos=+5V: full right
         outputs.set(11, out * a_gain); // Left
         outputs.set(12, out * b_gain); // Right
+    }
+}
+
+impl GraphModule for Crossfader {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<3, 3, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {}
@@ -1779,12 +1980,11 @@ impl Default for Comparator {
     }
 }
 
-impl GraphModule for Comparator {
-    fn port_spec(&self) -> &PortSpec {
-        &self.spec
-    }
-
-    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+impl Comparator {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
         let a = inputs.get_or(0, 0.0);
         let b = inputs.get_or(1, 0.0);
         let d = a - b;
@@ -1828,6 +2028,25 @@ impl GraphModule for Comparator {
         outputs.set(10, if gt { GATE_HIGH_V } else { 0.0 });
         outputs.set(11, if lt { GATE_HIGH_V } else { 0.0 });
         outputs.set(12, if self.state == 0 { GATE_HIGH_V } else { 0.0 });
+    }
+}
+
+impl GraphModule for Comparator {
+    fn port_spec(&self) -> &PortSpec {
+        &self.spec
+    }
+
+    fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<2, 3, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {
@@ -2122,6 +2341,11 @@ impl GraphModule for BernoulliGate {
         self.rng.reset();
     }
 
+    /// Unseeded, it draws from the thread-wide stream (see [`GraphModule::shares_state`]).
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        (!self.rng.is_seeded()).then_some(crate::port::SharedState::RANDOM_STREAM)
+    }
+
     fn seed(&mut self, seed: u64) {
         self.rng.seed(seed);
     }
@@ -2160,15 +2384,33 @@ impl Default for Min {
     }
 }
 
+impl Min {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
+        let a = inputs.get_or(0, 0.0);
+        let b = inputs.get_or(1, 0.0);
+        outputs.set(10, Libm::<f64>::fmin(a, b));
+    }
+}
+
 impl GraphModule for Min {
     fn port_spec(&self) -> &PortSpec {
         &self.spec
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let a = inputs.get_or(0, 0.0);
-        let b = inputs.get_or(1, 0.0);
-        outputs.set(10, Libm::<f64>::fmin(a, b));
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<2, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {}
@@ -2207,15 +2449,33 @@ impl Default for Max {
     }
 }
 
+impl Max {
+    /// The whole of [`GraphModule::tick`], generic over where it reads and writes, so
+    /// [`GraphModule::tick_frames`] runs the very same code, a frame at a time.
+    #[inline(always)]
+    fn tick_generic<I: InputFrame, O: OutputFrame>(&mut self, inputs: &I, outputs: &mut O) {
+        let a = inputs.get_or(0, 0.0);
+        let b = inputs.get_or(1, 0.0);
+        outputs.set(10, Libm::<f64>::fmax(a, b));
+    }
+}
+
 impl GraphModule for Max {
     fn port_spec(&self) -> &PortSpec {
         &self.spec
     }
 
     fn tick(&mut self, inputs: &PortValues, outputs: &mut PortValues) {
-        let a = inputs.get_or(0, 0.0);
-        let b = inputs.get_or(1, 0.0);
-        outputs.set(10, Libm::<f64>::fmax(a, b));
+        self.tick_generic(inputs, outputs);
+    }
+
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        drive_frames::<2, 1, 0, 10>(inputs, outputs, |i, o| self.tick_generic(i, o))
     }
 
     fn reset(&mut self) {}
@@ -2688,6 +2948,11 @@ impl GraphModule for Arpeggiator {
         self.rng.reset();
         self.gate_out = 0.0;
         self.trigger_countdown = 0;
+    }
+
+    /// Unseeded, it draws from the thread-wide stream (see [`GraphModule::shares_state`]).
+    fn shares_state(&self) -> Option<crate::port::SharedState> {
+        (!self.rng.is_seeded()).then_some(crate::port::SharedState::RANDOM_STREAM)
     }
 
     fn seed(&mut self, seed: u64) {

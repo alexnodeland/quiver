@@ -120,7 +120,7 @@ still `quiver`, so imports are `use quiver::...`):
 
 ```toml
 [dependencies]
-quiver-dsp = "0.2"
+quiver-dsp = "0.5"
 ```
 
 ### Feature Flags
@@ -140,13 +140,13 @@ there is no allocator-free tier:
 
 ```toml
 # Tier 1: Core DSP only (no_std, heap required — bring your own #[global_allocator])
-quiver-dsp = { version = "0.2", default-features = false }
+quiver-dsp = { version = "0.5", default-features = false }
 
 # Tier 2: With serialization & presets (WASM web apps)
-quiver-dsp = { version = "0.2", default-features = false, features = ["alloc"] }
+quiver-dsp = { version = "0.5", default-features = false, features = ["alloc"] }
 
 # Tier 3: Full std (desktop apps, default)
-quiver-dsp = "0.2"
+quiver-dsp = "0.5"
 ```
 
 | Tier | DSP | Serialize | Presets | I/O | OSC/Plugins | Visual |
