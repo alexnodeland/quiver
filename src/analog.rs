@@ -722,6 +722,11 @@ impl GraphModule for AnalogVco {
     /// re-drawn from a stream derived from `seed`, and the per-tick drift noise
     /// from another, so a seeded instance is a pure function of its seed
     /// regardless of how many analog modules were constructed before it.
+    /// Unseeded, it draws from the thread-wide stream (see [`GraphModule::shares_state`]).
+    fn shares_state(&self) -> bool {
+        !self.rng.is_seeded()
+    }
+
     fn seed(&mut self, seed: u64) {
         let mut instance = rng::Rng::from_seed(rng::derive_seed(seed, u64::MAX));
         self.freq_component.instance_offset =

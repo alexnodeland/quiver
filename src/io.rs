@@ -11,7 +11,9 @@
 //! - [`MidiState`] turns raw MIDI bytes into the atomics `ExternalInput` reads.
 
 use crate::introspection::{ModuleIntrospection, ParamInfo};
-use crate::port::{GraphModule, PortDef, PortSpec, PortValues, SignalKind};
+use crate::port::{
+    BlockInputs, BlockOutputs, GraphModule, PortDef, PortSpec, PortValues, SignalKind,
+};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -197,6 +199,22 @@ impl GraphModule for ExternalInput {
 
     fn tick(&mut self, _inputs: &PortValues, outputs: &mut PortValues) {
         outputs.set(0, self.value.get());
+    }
+
+    /// Reads the value once per frame, as `tick` does.
+    fn tick_frames(
+        &mut self,
+        _inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        _wanted: u32,
+    ) -> bool {
+        if outputs.len() != 1 {
+            return false;
+        }
+        for value in outputs.port(0) {
+            *value = self.value.get();
+        }
+        true
     }
 
     fn reset(&mut self) {}
