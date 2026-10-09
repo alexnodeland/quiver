@@ -24,10 +24,8 @@
 //! `tanh` instead of libm's (within 1.2e-8 of `tanh` below |x| = 2, 9.7e-5 at worst), which
 //! moves its samples by a rounding. The module changed, not the interpreter.
 //!
-//! **Deliberate rebaseline, issue #55:** `diode_ladder` changed from `0x751c_aa6f_4219_5449`
-//! to `0x0418_6d24_1d04_3bb9`. The ladder resolves its resonance feedback with one estimating pass
-//! instead of two, so the sound moves slightly by design (the maintainer accepted this in
-//! the issue). The other patches are untouched.
+//! **0.5.0 and back, 0.5.1:** 0.5.0 resolved the ladder's feedback in one estimating pass
+//! (`0x0418_6d24_1d04_3bb9`); 0.5.1 restores the two passes, and with them 0.4.1's hash.
 //!
 //! Coverage is chosen to exercise every path in `Patch::tick_step`:
 //!
@@ -438,7 +436,7 @@ fn golden_diode_ladder() {
     assert_golden(
         "diode_ladder",
         render_hash(&mut patch),
-        0x0418_6d24_1d04_3bb9,
+        0x751c_aa6f_4219_5449,
     );
 }
 

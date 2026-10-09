@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This changelog is auto-generated from git history. Run `make changelog` to update.
 Sections above the auto-generated marker are hand-written and are preserved.
 
+## [0.5.1] - 2026-10-09
+
+### Changed
+
+- **The diode ladder resolves its feedback in two passes again, as in 0.4.1.** 0.5.0's
+  single pass was about a third cheaper per sample, but it changed the ladder's sound
+  enough to move a downstream search's results, so 0.5.1 restores 0.4.1's output, bit for
+  bit (the `diode_ladder` golden is 0.4.1's again). Every patch now renders exactly as on
+  0.4.1; `tick_block` from 0.5.0 is unchanged.
+
 ## [0.5.0] - 2026-10-09
 
 A performance release: `Patch::tick_block` walks the graph once per block instead of
