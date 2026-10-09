@@ -37,8 +37,11 @@ Sections above the auto-generated marker are hand-written and are preserved.
   others. Its default is `false`: a third-party module that draws from
   `quiver::rng::random` in two nodes of one patch should override it, or `tick_block`
   will hand the draws out in a different order than `tick`.
+- The diode ladder resolves its resonance feedback in one fixed-point pass instead of two,
+  about a third cheaper per sample. Its output changes slightly (the `diode_ladder` golden
+  vector is rebaselined); patches without a `DiodeLadderFilter` are bit for bit unchanged.
 
-## [0.4.1] - unreleased
+## [0.4.1] - 2026-10-09
 
 A performance release: the diode ladder's saturation and the per-sample graph walk cost
 less. The public API is unchanged. Every patch renders bit for bit as in 0.4.0, except
