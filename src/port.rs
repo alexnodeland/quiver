@@ -464,6 +464,403 @@ impl PortValues {
     }
 }
 
+/// One node's inputs for a block of frames, as [`Patch::tick_block`] hands them to
+/// [`GraphModule::tick_frames`].
+///
+/// Input port `k`, in [`PortSpec`] input order, is [`port(k)`](Self::port): one value per
+/// frame, already resolved exactly as the per-sample engine resolves it for
+/// [`tick`](GraphModule::tick) — the sum of its cables, its (possibly overridden) default
+/// when unpatched, or the sibling it is normalled to. Every input is present, every frame:
+/// the default a module passes to [`PortValues::get_or`] is never what it reads inside a
+/// patch, here or in `tick`.
+///
+/// [`Patch::tick_block`]: crate::graph::Patch::tick_block
+#[derive(Debug, Clone, Copy)]
+pub struct BlockInputs<'a> {
+    data: &'a [f64],
+    stride: usize,
+    frames: usize,
+    count: usize,
+    first_id: PortId,
+}
+
+impl<'a> BlockInputs<'a> {
+    /// `count` ports of `frames` values each, port `k` at `data[k * stride..][..frames]`,
+    /// numbered `first_id + k`.
+    ///
+    /// Public so a module's [`tick_frames`](GraphModule::tick_frames) can be driven without
+    /// a [`Patch`](crate::graph::Patch) (in its own tests, say).
+    ///
+    /// # Panics
+    ///
+    /// If `frames > stride` (with more than one port) or `data` is shorter than the ports
+    /// it must hold.
+    pub fn new(
+        data: &'a [f64],
+        stride: usize,
+        frames: usize,
+        count: usize,
+        first_id: PortId,
+    ) -> Self {
+        assert!(
+            count <= 1 || frames <= stride,
+            "a port's frames overlap the next port"
+        );
+        assert!(
+            count == 0 || (count - 1) * stride + frames <= data.len(),
+            "block input buffer too short"
+        );
+        Self {
+            data,
+            stride,
+            frames,
+            count,
+            first_id,
+        }
+    }
+
+    /// Frames in this block.
+    #[inline]
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+
+    /// Number of input ports.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Whether there are no input ports.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The id of input port 0; port `k` is `first_id() + k`.
+    #[inline]
+    pub fn first_id(&self) -> PortId {
+        self.first_id
+    }
+
+    /// Input port `k`'s values, [`frames`](Self::frames) long.
+    ///
+    /// # Panics
+    ///
+    /// If `k >= len()`.
+    #[inline]
+    pub fn port(&self, k: usize) -> &'a [f64] {
+        assert!(k < self.count, "input port index out of range");
+        &self.data[k * self.stride..k * self.stride + self.frames]
+    }
+}
+
+/// One node's outputs for a block of frames, written by [`GraphModule::tick_frames`].
+///
+/// Output port `k`, in [`PortSpec`] output order, is [`port(k)`](Self::port). Taking a port
+/// marks it written for the whole block: the module must then fill every frame of it, with
+/// what [`tick_masked`](GraphModule::tick_masked) would have written on that frame. A port
+/// it never takes keeps, for every frame, the value it held before the block — what a
+/// `tick` that leaves a port unwritten does. The patch flushes denormals and non-finite
+/// values from each written port afterwards, exactly as its scatter does after a `tick`, so
+/// a module writes raw values here as it would into a [`PortValues`].
+#[derive(Debug)]
+pub struct BlockOutputs<'a> {
+    data: &'a mut [f64],
+    stride: usize,
+    frames: usize,
+    count: usize,
+    first_id: PortId,
+    written: u64,
+}
+
+impl<'a> BlockOutputs<'a> {
+    /// `count` ports of `frames` values each, port `k` at `data[k * stride..][..frames]`,
+    /// numbered `first_id + k`. At most 64 ports.
+    ///
+    /// # Panics
+    ///
+    /// As [`BlockInputs::new`], or if `count > 64`.
+    pub fn new(
+        data: &'a mut [f64],
+        stride: usize,
+        frames: usize,
+        count: usize,
+        first_id: PortId,
+    ) -> Self {
+        assert!(count <= 64, "at most 64 block outputs");
+        assert!(
+            count <= 1 || frames <= stride,
+            "a port's frames overlap the next port"
+        );
+        assert!(
+            count == 0 || (count - 1) * stride + frames <= data.len(),
+            "block output buffer too short"
+        );
+        Self {
+            data,
+            stride,
+            frames,
+            count,
+            first_id,
+            written: 0,
+        }
+    }
+
+    /// Frames in this block.
+    #[inline]
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+
+    /// Number of output ports.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Whether there are no output ports.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The id of output port 0; port `k` is `first_id() + k`.
+    #[inline]
+    pub fn first_id(&self) -> PortId {
+        self.first_id
+    }
+
+    /// Output port `k`'s values, [`frames`](Self::frames) long, marked written.
+    ///
+    /// # Panics
+    ///
+    /// If `k >= len()`.
+    #[inline]
+    pub fn port(&mut self, k: usize) -> &mut [f64] {
+        assert!(k < self.count, "output port index out of range");
+        self.written |= 1 << k;
+        &mut self.data[k * self.stride..k * self.stride + self.frames]
+    }
+
+    /// Read back output port `k` without marking it written.
+    ///
+    /// # Panics
+    ///
+    /// If `k >= len()`.
+    #[inline]
+    pub fn peek(&self, k: usize) -> &[f64] {
+        assert!(k < self.count, "output port index out of range");
+        &self.data[k * self.stride..k * self.stride + self.frames]
+    }
+
+    /// The ports taken so far: bit `k` for output port `k`.
+    #[inline]
+    pub fn written(&self) -> u64 {
+        self.written
+    }
+
+    /// Every port at once, `N` of them, each marked written.
+    ///
+    /// # Panics
+    ///
+    /// If `N > len()`.
+    #[inline]
+    pub(crate) fn ports_mut<const N: usize>(&mut self) -> [&mut [f64]; N] {
+        assert!(N <= self.count, "output port index out of range");
+        let frames = self.frames;
+        let mut rows = self.data.chunks_mut(self.stride.max(1));
+        core::array::from_fn(|k| {
+            self.written |= 1 << k;
+            let row = rows.next().expect("checked against len above");
+            &mut row[..frames]
+        })
+    }
+}
+
+/// Where a module's per-sample code reads its inputs: a [`PortValues`] inside
+/// [`GraphModule::tick`], one frame of a block inside [`GraphModule::tick_frames`].
+///
+/// The built-in modules that run blocks write their per-sample body once, generic over
+/// this and [`OutputFrame`], so the block path is the same code as `tick` — the same
+/// arithmetic in the same order — read from a different place.
+pub(crate) trait InputFrame {
+    /// The value of input `id`, `default` if it has none (which never happens inside a
+    /// patch: every input is resolved before a module runs).
+    fn get_or(&self, id: PortId, default: f64) -> f64;
+}
+
+/// Where a module's per-sample code writes its outputs; see [`InputFrame`].
+pub(crate) trait OutputFrame {
+    /// Write output `id`.
+    fn set(&mut self, id: PortId, value: f64);
+}
+
+impl InputFrame for PortValues {
+    #[inline(always)]
+    fn get_or(&self, id: PortId, default: f64) -> f64 {
+        PortValues::get_or(self, id, default)
+    }
+}
+
+impl OutputFrame for PortValues {
+    #[inline(always)]
+    fn set(&mut self, id: PortId, value: f64) {
+        PortValues::set(self, id, value)
+    }
+}
+
+/// One frame of a block's inputs, `N` ports numbered from `FIRST`.
+///
+/// The numbering is a constant so that a body's `get_or(2, …)` compiles to a fixed index.
+pub(crate) struct ArrayIn<const N: usize, const FIRST: PortId> {
+    v: [f64; N],
+}
+
+impl<const N: usize, const FIRST: PortId> InputFrame for ArrayIn<N, FIRST> {
+    #[inline(always)]
+    fn get_or(&self, id: PortId, default: f64) -> f64 {
+        let k = id.wrapping_sub(FIRST) as usize;
+        if k < N {
+            self.v[k]
+        } else {
+            default
+        }
+    }
+}
+
+/// One frame of a block's outputs, `M` ports numbered from `FIRST`, with the ones written.
+pub(crate) struct ArrayOut<const M: usize, const FIRST: PortId> {
+    v: [f64; M],
+    written: u64,
+}
+
+impl<const M: usize, const FIRST: PortId> OutputFrame for ArrayOut<M, FIRST> {
+    #[inline(always)]
+    fn set(&mut self, id: PortId, value: f64) {
+        // An id outside the spec is dropped, as the scatter drops a `PortValues` slot it
+        // has no routing slot for.
+        let k = id.wrapping_sub(FIRST) as usize;
+        if k < M {
+            self.v[k] = value;
+            self.written |= 1 << k;
+        }
+    }
+}
+
+/// Run a module's generic per-sample body over every frame of a block: the shared driver
+/// of the built-in [`GraphModule::tick_frames`] overrides.
+///
+/// Returns `false`, having touched nothing, unless the node has exactly `N` inputs numbered
+/// from `IN0` and `M` outputs numbered from `OUT0` (the module's own spec). Each frame reads input `k` from row `k`, runs `step` (the very code `tick`
+/// runs), and copies each output the frame wrote into its row. Every port a body writes
+/// must be written on every frame of the block (true of each body this drives: what it
+/// writes depends on the `wanted` mask alone), which a debug build checks.
+#[inline(always)]
+pub(crate) fn drive_frames<
+    const N: usize,
+    const M: usize,
+    const IN0: PortId,
+    const OUT0: PortId,
+>(
+    inputs: &BlockInputs<'_>,
+    outputs: &mut BlockOutputs<'_>,
+    mut step: impl FnMut(&ArrayIn<N, IN0>, &mut ArrayOut<M, OUT0>),
+) -> bool {
+    if inputs.len() != N
+        || outputs.len() != M
+        || (N > 0 && inputs.first_id() != IN0)
+        || (M > 0 && outputs.first_id() != OUT0)
+    {
+        return false;
+    }
+    let frames = inputs.frames();
+    let rows: [&[f64]; N] = core::array::from_fn(|k| inputs.port(k));
+    let mut written = 0u64;
+    {
+        let mut outs: [&mut [f64]; M] = outputs.ports_mut::<M>();
+        for t in 0..frames {
+            let frame = ArrayIn::<N, IN0> {
+                v: core::array::from_fn(|k| rows[k][t]),
+            };
+            let mut out = ArrayOut::<M, OUT0> {
+                v: [0.0; M],
+                written: 0,
+            };
+            step(&frame, &mut out);
+            debug_assert!(
+                t == 0 || out.written == written,
+                "a block body must write the same ports every frame"
+            );
+            written = out.written;
+            for (k, row) in outs.iter_mut().enumerate() {
+                if out.written & (1 << k) != 0 {
+                    row[t] = out.v[k];
+                }
+            }
+        }
+    }
+    // `ports_mut` marked every port; keep only the ones the body wrote.
+    outputs.written = if frames == 0 { 0 } else { written };
+    true
+}
+
+/// Frame `t` of a block's inputs, read straight from its rows: the [`InputFrame`] for a
+/// module whose input count is not fixed at compile time (a `Mixer`).
+pub(crate) struct RowIn<'a, 'b> {
+    inputs: &'b BlockInputs<'a>,
+    t: usize,
+}
+
+impl InputFrame for RowIn<'_, '_> {
+    #[inline(always)]
+    fn get_or(&self, id: PortId, default: f64) -> f64 {
+        let k = id.wrapping_sub(self.inputs.first_id) as usize;
+        if k < self.inputs.count {
+            self.inputs.data[k * self.inputs.stride + self.t]
+        } else {
+            default
+        }
+    }
+}
+
+/// [`drive_frames`] for any number of inputs, read through [`RowIn`].
+#[inline(always)]
+pub(crate) fn drive_rows<const M: usize, const OUT0: PortId>(
+    inputs: &BlockInputs<'_>,
+    outputs: &mut BlockOutputs<'_>,
+    mut step: impl FnMut(&RowIn<'_, '_>, &mut ArrayOut<M, OUT0>),
+) -> bool {
+    if outputs.len() != M || (M > 0 && outputs.first_id() != OUT0) {
+        return false;
+    }
+    let frames = inputs.frames();
+    let mut written = 0u64;
+    {
+        let mut outs: [&mut [f64]; M] = outputs.ports_mut::<M>();
+        for t in 0..frames {
+            let frame = RowIn { inputs, t };
+            let mut out = ArrayOut::<M, OUT0> {
+                v: [0.0; M],
+                written: 0,
+            };
+            step(&frame, &mut out);
+            debug_assert!(
+                t == 0 || out.written == written,
+                "a block body must write the same ports every frame"
+            );
+            written = out.written;
+            for (k, row) in outs.iter_mut().enumerate() {
+                if out.written & (1 << k) != 0 {
+                    row[t] = out.v[k];
+                }
+            }
+        }
+    }
+    outputs.written = if frames == 0 { 0 } else { written };
+    true
+}
+
 /// Block-oriented port values for efficient processing
 pub struct BlockPortValues {
     buffers: StdMap<PortId, Vec<f64>>,
@@ -677,6 +1074,64 @@ pub trait GraphModule: Send + Sync {
     fn tick_masked(&mut self, inputs: &PortValues, outputs: &mut PortValues, wanted: u32) {
         let _ = wanted;
         self.tick(inputs, outputs);
+    }
+
+    /// Process a whole block of frames at once, inside [`Patch::tick_block`].
+    ///
+    /// `inputs.port(k)` holds input port `k` (in [`port_spec`](Self::port_spec) order) for
+    /// every frame; write output port `k` into `outputs.port(k)`. Return `true` once the
+    /// block is done. The result must be exactly what [`tick_masked`](Self::tick_masked)
+    /// with the same `wanted` would have produced called once per frame on the same
+    /// inputs, bit for bit, and must leave the module in the same state:
+    ///
+    /// - the same arithmetic in the same order (the built-in overrides run the very body
+    ///   `tick` runs, generic over where it reads and writes);
+    /// - every port `tick_masked` writes on a frame is written for that frame, and a port
+    ///   it would leave unwritten is not taken (see [`BlockOutputs`]);
+    /// - raw values: the patch flushes denormals and non-finite values from each written
+    ///   port afterwards, as it does after `tick`.
+    ///
+    /// The default returns `false` without touching anything, and the patch then drives
+    /// [`tick_masked`](Self::tick_masked) once per frame instead — the per-sample path —
+    /// so implementing this is purely an optimization and no implementor breaks. A module
+    /// that returns `false` once is not asked again until the patch is recompiled.
+    ///
+    /// The patch calls this only for a node whose input ids and output ids each count up by
+    /// one from their first in spec order ([`BlockInputs::first_id`]), with at most 32
+    /// outputs, and that is not on a feedback cycle (those run sample by sample).
+    ///
+    /// [`Patch::tick_block`]: crate::graph::Patch::tick_block
+    fn tick_frames(
+        &mut self,
+        inputs: &BlockInputs<'_>,
+        outputs: &mut BlockOutputs<'_>,
+        wanted: u32,
+    ) -> bool {
+        let _ = (inputs, outputs, wanted);
+        false
+    }
+
+    /// Whether this module, as it ticks, touches state that another node of the same patch
+    /// can also touch, so that the order in which the two run their samples matters.
+    ///
+    /// The case that matters in quiver is the **thread-wide random stream**: a module that
+    /// draws from [`rng::random`](crate::rng::random), or from a
+    /// [`ModuleRng`](crate::rng::ModuleRng) nobody has seeded, shares that stream with
+    /// every other such node, and their draws interleave in execution order. A buffer or
+    /// counter shared between two nodes through an `Arc` is the same thing.
+    ///
+    /// [`Patch::tick_block`](crate::graph::Patch::tick_block) runs a node through a whole
+    /// block before the next one starts, which would hand those draws out in a different
+    /// order. Every node that returns `true` here is therefore run sample by sample, in
+    /// execution order, together with the others (and whatever lies between them), so
+    /// they see exactly what a run of `tick`s shows them. One such node on its own needs
+    /// no special treatment, and neither does reading state nothing changes during a call
+    /// (an `AtomicF64` a host sets between calls, an audio input stream with its own
+    /// read cursor).
+    ///
+    /// The default is `false`: a module's state is its own. Asked at compile time.
+    fn shares_state(&self) -> bool {
+        false
     }
 
     /// Process a block of samples (optional optimization).
