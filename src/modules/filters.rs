@@ -351,20 +351,20 @@ impl GraphModule for DiodeLadderFilter {
         // k·output term makes the cascade an implicit system; rather than reading
         // the previous sample's output (a full unit delay that detunes resonance
         // and self-oscillation pitch), we approximate the zero-delay solution with
-        // a short fixed-point iteration. Two passes over the (nonlinear) cascade
-        // with the stage states held fixed get the feedback estimate close to the
-        // converged value; the diode saturation on the feedback keeps it bounded,
-        // so it is stable even at maximum resonance. Documented as a 2-iteration
+        // a fixed-point step. One estimating pass over the (nonlinear) cascade, with
+        // the stage states held fixed, runs from last sample's stage-4 output; the
+        // commit pass then takes its feedback from that estimated output. A second
+        // estimating pass refines the estimate only slightly (measured on Auracle's
+        // presets: at most a tenth of a feature's spread, on one resonant preset), so
+        // it is not worth a third of the cascade's cost. The diode saturation on the feedback keeps it bounded,
+        // so it is stable even at maximum resonance. Documented as a 1-iteration
         // fixed-point approximation of the true ZDF ladder solve.
-        let mut fb_norm = self.feedback; // start from last sample's stage-4 output
-        for _ in 0..2 {
-            let fb = Self::diode_sat(fb_norm * k);
-            let u = input_driven - fb * 5.0;
-            let (y, _) = Self::run_cascade(u, &self.stages, big_g);
-            fb_norm = y[3] / 5.0;
-        }
+        let fb = Self::diode_sat(self.feedback * k); // last sample's stage-4 output
+        let u = input_driven - fb * 5.0;
+        let (y, _) = Self::run_cascade(u, &self.stages, big_g);
+        let fb_norm = y[3] / 5.0;
 
-        // Final pass with the converged feedback; this one commits the state.
+        // Commit pass with the estimated feedback; this one commits the state.
         let fb = Self::diode_sat(fb_norm * k);
         let u = input_driven - fb * 5.0;
         let (y, new_s) = Self::run_cascade(u, &self.stages, big_g);
@@ -1198,6 +1198,32 @@ mod tests {
             (0.01..20.0).contains(&r),
             "SVF self-oscillation not sustained/bounded after 1s: rms {r}"
         );
+    }
+
+    #[test]
+    fn test_diode_ladder_max_resonance_max_drive_bounded() {
+        // Saturation bounds the feedback to ±5 V and the cascade is a chain of
+        // unity-DC-gain one-poles, so a ±5 V input plus ±5 V feedback cannot
+        // push any stage past ~10 V; 12 V is a generous ceiling.
+        let sr = 48000.0;
+        let mut f = DiodeLadderFilter::new(sr);
+        let mut out = PortValues::new();
+        let mut peak = 0.0f64;
+        for n in 0..(sr as usize * 3) {
+            let x = if (n / 50) % 2 == 0 { 5.0 } else { -5.0 };
+            let mut inp = PortValues::new();
+            inp.set(0, x);
+            inp.set(1, 0.6);
+            inp.set(2, 1.0);
+            inp.set(6, 1.0);
+            f.tick(&inp, &mut out);
+            for port in 10..=13 {
+                let y = out.get(port).unwrap();
+                assert!(y.is_finite(), "non-finite at sample {n}");
+                peak = peak.max(y.abs());
+            }
+        }
+        assert!(peak <= 12.0, "peak {peak} exceeded bound");
     }
 
     /// Q011/Q012: the resonant peak of the ladder must sit at the set cutoff.
