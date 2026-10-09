@@ -8,7 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This changelog is auto-generated from git history. Run `make changelog` to update.
 Sections above the auto-generated marker are hand-written and are preserved.
 
-## [Unreleased]
+## [0.5.0] - 2026-10-09
+
+A performance release: `Patch::tick_block` walks the graph once per block instead of
+once per sample, and the diode ladder resolves its feedback in one pass. A block renders
+exactly what as many `tick`s would, bit for bit; `tick` itself is unchanged. The API
+grows, for module authors, by a block hook (`GraphModule::tick_frames`, with
+`BlockInputs` and `BlockOutputs`) and a way to name shared state
+(`GraphModule::shares_state`, `SharedState`); both default to what every module did
+before. Every patch renders bit for bit as in 0.4.1 except those with a
+`DiodeLadderFilter`, whose output moves slightly. One behaviour note for third-party
+modules: one that draws from `quiver::rng` (or shares any other state with another node)
+must say so through `shares_state`, or `tick_block` may hand two such nodes their draws
+in a different order than `tick` would.
 
 ### Performance
 
