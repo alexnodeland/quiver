@@ -481,6 +481,51 @@ fn bench_buffer_processing(c: &mut Criterion) {
     group.finish();
 }
 
+/// One buffer by `tick` per sample against the same buffer by `tick_block`, which walks the
+/// graph once per block of frames (and runs each built-in module's per-sample code in a
+/// loop) rather than once per sample. The two render the same bits.
+fn bench_tick_block(c: &mut Criterion) {
+    type Create = fn(f64) -> Patch;
+    let mut group = c.benchmark_group("tick_block");
+    let patches: [(&str, Create); 3] = [
+        ("simple_patch", create_simple_patch),
+        ("complex_patch", create_complex_patch),
+        ("heavy_fx_patch", create_heavy_fx_patch),
+    ];
+    for (patch_name, create) in patches {
+        for buffer_size in [64usize, 128, 512] {
+            let name = format!("{patch_name}/{buffer_size}samples");
+            group.throughput(Throughput::Elements(buffer_size as u64));
+            group.bench_with_input(
+                BenchmarkId::new("tick", &name),
+                &buffer_size,
+                |b, &buf_size| {
+                    let mut patch = create(44100.0);
+                    b.iter(|| {
+                        for _ in 0..buf_size {
+                            black_box(patch.tick());
+                        }
+                    });
+                },
+            );
+            group.bench_with_input(
+                BenchmarkId::new("tick_block", &name),
+                &buffer_size,
+                |b, &buf_size| {
+                    let mut patch = create(44100.0);
+                    let mut left = vec![0.0; buf_size];
+                    let mut right = vec![0.0; buf_size];
+                    b.iter(|| {
+                        patch.tick_block(&mut left, &mut right);
+                        black_box((&left, &right));
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 fn bench_buffer_processing_complex(c: &mut Criterion) {
     let mut group = c.benchmark_group("buffer_processing_complex");
 
@@ -1493,6 +1538,7 @@ criterion_group!(
     buffer_benches,
     bench_buffer_processing,
     bench_buffer_processing_complex,
+    bench_tick_block,
 );
 
 criterion_group!(

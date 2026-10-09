@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This changelog is auto-generated from git history. Run `make changelog` to update.
 Sections above the auto-generated marker are hand-written and are preserved.
 
+## [Unreleased]
+
+### Performance
+
+- **`Patch::tick_block` walks the graph once per block, not once per sample.** It still
+  renders exactly what as many calls to `tick` would, bit for bit, and leaves every output
+  port where they would (so `get_output_value` and observers read the same values after
+  it). Inside a block of up to 64 frames each node now runs through every frame before
+  the next starts, reading its inputs as rows its sources filled, and the built-in modules
+  most patches are made of (`Vco`, `Lfo`, `NoiseGenerator`, `Supersaw`, `Wavetable`,
+  `FormantOsc`, `KarplusStrong`, `Svf`, `ParametricEq`, `Adsr`, `Vca`, `Limiter`,
+  `Compressor`, `NoiseGate`, `EnvelopeFollower`, `Mixer`, `Offset`, `Attenuverter`,
+  `SlewLimiter`, `SampleAndHold`, `StereoOutput`, the delays, `Chorus`, `Tremolo`,
+  `Vibrato`, `Reverb`, the quantizers, `Clock`, `Euclidean`, `Crossfader`, `Comparator`,
+  `Min`, `Max`, `Bitcrusher`, `Distortion`, `RingModulator`, `Wavefolder`,
+  `ExternalInput`) run their own per-sample code in a loop, with no `PortValues` and no
+  dynamic call per sample. Nodes on a feedback loop, and nodes that draw from the
+  thread-wide random stream, run sample by sample as a group, as `tick` runs them. A
+  render of Auracle's benchmark set by `tick_block` takes 35 to 39% less CPU time in wasm
+  (under node) and about 35% less natively than the same render by `tick` on 0.4.1, with
+  the same samples bit for bit; `tick` itself is unchanged.
+- New, for module authors: `GraphModule::tick_frames`, a block hook with a default that
+  declines (the patch then runs `tick_masked` frame by frame, so no implementor breaks),
+  with its buffers `BlockInputs` and `BlockOutputs`; and `GraphModule::shares_state`,
+  which a module that draws from the thread-wide random stream, or shares any other state
+  with another node, returns `true` from, so that `tick_block` keeps it in step with the
+  others. Its default is `false`: a third-party module that draws from
+  `quiver::rng::random` in two nodes of one patch should override it, or `tick_block`
+  will hand the draws out in a different order than `tick`.
+
 ## [0.4.1] - unreleased
 
 A performance release: the diode ladder's saturation and the per-sample graph walk cost
